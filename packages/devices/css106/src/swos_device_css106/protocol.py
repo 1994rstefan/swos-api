@@ -19,6 +19,9 @@ from swos_core.models import (
     DeviceIdentity,
     DeviceNameUpdate,
     ForwardingInfo,
+    ForwardingMatrixUpdate,
+    ForwardingMirroringUpdate,
+    ForwardingPortPolicyUpdate,
     HostEntry,
     HostEntryType,
     IgmpGroup,
@@ -36,8 +39,10 @@ from swos_core.models import (
     PortStatistics,
     PortTrafficStatistics,
     PortVlanInfo,
+    RstpBridgeUpdate,
     RstpCostMode,
     RstpInfo,
+    RstpPortEnableUpdate,
     RstpPortInfo,
     RstpPortType,
     RstpProtocol,
@@ -110,6 +115,35 @@ class SnmpWriteState:
     raw_community: str
     raw_contact: str
     raw_location: str
+
+
+@dataclass(frozen=True, slots=True)
+class RstpEnableWriteState:
+    """Validated complete writable CSS106 RSTP-enable group."""
+
+    enabled_mask: int
+
+
+@dataclass(frozen=True, slots=True)
+class RstpBridgeWriteState:
+    """Validated complete writable CSS106 bridge group."""
+
+    bridge_priority: int
+    cost_mode: int
+    forward_reserved_multicast: int
+
+
+@dataclass(frozen=True, slots=True)
+class ForwardingWriteState:
+    """Validated complete writable CSS106 forwarding group."""
+
+    destination_masks: tuple[int, ...]
+    lock_mask: int
+    lock_on_first_mask: int
+    mirror_ingress_mask: int
+    mirror_egress_mask: int
+    mirror_target_mask: int
+    egress_rates: tuple[int, ...]
 
 
 def parse_payload(payload: bytes) -> dict[str, SwOSValue]:
@@ -638,6 +672,8 @@ def rstp_from_payloads(
                     role=roles[index],
                     root_path_cost=root_path_costs[index],
                     configured_path_cost=configured_path_costs[index],
+                    point_to_point=point_to_point[index],
+                    edge=edge[index],
                     port_type=(
                         RstpPortType.EDGE
                         if edge[index]
@@ -658,6 +694,68 @@ def rstp_from_payloads(
         )
     except ValidationError as exc:
         raise ProtocolError("CSS106 RSTP response contains invalid values") from exc
+
+
+def rstp_enable_write_state_from_payload(
+    data: dict[str, SwOSValue], identity: DeviceIdentity
+) -> RstpEnableWriteState:
+    """Extract and validate the complete writable RSTP-enable group."""
+
+    port_count = _port_count(identity)
+    _bit_values(data, "ena", port_count)
+    return RstpEnableWriteState(enabled_mask=_integer(data, "ena"))
+
+
+def encode_rstp_port_enable_update(
+    data: dict[str, SwOSValue],
+    identity: DeviceIdentity,
+    update: RstpPortEnableUpdate,
+) -> tuple[bytes, RstpEnableWriteState]:
+    """Encode the complete RSTP-enable group while preserving management port 6."""
+
+    state = rstp_enable_write_state_from_payload(data, identity)
+    _validate_writable_port(update.number, identity)
+    bit = 1 << (update.number - 1)
+    enabled_mask = state.enabled_mask | bit if update.enabled else state.enabled_mask & ~bit
+    desired = replace(state, enabled_mask=enabled_mask)
+    if (state.enabled_mask ^ desired.enabled_mask) & (1 << 5):
+        raise InvalidOperationError("CSS106 RSTP writes cannot change management port 6")
+    return _serialize_rstp_enable_write_state(desired), desired
+
+
+def rstp_bridge_write_state_from_payload(data: dict[str, SwOSValue]) -> RstpBridgeWriteState:
+    """Extract and validate the complete writable bridge group."""
+
+    cost_modes = tuple(RstpCostMode)
+    return RstpBridgeWriteState(
+        bridge_priority=_bounded_integer(data, "prio", minimum=0, maximum=0xFFFF),
+        cost_mode=_bounded_integer(data, "cost", minimum=0, maximum=len(cost_modes) - 1),
+        forward_reserved_multicast=int(_boolean(data, "frmc")),
+    )
+
+
+def encode_rstp_bridge_update(
+    data: dict[str, SwOSValue], update: RstpBridgeUpdate
+) -> tuple[bytes, RstpBridgeWriteState]:
+    """Encode the complete bridge group while preserving omitted settings."""
+
+    state = rstp_bridge_write_state_from_payload(data)
+    cost_modes = tuple(RstpCostMode)
+    desired = replace(
+        state,
+        bridge_priority=(
+            state.bridge_priority if update.bridge_priority is None else update.bridge_priority
+        ),
+        cost_mode=(
+            state.cost_mode if update.cost_mode is None else cost_modes.index(update.cost_mode)
+        ),
+        forward_reserved_multicast=(
+            state.forward_reserved_multicast
+            if update.forward_reserved_multicast is None
+            else int(update.forward_reserved_multicast)
+        ),
+    )
+    return _serialize_rstp_bridge_write_state(desired), desired
 
 
 def snmp_from_payload(data: dict[str, SwOSValue]) -> SnmpInfo:
@@ -785,6 +883,135 @@ def forwarding_from_payload(data: dict[str, SwOSValue], identity: DeviceIdentity
         )
     except ValidationError as exc:
         raise ProtocolError("CSS106 forwarding response contains invalid values") from exc
+
+
+def forwarding_write_state_from_payload(
+    data: dict[str, SwOSValue], identity: DeviceIdentity
+) -> ForwardingWriteState:
+    """Extract and validate the complete writable CSS106 forwarding group."""
+
+    port_count = _port_count(identity)
+    destination_masks: list[int] = []
+    for index in range(port_count):
+        field = f"fp{index + 1}"
+        _bit_values(data, field, port_count)
+        destination_masks.append(_integer(data, field))
+    masks: dict[str, int] = {}
+    for field in ("lck", "lckf", "imr", "omr", "mrto"):
+        _bit_values(data, field, port_count)
+        masks[field] = _integer(data, field)
+    if masks["mrto"].bit_count() > 1:
+        raise ProtocolError("CSS106 field 'mrto' must select at most one mirror target")
+    return ForwardingWriteState(
+        destination_masks=tuple(destination_masks),
+        lock_mask=masks["lck"],
+        lock_on_first_mask=masks["lckf"],
+        mirror_ingress_mask=masks["imr"],
+        mirror_egress_mask=masks["omr"],
+        mirror_target_mask=masks["mrto"],
+        egress_rates=_uint32_values(data, "or", port_count),
+    )
+
+
+def encode_forwarding_port_policy_update(
+    data: dict[str, SwOSValue],
+    identity: DeviceIdentity,
+    update: ForwardingPortPolicyUpdate,
+) -> tuple[bytes, ForwardingWriteState]:
+    """Encode a complete forwarding group with only safe per-port policy changes."""
+
+    state = forwarding_write_state_from_payload(data, identity)
+    _validate_forwarding_write_safety(state)
+    _validate_writable_port(update.number, identity)
+    bit = 1 << (update.number - 1)
+    desired = state
+    if update.lock is not None:
+        desired = replace(
+            desired,
+            lock_mask=state.lock_mask | bit if update.lock else state.lock_mask & ~bit,
+        )
+    if update.lock_on_first is not None:
+        desired = replace(
+            desired,
+            lock_on_first_mask=(
+                state.lock_on_first_mask | bit
+                if update.lock_on_first
+                else state.lock_on_first_mask & ~bit
+            ),
+        )
+    if update.egress_rate_limit_bps is not None:
+        rates = list(state.egress_rates)
+        rates[update.number - 1] = (
+            0 if update.egress_rate_limit_bps == "unlimited" else update.egress_rate_limit_bps
+        )
+        desired = replace(desired, egress_rates=tuple(rates))
+    return _serialize_forwarding_write_state(desired), desired
+
+
+def encode_forwarding_matrix_update(
+    data: dict[str, SwOSValue],
+    identity: DeviceIdentity,
+    update: ForwardingMatrixUpdate,
+) -> tuple[bytes, ForwardingWriteState]:
+    """Encode one matrix row without changing any relationship involving port 6."""
+
+    state = forwarding_write_state_from_payload(data, identity)
+    _validate_forwarding_write_safety(state)
+    _validate_writable_port(update.number, identity)
+    port_count = _port_count(identity)
+    _validate_table_ports(
+        update.destination_port_numbers,
+        port_count,
+        f"Forwarding source port {update.number}",
+    )
+    masks = list(state.destination_masks)
+    new_mask = _port_mask(update.destination_port_numbers)
+    if (masks[update.number - 1] ^ new_mask) & (1 << 5):
+        raise InvalidOperationError(
+            "CSS106 forwarding writes cannot alter a destination relationship involving port 6"
+        )
+    masks[update.number - 1] = new_mask
+    desired = replace(state, destination_masks=tuple(masks))
+    return _serialize_forwarding_write_state(desired), desired
+
+
+def encode_forwarding_mirroring_update(
+    data: dict[str, SwOSValue],
+    identity: DeviceIdentity,
+    update: ForwardingMirroringUpdate,
+) -> tuple[bytes, ForwardingWriteState]:
+    """Encode complete mirroring state while excluding management port 6."""
+
+    state = forwarding_write_state_from_payload(data, identity)
+    _validate_forwarding_write_safety(state)
+    _validate_writable_port(update.source_port_number, identity)
+    bit = 1 << (update.source_port_number - 1)
+    desired = state
+    if update.mirror_ingress is not None:
+        desired = replace(
+            desired,
+            mirror_ingress_mask=(
+                state.mirror_ingress_mask | bit
+                if update.mirror_ingress
+                else state.mirror_ingress_mask & ~bit
+            ),
+        )
+    if update.mirror_egress is not None:
+        desired = replace(
+            desired,
+            mirror_egress_mask=(
+                state.mirror_egress_mask | bit
+                if update.mirror_egress
+                else state.mirror_egress_mask & ~bit
+            ),
+        )
+    if update.mirror_target_port is not None:
+        target_mask = 0
+        if update.mirror_target_port != "none":
+            _validate_writable_port(update.mirror_target_port, identity)
+            target_mask = 1 << (update.mirror_target_port - 1)
+        desired = replace(desired, mirror_target_mask=target_mask)
+    return _serialize_forwarding_write_state(desired), desired
 
 
 def igmp_groups_from_payload(
@@ -1065,6 +1292,42 @@ def _serialize_snmp_write_state(state: SnmpWriteState) -> bytes:
         f"ci:'{state.raw_contact}',loc:'{state.raw_location}'}}"
     )
     return payload.encode("ascii")
+
+
+def _serialize_rstp_enable_write_state(state: RstpEnableWriteState) -> bytes:
+    return f"{{ena:0x{state.enabled_mask:02x}}}".encode("ascii")
+
+
+def _serialize_rstp_bridge_write_state(state: RstpBridgeWriteState) -> bytes:
+    return (
+        f"{{prio:0x{state.bridge_priority:04x},cost:0x{state.cost_mode:02x},"
+        f"frmc:0x{state.forward_reserved_multicast:02x}}}"
+    ).encode("ascii")
+
+
+def _serialize_forwarding_write_state(state: ForwardingWriteState) -> bytes:
+    destinations = ",".join(
+        f"fp{index + 1}:0x{mask:02x}" for index, mask in enumerate(state.destination_masks)
+    )
+    rates = ",".join(f"0x{rate:08x}" for rate in state.egress_rates)
+    return (
+        f"{{{destinations},lck:0x{state.lock_mask:02x},"
+        f"lckf:0x{state.lock_on_first_mask:02x},imr:0x{state.mirror_ingress_mask:02x},"
+        f"omr:0x{state.mirror_egress_mask:02x},mrto:0x{state.mirror_target_mask:02x},"
+        f"or:[{rates}]}}"
+    ).encode("ascii")
+
+
+def _validate_forwarding_write_safety(state: ForwardingWriteState) -> None:
+    management_bit = 1 << 5
+    if (
+        state.mirror_ingress_mask & management_bit
+        or state.mirror_egress_mask & management_bit
+        or state.mirror_target_mask & management_bit
+    ):
+        raise InvalidOperationError(
+            "CSS106 forwarding writes require management port 6 to be absent from mirroring"
+        )
 
 
 def _validate_printable_ascii(value: str, label: str, maximum_bytes: int) -> bytes:

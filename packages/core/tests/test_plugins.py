@@ -18,6 +18,9 @@ from swos_core.models import (
     DeviceNameUpdate,
     ForcedPortNegotiation,
     ForwardingInfo,
+    ForwardingMatrixUpdate,
+    ForwardingMirroringUpdate,
+    ForwardingPortPolicyUpdate,
     HostEntry,
     IgmpGroup,
     OperationResult,
@@ -31,7 +34,9 @@ from swos_core.models import (
     PortStatistics,
     PortTrafficStatistics,
     PortVlanInfo,
+    RstpBridgeUpdate,
     RstpInfo,
+    RstpPortEnableUpdate,
     RstpPortInfo,
     SfpInfo,
     SnmpInfo,
@@ -91,6 +96,9 @@ class FakeAdapter:
                     "acl_write",
                     "device_name_write",
                     "forwarding",
+                    "forwarding_matrix_write",
+                    "forwarding_mirroring_write",
+                    "forwarding_port_policy_write",
                     "hosts",
                     "igmp_groups",
                     "port_statistics",
@@ -98,6 +106,8 @@ class FakeAdapter:
                     "port_configuration_write",
                     "port_name_write",
                     "rstp",
+                    "rstp_bridge_write",
+                    "rstp_port_enable_write",
                     "sfp",
                     "snmp",
                     "snmp_metadata_write",
@@ -180,6 +190,8 @@ class FakeAdapter:
                     protocol="rstp",
                     role="designated",
                     root_path_cost=0,
+                    point_to_point=True,
+                    edge=True,
                     port_type="edge",
                     state="forwarding",
                 ),
@@ -273,6 +285,82 @@ class FakeAdapter:
                 }
             ),
         )
+
+    def set_rstp_port_enabled(
+        self,
+        update: RstpPortEnableUpdate,
+        *,
+        expected_current: RstpInfo,
+    ) -> OperationResult[RstpInfo]:
+        before = self.get_rstp()
+        assert expected_current == before
+        ports = tuple(
+            port.model_copy(update={"enabled": update.enabled})
+            if port.number == update.number
+            else port
+            for port in before.ports
+        )
+        return OperationResult[RstpInfo](
+            changed=ports != before.ports,
+            value=before.model_copy(update={"ports": ports}),
+        )
+
+    def set_rstp_bridge(
+        self,
+        update: RstpBridgeUpdate,
+        *,
+        expected_current: RstpInfo,
+    ) -> OperationResult[RstpInfo]:
+        before = self.get_rstp()
+        assert expected_current == before
+        changes = update.model_dump(exclude_none=True)
+        value = before.model_copy(update=changes)
+        return OperationResult[RstpInfo](changed=value != before, value=value)
+
+    def set_forwarding_port_policy(
+        self,
+        update: ForwardingPortPolicyUpdate,
+        *,
+        expected_current: ForwardingInfo,
+    ) -> OperationResult[ForwardingInfo]:
+        before = self.get_forwarding()
+        assert expected_current == before
+        changes = update.model_dump(exclude={"number"}, exclude_none=True)
+        if changes.get("egress_rate_limit_bps") == "unlimited":
+            changes["egress_rate_limit_bps"] = None
+        ports = tuple(
+            port.model_copy(update=changes) if port.number == update.number else port
+            for port in before.ports
+        )
+        value = before.model_copy(update={"ports": ports})
+        return OperationResult[ForwardingInfo](changed=value != before, value=value)
+
+    def set_forwarding_matrix(
+        self,
+        update: ForwardingMatrixUpdate,
+        *,
+        expected_current: ForwardingInfo,
+    ) -> OperationResult[ForwardingInfo]:
+        before = self.get_forwarding()
+        assert expected_current == before
+        ports = tuple(
+            port.model_copy(update={"destination_port_numbers": update.destination_port_numbers})
+            if port.number == update.number
+            else port
+            for port in before.ports
+        )
+        value = before.model_copy(update={"ports": ports})
+        return OperationResult[ForwardingInfo](changed=value != before, value=value)
+
+    def set_forwarding_mirroring(
+        self,
+        update: ForwardingMirroringUpdate,
+        *,
+        expected_current: ForwardingInfo,
+    ) -> OperationResult[ForwardingInfo]:
+        before = self.get_forwarding()
+        assert expected_current == before
+        return OperationResult[ForwardingInfo](changed=False, value=before)
 
     def replace_static_hosts(
         self,
@@ -460,6 +548,16 @@ def test_policy_bound_device_rejects_unsupported_feature() -> None:
         device.replace_static_hosts((), expected_current=())
     with pytest.raises(UnsupportedFeatureError, match="acl write"):
         device.replace_acl_rules((), expected_current=())
+    rstp = FakeAdapter(identity()).get_rstp()
+    with pytest.raises(UnsupportedFeatureError, match="rstp port enable write"):
+        device.set_rstp_port_enabled(
+            RstpPortEnableUpdate(number=1, enabled=False), expected_current=rstp
+        )
+    forwarding = FakeAdapter(identity()).get_forwarding()
+    with pytest.raises(UnsupportedFeatureError, match="forwarding port policy write"):
+        device.set_forwarding_port_policy(
+            ForwardingPortPolicyUpdate(number=1, lock=True), expected_current=forwarding
+        )
 
 
 def test_policy_bound_device_authorizes_and_returns_write_result() -> None:
@@ -478,6 +576,15 @@ def test_policy_bound_device_authorizes_and_returns_write_result() -> None:
     )
     hosts = device.replace_static_hosts((), expected_current=())
     rules = device.replace_acl_rules((), expected_current=())
+    rstp_before = device.get_rstp()
+    rstp = device.set_rstp_port_enabled(
+        RstpPortEnableUpdate(number=1, enabled=False), expected_current=rstp_before
+    )
+    forwarding_before = device.get_forwarding()
+    forwarding = device.set_forwarding_port_policy(
+        ForwardingPortPolicyUpdate(number=1, lock=True),
+        expected_current=forwarding_before,
+    )
 
     assert result.changed
     assert result.value.name == "Uplink"
@@ -488,6 +595,8 @@ def test_policy_bound_device_authorizes_and_returns_write_result() -> None:
     assert hosts.value == ()
     assert rules.changed
     assert rules.value == ()
+    assert not rstp.value.ports[0].enabled
+    assert forwarding.value.ports[0].lock
     assert configured.warnings == ()
 
     device_name = device.set_device_name(DeviceNameUpdate(name="Core Switch"))

@@ -6,9 +6,14 @@ from swos_core.models import (
     DeviceConnection,
     DeviceNameUpdate,
     ForcedPortNegotiation,
+    ForwardingMatrixUpdate,
+    ForwardingMirroringUpdate,
+    ForwardingPortPolicyUpdate,
     HostEntry,
     PortConfigurationUpdate,
     PortNameUpdate,
+    RstpBridgeUpdate,
+    RstpPortEnableUpdate,
     SnmpMetadataUpdate,
 )
 from swos_core.plugins import PluginRegistry
@@ -28,8 +33,13 @@ from swos_device_css106.protocol import (
     dynamic_hosts_from_payload,
     encode_acl_rules,
     encode_device_name_update,
+    encode_forwarding_matrix_update,
+    encode_forwarding_mirroring_update,
+    encode_forwarding_port_policy_update,
     encode_port_configuration_update,
     encode_port_name_update,
+    encode_rstp_bridge_update,
+    encode_rstp_port_enable_update,
     encode_snmp_metadata_update,
     encode_static_hosts,
     forwarding_from_payload,
@@ -130,6 +140,23 @@ def forwarding_fixture_payload() -> bytes:
     return FORWARDING_FIXTURE.read_bytes()
 
 
+def updated_forwarding_payload(
+    *,
+    lock: bytes = b"00",
+    lock_on_first: bytes = b"00",
+    rates: bytes | None = None,
+) -> bytes:
+    payload = forwarding_fixture_payload()
+    payload = payload.replace(b"lck:0x00", b"lck:0x" + lock)
+    payload = payload.replace(b"lckf:0x00", b"lckf:0x" + lock_on_first)
+    if rates is not None:
+        payload = payload.replace(
+            b"or:[0x00000000,0x00000000,0x00000000,0x00000000,0x00000000,0x00000000]",
+            rates,
+        )
+    return payload
+
+
 def vlan_fixture_payload() -> bytes:
     return VLAN_FIXTURE.read_bytes()
 
@@ -215,6 +242,11 @@ def test_probe_and_adapter_normalize_system_data() -> None:
     assert info.discovery_protocol_port_numbers == (1, 2, 3, 4, 5, 6)
     assert info.health is not None
     assert info.health.temperature_celsius is None
+    assert adapter.capabilities.supports("rstp_port_enable_write")
+    assert adapter.capabilities.supports("forwarding_port_policy_write")
+    assert not adapter.capabilities.supports("rstp_bridge_write")
+    assert not adapter.capabilities.supports("forwarding_matrix_write")
+    assert not adapter.capabilities.supports("forwarding_mirroring_write")
     assert adapter.capabilities.supports("static_hosts_write")
     assert not adapter.capabilities.supports("acl_write")
     assert transport.requests == [("GET", "/sys.b"), ("GET", "/sys.b")]
@@ -794,6 +826,8 @@ def test_shared_decoder_model_gates_rb260gsp_health_and_poe_fields() -> None:
     assert not adapter.capabilities.supports("port_name_write")
     assert not adapter.capabilities.supports("port_configuration_write")
     assert not adapter.capabilities.supports("device_name_write")
+    assert not adapter.capabilities.supports("rstp_port_enable_write")
+    assert not adapter.capabilities.supports("forwarding_port_policy_write")
     assert not adapter.capabilities.supports("snmp_metadata_write")
     assert not adapter.capabilities.supports("static_hosts_write")
     assert not adapter.capabilities.supports("acl_write")
@@ -909,6 +943,191 @@ def test_adapter_normalizes_forwarding_policy() -> None:
     data["mrto"] = 3
     with pytest.raises(ProtocolError, match="at most one"):
         forwarding_from_payload(data, identity)
+
+
+def test_forwarding_policy_encoder_posts_complete_group_and_preserves_port_6() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+
+    content, desired = encode_forwarding_port_policy_update(
+        parse_payload(forwarding_fixture_payload()),
+        identity,
+        ForwardingPortPolicyUpdate(
+            number=5,
+            lock=True,
+            lock_on_first=True,
+            egress_rate_limit_bps=1_000_000,
+        ),
+    )
+
+    assert content == (
+        b"{fp1:0x3e,fp2:0x3d,fp3:0x3b,fp4:0x37,fp5:0x2f,fp6:0x1f,"
+        b"lck:0x10,lckf:0x10,imr:0x00,omr:0x00,mrto:0x01,"
+        b"or:[0x00000000,0x00000000,0x00000000,0x00000000,0x000f4240,0x00000000]}"
+    )
+    assert desired.destination_masks[5] == 0x1F
+    assert desired.destination_masks[4] & 0x20
+    assert desired.egress_rates[5] == 0
+
+
+def test_forwarding_encoders_guard_every_port_6_relationship() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    data = parse_payload(forwarding_fixture_payload())
+
+    content, desired = encode_forwarding_matrix_update(
+        data,
+        identity,
+        ForwardingMatrixUpdate(number=5, destination_port_numbers=(2, 3, 4, 6)),
+    )
+    assert b"fp5:0x2e" in content
+    assert b"fp6:0x1f" in content
+    assert desired.destination_masks[5] == 0x1F
+
+    with pytest.raises(InvalidOperationError, match="relationship involving port 6"):
+        encode_forwarding_matrix_update(
+            data,
+            identity,
+            ForwardingMatrixUpdate(number=5, destination_port_numbers=(1, 2, 3, 4)),
+        )
+    with pytest.raises(InvalidOperationError, match="management port"):
+        encode_forwarding_matrix_update(
+            data,
+            identity,
+            ForwardingMatrixUpdate.model_construct(
+                number=6, destination_port_numbers=(1, 2, 3, 4, 5)
+            ),
+        )
+    with pytest.raises(InvalidOperationError, match="management port"):
+        encode_forwarding_mirroring_update(
+            data,
+            identity,
+            ForwardingMirroringUpdate.model_construct(
+                source_port_number=6,
+                mirror_ingress=True,
+                mirror_egress=None,
+                mirror_target_port=None,
+            ),
+        )
+    with pytest.raises(InvalidOperationError, match="management port"):
+        encode_forwarding_mirroring_update(
+            data,
+            identity,
+            ForwardingMirroringUpdate(source_port_number=5, mirror_target_port=6),
+        )
+
+    port_6_mirror = parse_payload(forwarding_fixture_payload())
+    port_6_mirror["imr"] = 0x20
+    with pytest.raises(InvalidOperationError, match="absent from mirroring"):
+        encode_forwarding_port_policy_update(
+            port_6_mirror,
+            identity,
+            ForwardingPortPolicyUpdate(number=5, lock=True),
+        )
+
+
+def test_adapter_sets_forwarding_policy_with_stale_noop_and_readback_guards() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    before = forwarding_from_payload(parse_payload(forwarding_fixture_payload()), identity)
+    changed_payload = updated_forwarding_payload(lock=b"10")
+    transport = FakeTransport(
+        (fixture_payload(), forwarding_fixture_payload(), b"", changed_payload)
+    )
+    adapter = CSS106Plugin(transport_factory=lambda connection: transport).create(  # type: ignore[arg-type]
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+
+    result = adapter.set_forwarding_port_policy(
+        ForwardingPortPolicyUpdate(number=5, lock=True), expected_current=before
+    )
+
+    assert result.changed
+    assert result.value.ports[4].lock
+    assert transport.requests == [
+        ("GET", "/sys.b"),
+        ("GET", "/fwd.b"),
+        ("POST", "/fwd.b"),
+        ("GET", "/fwd.b"),
+    ]
+    assert transport.request_details[2][2] == (
+        b"{fp1:0x3e,fp2:0x3d,fp3:0x3b,fp4:0x37,fp5:0x2f,fp6:0x1f,"
+        b"lck:0x10,lckf:0x00,imr:0x00,omr:0x00,mrto:0x01,"
+        b"or:[0x00000000,0x00000000,0x00000000,0x00000000,0x00000000,0x00000000]}"
+    )
+
+    no_op_transport = FakeTransport((fixture_payload(), forwarding_fixture_payload()))
+    no_op_adapter = CSS106Plugin(
+        transport_factory=lambda connection: no_op_transport  # type: ignore[arg-type]
+    ).create(
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+    no_op = no_op_adapter.set_forwarding_port_policy(
+        ForwardingPortPolicyUpdate(number=5, lock=False), expected_current=before
+    )
+    assert not no_op.changed
+    assert no_op_transport.requests == [("GET", "/sys.b"), ("GET", "/fwd.b")]
+
+    stale_transport = FakeTransport((fixture_payload(), forwarding_fixture_payload()))
+    stale_adapter = CSS106Plugin(
+        transport_factory=lambda connection: stale_transport  # type: ignore[arg-type]
+    ).create(
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+    with pytest.raises(InvalidOperationError, match="changed since the expected baseline"):
+        stale_adapter.set_forwarding_port_policy(
+            ForwardingPortPolicyUpdate(number=5, lock=True),
+            expected_current=before.model_copy(update={"mirror_target_port": None}),
+        )
+    assert stale_transport.requests == [("GET", "/sys.b"), ("GET", "/fwd.b")]
+
+    mismatch_transport = FakeTransport(
+        (fixture_payload(), forwarding_fixture_payload(), b"", forwarding_fixture_payload())
+    )
+    mismatch_adapter = CSS106Plugin(
+        transport_factory=lambda connection: mismatch_transport  # type: ignore[arg-type]
+    ).create(
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+    with pytest.raises(ProtocolError, match="complete-group read-back"):
+        mismatch_adapter.set_forwarding_port_policy(
+            ForwardingPortPolicyUpdate(number=5, lock=True), expected_current=before
+        )
+
+
+def test_forwarding_cleanup_rejects_concurrent_change_after_verified_mutation() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    expected_post_payload = updated_forwarding_payload(lock=b"10")
+    expected_post = forwarding_from_payload(parse_payload(expected_post_payload), identity)
+    concurrent_payload = updated_forwarding_payload(lock=b"10", lock_on_first=b"01")
+    transport = FakeTransport((fixture_payload(), concurrent_payload))
+    adapter = CSS106Plugin(transport_factory=lambda connection: transport).create(  # type: ignore[arg-type]
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+
+    with pytest.raises(InvalidOperationError, match="changed since the expected baseline"):
+        adapter.set_forwarding_port_policy(
+            ForwardingPortPolicyUpdate(number=5, lock=False),
+            expected_current=expected_post,
+        )
+
+    assert transport.requests == [("GET", "/sys.b"), ("GET", "/fwd.b")]
 
 
 def test_adapter_normalizes_dynamic_igmp_groups() -> None:
@@ -1289,11 +1508,216 @@ def test_adapter_normalizes_rstp_state() -> None:
     assert info.ports[0].protocol.value == "rstp"
     assert info.ports[0].role.value == "designated"
     assert info.ports[0].configured_path_cost == 4
+    assert info.ports[0].point_to_point
+    assert info.ports[0].edge
     assert info.ports[0].port_type.value == "edge"
     assert info.ports[0].state.value == "forwarding"
     assert info.ports[4].port_type.value == "point_to_point"
     assert info.ports[4].state.value == "discarding"
     assert transport.requests == [("GET", "/sys.b"), ("GET", "/rstp.b")]
+
+
+def test_rstp_encoders_emit_complete_groups_and_preserve_port_6() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+
+    content, desired = encode_rstp_port_enable_update(
+        parse_payload(rstp_fixture_payload()),
+        identity,
+        RstpPortEnableUpdate(number=5, enabled=False),
+    )
+    assert content == b"{ena:0x2f}"
+    assert desired.enabled_mask & 0x20
+
+    bridge_content, bridge_desired = encode_rstp_bridge_update(
+        parse_payload(rstp_system_fixture_payload()),
+        RstpBridgeUpdate(
+            bridge_priority=0x9000,
+            cost_mode="long",
+            forward_reserved_multicast=True,
+        ),
+    )
+    assert bridge_content == b"{prio:0x9000,cost:0x01,frmc:0x01}"
+    assert bridge_desired.bridge_priority == 0x9000
+
+    with pytest.raises(InvalidOperationError, match="management port"):
+        encode_rstp_port_enable_update(
+            parse_payload(rstp_fixture_payload()),
+            identity,
+            RstpPortEnableUpdate.model_construct(number=6, enabled=False),
+        )
+
+
+def test_adapter_sets_rstp_enable_with_baseline_noop_and_readback_guards() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    before = rstp_from_payloads(
+        parse_payload(rstp_fixture_payload()),
+        parse_payload(rstp_system_fixture_payload()),
+        identity,
+    )
+    changed_payload = rstp_fixture_payload().replace(b"ena:0x3f", b"ena:0x2f")
+    transport = FakeTransport(
+        (
+            rstp_system_fixture_payload(),
+            rstp_fixture_payload(),
+            b"",
+            rstp_system_fixture_payload(),
+            changed_payload,
+        )
+    )
+    adapter = CSS106Plugin(transport_factory=lambda connection: transport).create(  # type: ignore[arg-type]
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+
+    result = adapter.set_rstp_port_enabled(
+        RstpPortEnableUpdate(number=5, enabled=False), expected_current=before
+    )
+
+    assert result.changed
+    assert not result.value.ports[4].enabled
+    assert result.value.ports[5].enabled
+    assert transport.requests == [
+        ("GET", "/sys.b"),
+        ("GET", "/rstp.b"),
+        ("POST", "/rstp.b"),
+        ("GET", "/sys.b"),
+        ("GET", "/rstp.b"),
+    ]
+    assert transport.request_details[2][2] == b"{ena:0x2f}"
+
+    no_op_transport = FakeTransport((rstp_system_fixture_payload(), rstp_fixture_payload()))
+    no_op_adapter = CSS106Plugin(
+        transport_factory=lambda connection: no_op_transport  # type: ignore[arg-type]
+    ).create(
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+    no_op = no_op_adapter.set_rstp_port_enabled(
+        RstpPortEnableUpdate(number=5, enabled=True), expected_current=before
+    )
+    assert not no_op.changed
+    assert no_op_transport.requests == [("GET", "/sys.b"), ("GET", "/rstp.b")]
+
+    stale_transport = FakeTransport((rstp_system_fixture_payload(), rstp_fixture_payload()))
+    stale_adapter = CSS106Plugin(
+        transport_factory=lambda connection: stale_transport  # type: ignore[arg-type]
+    ).create(
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+    stale = before.model_copy(
+        update={
+            "ports": (
+                *before.ports[:4],
+                before.ports[4].model_copy(update={"enabled": False}),
+                before.ports[5],
+            )
+        }
+    )
+    with pytest.raises(InvalidOperationError, match="changed since the expected baseline"):
+        stale_adapter.set_rstp_port_enabled(
+            RstpPortEnableUpdate(number=5, enabled=False), expected_current=stale
+        )
+    assert stale_transport.requests == [("GET", "/sys.b"), ("GET", "/rstp.b")]
+
+    mismatch_transport = FakeTransport(
+        (
+            rstp_system_fixture_payload(),
+            rstp_fixture_payload(),
+            b"",
+            rstp_system_fixture_payload(),
+            rstp_fixture_payload(),
+        )
+    )
+    mismatch_adapter = CSS106Plugin(
+        transport_factory=lambda connection: mismatch_transport  # type: ignore[arg-type]
+    ).create(
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+    with pytest.raises(ProtocolError, match="read-back verification"):
+        mismatch_adapter.set_rstp_port_enabled(
+            RstpPortEnableUpdate(number=5, enabled=False), expected_current=before
+        )
+
+
+def test_rstp_precondition_distinguishes_wire_flags_with_same_normalized_type() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    expected = rstp_from_payloads(
+        parse_payload(rstp_fixture_payload()),
+        parse_payload(rstp_system_fixture_payload()),
+        identity,
+    )
+    concurrent_payload = rstp_fixture_payload().replace(b"p2p:0x3f", b"p2p:0x3e")
+    concurrent = rstp_from_payloads(
+        parse_payload(concurrent_payload),
+        parse_payload(rstp_system_fixture_payload()),
+        identity,
+    )
+    assert expected.ports[0].port_type == concurrent.ports[0].port_type
+    assert expected.ports[0].point_to_point
+    assert not concurrent.ports[0].point_to_point
+    assert expected.ports[0].edge and concurrent.ports[0].edge
+    transport = FakeTransport((rstp_system_fixture_payload(), concurrent_payload))
+    adapter = CSS106Plugin(transport_factory=lambda connection: transport).create(  # type: ignore[arg-type]
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+
+    with pytest.raises(InvalidOperationError, match="changed since the expected baseline"):
+        adapter.set_rstp_port_enabled(
+            RstpPortEnableUpdate(number=5, enabled=False), expected_current=expected
+        )
+
+    assert transport.requests == [("GET", "/sys.b"), ("GET", "/rstp.b")]
+
+
+def test_adapter_bridge_write_is_complete_and_verified_but_not_advertised() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    before = rstp_from_payloads(
+        parse_payload(rstp_fixture_payload()),
+        parse_payload(rstp_system_fixture_payload()),
+        identity,
+    )
+    changed_system = rstp_system_fixture_payload().replace(b"prio:0x8000", b"prio:0x9000")
+    transport = FakeTransport(
+        (
+            rstp_system_fixture_payload(),
+            rstp_fixture_payload(),
+            b"",
+            changed_system,
+            rstp_fixture_payload(),
+        )
+    )
+    adapter = CSS106Plugin(transport_factory=lambda connection: transport).create(  # type: ignore[arg-type]
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+
+    result = adapter.set_rstp_bridge(
+        RstpBridgeUpdate(bridge_priority=0x9000), expected_current=before
+    )
+
+    assert result.changed
+    assert result.value.bridge_priority == 0x9000
+    assert transport.request_details[2][2] == b"{prio:0x9000,cost:0x00,frmc:0x00}"
+    assert not adapter.capabilities.supports("rstp_bridge_write")
 
 
 def test_rstp_decoder_handles_all_combined_states_and_rejects_roles() -> None:
@@ -1316,11 +1740,17 @@ def test_rstp_decoder_handles_all_combined_states_and_rejects_roles() -> None:
     assert info.ports[0].port_type.value == "shared"
     assert info.ports[0].state.value == "discarding"
     assert info.ports[1].port_type.value == "point_to_point"
+    assert info.ports[1].point_to_point
+    assert not info.ports[1].edge
     assert info.ports[1].state.value == "learning"
     assert info.ports[1].enabled
     assert info.ports[2].port_type.value == "edge"
+    assert not info.ports[2].point_to_point
+    assert info.ports[2].edge
     assert info.ports[2].state.value == "forwarding"
     assert info.ports[3].port_type.value == "edge"
+    assert info.ports[3].point_to_point
+    assert info.ports[3].edge
     assert info.ports[3].state.value == "forwarding"
     assert info.ports[5].root_path_cost == 5
     assert info.ports[5].configured_path_cost == 4

@@ -358,6 +358,55 @@ class PortForwardingInfo(BaseModel):
     egress_rate_limit_bps: int | None = Field(default=None, ge=1)
 
 
+class ForwardingPortPolicyUpdate(BaseModel):
+    """Desired lock and egress-rate changes for one non-management port."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    number: int = Field(ge=1)
+    lock: bool | None = None
+    lock_on_first: bool | None = None
+    egress_rate_limit_bps: (
+        Annotated[int, Field(ge=1, le=0xFFFFFFFF)] | Literal["unlimited"] | None
+    ) = None
+
+    @model_validator(mode="after")
+    def validate_non_empty_update(self) -> Self:
+        if self.lock is None and self.lock_on_first is None and self.egress_rate_limit_bps is None:
+            raise ValueError("at least one forwarding port policy change is required")
+        return self
+
+
+class ForwardingMatrixUpdate(BaseModel):
+    """Desired forwarding destinations for one source port."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    number: int = Field(ge=1)
+    destination_port_numbers: _PortNumbers
+
+
+class ForwardingMirroringUpdate(BaseModel):
+    """Desired mirroring changes, preserving values omitted as ``None``."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    source_port_number: int = Field(ge=1)
+    mirror_ingress: bool | None = None
+    mirror_egress: bool | None = None
+    mirror_target_port: int | Literal["none"] | None = None
+
+    @model_validator(mode="after")
+    def validate_non_empty_update(self) -> Self:
+        if (
+            self.mirror_ingress is None
+            and self.mirror_egress is None
+            and self.mirror_target_port is None
+        ):
+            raise ValueError("at least one forwarding mirroring change is required")
+        return self
+
+
 class ForwardingInfo(BaseModel):
     """Switch-wide forwarding policy."""
 
@@ -564,6 +613,8 @@ class RstpPortInfo(BaseModel):
     protocol: RstpProtocol
     role: RstpRole
     root_path_cost: int = Field(ge=0, le=0xFFFFFFFF)
+    point_to_point: bool
+    edge: bool
     port_type: RstpPortType
     state: RstpState
     configured_path_cost: int = Field(default=0, ge=0, le=0xFFFFFFFF)
@@ -578,6 +629,35 @@ class RstpInfo(BaseModel):
     root_bridge_priority: int = Field(ge=0, le=0xFFFF)
     root_bridge_mac: str = Field(pattern=r"(?i)^(?:[0-9a-f]{2}:){5}[0-9a-f]{2}$")
     ports: tuple[RstpPortInfo, ...]
+
+
+class RstpPortEnableUpdate(BaseModel):
+    """Desired RSTP enabled state for one non-management port."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    number: int = Field(ge=1)
+    enabled: bool
+
+
+class RstpBridgeUpdate(BaseModel):
+    """Desired bridge changes, preserving values omitted as ``None``."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    bridge_priority: int | None = Field(default=None, ge=0, le=0xF000, multiple_of=0x1000)
+    cost_mode: RstpCostMode | None = None
+    forward_reserved_multicast: bool | None = None
+
+    @model_validator(mode="after")
+    def validate_non_empty_update(self) -> Self:
+        if (
+            self.bridge_priority is None
+            and self.cost_mode is None
+            and self.forward_reserved_multicast is None
+        ):
+            raise ValueError("at least one RSTP bridge change is required")
+        return self
 
 
 class SnmpInfo(BaseModel):

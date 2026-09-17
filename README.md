@@ -49,12 +49,15 @@ swosctl port stats --device office
 swosctl port stats --full --device office
 swosctl sfp show --device office
 swosctl forwarding show --device office
+swosctl forwarding configure 5 --lock on --device office
+swosctl forwarding configure 5 --lock-on-first off --egress-unlimited --device office
 swosctl host list --device office
 swosctl host add --mac 02:00:00:00:00:05 --vlan 10 --port 5 --device office
 swosctl host remove --mac 02:00:00:00:00:05 --vlan 10 --device office
 swosctl igmp list --device office
 swosctl acl list --device office
 swosctl rstp show --device office
+swosctl rstp configure 5 --state enabled --device office
 swosctl snmp show --device office
 swosctl snmp metadata set --contact "Network Operations" --device office
 swosctl snmp metadata set --location "" --device office
@@ -109,7 +112,7 @@ Currently supported:
 
 | Device | Product code | Firmware | Build | Operations |
 | --- | --- | --- | --- | --- |
-| RB260GS | `CSS106-5G-1S` | `2.19` | `0x6a181cd5` | Complete local reads; guarded port, name, SNMP metadata, and static-host writes |
+| RB260GS | `CSS106-5G-1S` | `2.19` | `0x6a181cd5` | Complete local reads; guarded port, RSTP enable, forwarding policy, name, SNMP metadata, and static-host writes |
 
 The supported read surface includes system, management, health, port
 configuration/state, complete statistics, SFP diagnostics, forwarding, port
@@ -122,6 +125,14 @@ relevant writable state after the change. Static-host mutations also require the
 fresh adapter state to match the caller's expected baseline. Static-host targets
 are limited to Ethernet ports 1-5; port 6 is reserved for SFP management. SNMP
 writes preserve the raw enabled and community fields read from the device.
+
+Per-port RSTP enable and forwarding lock, lock-on-first, and egress-rate writes
+are exposed for ports 1-5. They require the adapter's fresh configuration to
+match the CLI baseline, preserve the complete endpoint group, skip no-ops, and
+verify complete-group readback. Port 6's RSTP bit, forwarding row, and every
+destination relationship involving port 6 are immutable. Port 6 cannot be a
+mirror source or target. Bridge-global, forwarding-matrix, and mirroring writes
+remain capability-disabled pending dedicated hardware validation.
 
 Guarded ACL replacement and typed CLI mutation commands are implemented, but
 the exact CSS106 profile does not advertise `acl_write`. ACL writes remain

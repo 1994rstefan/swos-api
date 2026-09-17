@@ -1,14 +1,17 @@
 import os
+from typing import Literal
 
 import pytest
 from swos_core import (
     DeviceConnection,
     DeviceNameUpdate,
+    ForwardingPortPolicyUpdate,
     HostEntry,
     HostEntryType,
     PluginRegistry,
     PortConfigurationUpdate,
     PortNameUpdate,
+    RstpPortEnableUpdate,
     SnmpMetadataUpdate,
 )
 from swos_core.safety import FirmwareSafetyPolicy
@@ -163,6 +166,7 @@ def test_rb260gs_219_static_host_write_and_restore_empty_table() -> None:
         vlan_id=1,
         port_numbers=(5,),
     )
+    changed = None
 
     try:
         changed = device.replace_static_hosts((temporary,), expected_current=original)
@@ -172,12 +176,159 @@ def test_rb260gs_219_static_host_write_and_restore_empty_table() -> None:
             host for host in device.get_hosts() if host.entry_type is HostEntryType.STATIC
         ) == (temporary,)
     finally:
-        cleanup_current = tuple(
-            host for host in device.get_hosts() if host.entry_type is HostEntryType.STATIC
+        if changed is not None:
+            restored = device.replace_static_hosts((), expected_current=changed.value)
+            assert restored.value == ()
+            assert not any(host.entry_type is HostEntryType.STATIC for host in device.get_hosts())
+
+
+@pytest.mark.integration
+@pytest.mark.destructive
+def test_rb260gs_219_rstp_port_5_enable_write_and_restore() -> None:
+    connection = DeviceConnection(
+        url=os.environ.get("SWOS_INTEGRATION_URL", "http://192.168.88.1"),
+        username=os.environ.get("SWOS_INTEGRATION_USERNAME", "admin"),
+        password=os.environ.get("SWOS_INTEGRATION_PASSWORD", ""),
+    )
+    registry = PluginRegistry.discover()
+    identity = registry.probe(connection)
+    device = registry.connect(identity, connection, FirmwareSafetyPolicy())
+    port_number = 5
+    if device.get_ports()[port_number - 1].link_up:
+        pytest.skip("port 5 is link-up; refusing destructive RSTP test")
+    original = device.get_rstp()
+    original_enabled = original.ports[port_number - 1].enabled
+    changed = None
+
+    try:
+        changed = device.set_rstp_port_enabled(
+            RstpPortEnableUpdate(number=port_number, enabled=not original_enabled),
+            expected_current=original,
         )
-        assert cleanup_current in ((), (temporary,)), (
-            "static host table changed unexpectedly; refusing to erase unowned rows"
+        assert changed.changed
+        assert changed.value.ports[port_number - 1].enabled is not original_enabled
+    finally:
+        if changed is not None:
+            restored = device.set_rstp_port_enabled(
+                RstpPortEnableUpdate(number=port_number, enabled=original_enabled),
+                expected_current=changed.value,
+            )
+            assert restored.value.ports[port_number - 1].enabled is original_enabled
+
+
+@pytest.mark.integration
+@pytest.mark.destructive
+def test_rb260gs_219_port_5_lock_write_and_restore() -> None:
+    connection = DeviceConnection(
+        url=os.environ.get("SWOS_INTEGRATION_URL", "http://192.168.88.1"),
+        username=os.environ.get("SWOS_INTEGRATION_USERNAME", "admin"),
+        password=os.environ.get("SWOS_INTEGRATION_PASSWORD", ""),
+    )
+    registry = PluginRegistry.discover()
+    identity = registry.probe(connection)
+    device = registry.connect(identity, connection, FirmwareSafetyPolicy())
+    port_number = 5
+    if device.get_ports()[port_number - 1].link_up:
+        pytest.skip("port 5 is link-up; refusing destructive forwarding test")
+    original = device.get_forwarding()
+    original_lock = original.ports[port_number - 1].lock
+    changed = None
+
+    try:
+        changed = device.set_forwarding_port_policy(
+            ForwardingPortPolicyUpdate(number=port_number, lock=not original_lock),
+            expected_current=original,
         )
-        restored = device.replace_static_hosts((), expected_current=cleanup_current)
-        assert restored.value == ()
-        assert not any(host.entry_type is HostEntryType.STATIC for host in device.get_hosts())
+        assert changed.changed
+        assert changed.value.ports[port_number - 1].lock is not original_lock
+    finally:
+        if changed is not None:
+            restored = device.set_forwarding_port_policy(
+                ForwardingPortPolicyUpdate(number=port_number, lock=original_lock),
+                expected_current=changed.value,
+            )
+            assert restored.value.ports[port_number - 1].lock is original_lock
+
+
+@pytest.mark.integration
+@pytest.mark.destructive
+def test_rb260gs_219_port_5_lock_on_first_write_and_restore() -> None:
+    connection = DeviceConnection(
+        url=os.environ.get("SWOS_INTEGRATION_URL", "http://192.168.88.1"),
+        username=os.environ.get("SWOS_INTEGRATION_USERNAME", "admin"),
+        password=os.environ.get("SWOS_INTEGRATION_PASSWORD", ""),
+    )
+    registry = PluginRegistry.discover()
+    identity = registry.probe(connection)
+    device = registry.connect(identity, connection, FirmwareSafetyPolicy())
+    port_number = 5
+    if device.get_ports()[port_number - 1].link_up:
+        pytest.skip("port 5 is link-up; refusing destructive forwarding test")
+    original = device.get_forwarding()
+    original_lock_on_first = original.ports[port_number - 1].lock_on_first
+    changed = None
+
+    try:
+        changed = device.set_forwarding_port_policy(
+            ForwardingPortPolicyUpdate(
+                number=port_number,
+                lock_on_first=not original_lock_on_first,
+            ),
+            expected_current=original,
+        )
+        assert changed.changed
+        assert changed.value.ports[port_number - 1].lock_on_first is not original_lock_on_first
+    finally:
+        if changed is not None:
+            restored = device.set_forwarding_port_policy(
+                ForwardingPortPolicyUpdate(
+                    number=port_number,
+                    lock_on_first=original_lock_on_first,
+                ),
+                expected_current=changed.value,
+            )
+            assert restored.value.ports[port_number - 1].lock_on_first is original_lock_on_first
+
+
+@pytest.mark.integration
+@pytest.mark.destructive
+def test_rb260gs_219_port_5_egress_rate_write_and_restore() -> None:
+    connection = DeviceConnection(
+        url=os.environ.get("SWOS_INTEGRATION_URL", "http://192.168.88.1"),
+        username=os.environ.get("SWOS_INTEGRATION_USERNAME", "admin"),
+        password=os.environ.get("SWOS_INTEGRATION_PASSWORD", ""),
+    )
+    registry = PluginRegistry.discover()
+    identity = registry.probe(connection)
+    device = registry.connect(identity, connection, FirmwareSafetyPolicy())
+    port_number = 5
+    if device.get_ports()[port_number - 1].link_up:
+        pytest.skip("port 5 is link-up; refusing destructive forwarding test")
+    original = device.get_forwarding()
+    original_rate = original.ports[port_number - 1].egress_rate_limit_bps
+    temporary_rate: int | Literal["unlimited"] = (
+        1_000_000 if original_rate != 1_000_000 else "unlimited"
+    )
+    changed = None
+
+    try:
+        changed = device.set_forwarding_port_policy(
+            ForwardingPortPolicyUpdate(
+                number=port_number,
+                egress_rate_limit_bps=temporary_rate,
+            ),
+            expected_current=original,
+        )
+        assert changed.changed
+        expected_rate = None if temporary_rate == "unlimited" else temporary_rate
+        assert changed.value.ports[port_number - 1].egress_rate_limit_bps == expected_rate
+    finally:
+        if changed is not None:
+            restored = device.set_forwarding_port_policy(
+                ForwardingPortPolicyUpdate(
+                    number=port_number,
+                    egress_rate_limit_bps=("unlimited" if original_rate is None else original_rate),
+                ),
+                expected_current=changed.value,
+            )
+            assert restored.value.ports[port_number - 1].egress_rate_limit_bps == original_rate

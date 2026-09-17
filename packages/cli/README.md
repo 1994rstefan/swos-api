@@ -25,12 +25,22 @@ swosctl snmp metadata set --contact "Network Operations" --device office
 swosctl snmp metadata set --location "" --device office
 swosctl host add --mac 02:00:00:00:00:05 --vlan 10 --port 5 --device office
 swosctl host remove --mac 02:00:00:00:00:05 --vlan 10 --device office
+swosctl rstp configure 5 --state disabled --device office
+swosctl forwarding configure 5 --lock on --device office
+swosctl forwarding configure 5 --lock-on-first off --egress-rate-bps 1000000 --device office
+swosctl forwarding configure 5 --egress-unlimited --device office
 swosctl -o json port rename 1 Uplink --device office
 ```
 
 Omitted SNMP metadata options preserve their current values. Passing an empty
 string explicitly clears the selected field. Write commands do not prompt for
 confirmation; firmware write authorization is enforced by `swos-core`.
+
+RSTP and forwarding configuration commands are direct, non-interactive
+read/plan/write operations. They pass the initial read as a precondition, so an
+intervening configuration change aborts before POST. Only ports 1-5 are accepted.
+The CSS106 profile advertises RSTP enable plus lock, lock-on-first, and egress
+rate; bridge-global, matrix, and mirroring mutation remains unavailable.
 
 Static-host add updates the exact MAC/VLAN key in place and accepts repeatable
 `--port` options restricted to ports 1-5. CLI table mutations pass their read

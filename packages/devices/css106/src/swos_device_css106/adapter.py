@@ -12,6 +12,9 @@ from swos_core.models import (
     DeviceIdentity,
     DeviceNameUpdate,
     ForwardingInfo,
+    ForwardingMatrixUpdate,
+    ForwardingMirroringUpdate,
+    ForwardingPortPolicyUpdate,
     HostEntry,
     IgmpGroup,
     OperationResult,
@@ -20,7 +23,9 @@ from swos_core.models import (
     PortNameUpdate,
     PortStatistics,
     PortVlanInfo,
+    RstpBridgeUpdate,
     RstpInfo,
+    RstpPortEnableUpdate,
     SfpInfo,
     SnmpInfo,
     SnmpMetadataUpdate,
@@ -31,15 +36,23 @@ from swos_core.transport import HttpTransport
 
 from swos_device_css106.protocol import (
     MAX_PAYLOAD_BYTES,
+    ForwardingWriteState,
+    SwOSValue,
     acl_rules_from_payload,
     dynamic_hosts_from_payload,
     encode_acl_rules,
     encode_device_name_update,
+    encode_forwarding_matrix_update,
+    encode_forwarding_mirroring_update,
+    encode_forwarding_port_policy_update,
     encode_port_configuration_update,
     encode_port_name_update,
+    encode_rstp_bridge_update,
+    encode_rstp_port_enable_update,
     encode_snmp_metadata_update,
     encode_static_hosts,
     forwarding_from_payload,
+    forwarding_write_state_from_payload,
     identity_from_system,
     igmp_groups_from_payload,
     link_write_state_from_payload,
@@ -48,6 +61,8 @@ from swos_device_css106.protocol import (
     port_statistics_from_payload,
     port_vlans_from_forwarding_payload,
     ports_from_link_payload,
+    rstp_bridge_write_state_from_payload,
+    rstp_enable_write_state_from_payload,
     rstp_from_payloads,
     sfp_from_payload,
     snmp_from_payload,
@@ -100,6 +115,8 @@ class CSS106Adapter:
                     "device_name_write",
                     "port_configuration_write",
                     "port_name_write",
+                    "forwarding_port_policy_write",
+                    "rstp_port_enable_write",
                     "snmp_metadata_write",
                     "static_hosts_write",
                 }
@@ -400,6 +417,111 @@ class CSS106Adapter:
                 raise ProtocolError("CSS106 SNMP metadata write failed read-back verification")
         return OperationResult[SnmpInfo](changed=True, value=snmp_from_payload(after_data))
 
+    def set_rstp_port_enabled(
+        self,
+        update: RstpPortEnableUpdate,
+        *,
+        expected_current: RstpInfo,
+    ) -> OperationResult[RstpInfo]:
+        """Set one RSTP enable bit with baseline, identity, and port-6 guards."""
+
+        with self._transport_factory(self._connection) as transport:
+            before, _, before_rstp_data = self._read_rstp(transport)
+            if _rstp_configuration(before) != _rstp_configuration(expected_current):
+                raise InvalidOperationError(
+                    "CSS106 RSTP configuration changed since the expected baseline"
+                )
+            before_state = rstp_enable_write_state_from_payload(before_rstp_data, self._identity)
+            content, desired = encode_rstp_port_enable_update(
+                before_rstp_data, self._identity, update
+            )
+            if desired == before_state:
+                return OperationResult[RstpInfo](changed=False, value=before)
+
+            transport.request(
+                "POST",
+                "/rstp.b",
+                content=content,
+                headers={"Content-Type": "text/plain"},
+                max_response_bytes=MAX_PAYLOAD_BYTES,
+            )
+            after, _, after_rstp_data = self._read_rstp(transport)
+
+        if rstp_enable_write_state_from_payload(after_rstp_data, self._identity) != desired:
+            raise ProtocolError("CSS106 RSTP enable write failed read-back verification")
+        return OperationResult[RstpInfo](changed=True, value=after)
+
+    def set_rstp_bridge(
+        self,
+        update: RstpBridgeUpdate,
+        *,
+        expected_current: RstpInfo,
+    ) -> OperationResult[RstpInfo]:
+        """Set the complete bridge group with baseline and identity guards."""
+
+        with self._transport_factory(self._connection) as transport:
+            before, before_system_data, _ = self._read_rstp(transport)
+            if _rstp_configuration(before) != _rstp_configuration(expected_current):
+                raise InvalidOperationError(
+                    "CSS106 RSTP configuration changed since the expected baseline"
+                )
+            before_state = rstp_bridge_write_state_from_payload(before_system_data)
+            content, desired = encode_rstp_bridge_update(before_system_data, update)
+            if desired == before_state:
+                return OperationResult[RstpInfo](changed=False, value=before)
+
+            transport.request(
+                "POST",
+                "/sys.b",
+                content=content,
+                headers={"Content-Type": "text/plain"},
+                max_response_bytes=MAX_PAYLOAD_BYTES,
+            )
+            after, after_system_data, _ = self._read_rstp(transport)
+
+        if rstp_bridge_write_state_from_payload(after_system_data) != desired:
+            raise ProtocolError("CSS106 RSTP bridge write failed read-back verification")
+        return OperationResult[RstpInfo](changed=True, value=after)
+
+    def set_forwarding_port_policy(
+        self,
+        update: ForwardingPortPolicyUpdate,
+        *,
+        expected_current: ForwardingInfo,
+    ) -> OperationResult[ForwardingInfo]:
+        """Set lock or egress-rate policy using one complete forwarding POST."""
+
+        return self._set_forwarding(
+            expected_current,
+            lambda data: encode_forwarding_port_policy_update(data, self._identity, update),
+        )
+
+    def set_forwarding_matrix(
+        self,
+        update: ForwardingMatrixUpdate,
+        *,
+        expected_current: ForwardingInfo,
+    ) -> OperationResult[ForwardingInfo]:
+        """Set one forwarding row without changing relationships involving port 6."""
+
+        return self._set_forwarding(
+            expected_current,
+            lambda data: encode_forwarding_matrix_update(data, self._identity, update),
+        )
+
+    def set_forwarding_mirroring(
+        self,
+        update: ForwardingMirroringUpdate,
+        *,
+        expected_current: ForwardingInfo,
+    ) -> OperationResult[ForwardingInfo]:
+        """Set mirroring while rejecting management port 6 as source or target."""
+
+        return self._set_forwarding(
+            expected_current,
+            lambda data: encode_forwarding_mirroring_update(data, self._identity, update),
+        )
+
     def replace_static_hosts(
         self,
         hosts: tuple[HostEntry, ...],
@@ -477,6 +599,63 @@ class CSS106Adapter:
         if identity_from_system(parse_payload(system_payload)) != self._identity:
             raise ProtocolError("CSS106 identity changed after device probing")
 
+    def _read_rstp(
+        self, transport: HttpTransport
+    ) -> tuple[RstpInfo, dict[str, SwOSValue], dict[str, SwOSValue]]:
+        system_data = parse_payload(
+            transport.request("GET", "/sys.b", max_response_bytes=MAX_PAYLOAD_BYTES)
+        )
+        if identity_from_system(system_data) != self._identity:
+            raise ProtocolError("CSS106 identity changed after device probing")
+        rstp_data = parse_payload(
+            transport.request("GET", "/rstp.b", max_response_bytes=MAX_PAYLOAD_BYTES)
+        )
+        return (
+            rstp_from_payloads(rstp_data, system_data, self._identity),
+            system_data,
+            rstp_data,
+        )
+
+    def _set_forwarding(
+        self,
+        expected_current: ForwardingInfo,
+        encode: Callable[[dict[str, SwOSValue]], tuple[bytes, ForwardingWriteState]],
+    ) -> OperationResult[ForwardingInfo]:
+        with self._transport_factory(self._connection) as transport:
+            self._verify_identity(transport)
+            before_data = parse_payload(
+                transport.request("GET", "/fwd.b", max_response_bytes=MAX_PAYLOAD_BYTES)
+            )
+            before = forwarding_from_payload(before_data, self._identity)
+            if before != expected_current:
+                raise InvalidOperationError(
+                    "CSS106 forwarding configuration changed since the expected baseline"
+                )
+            before_state = forwarding_write_state_from_payload(before_data, self._identity)
+            content, desired = encode(before_data)
+            if desired == before_state:
+                return OperationResult[ForwardingInfo](changed=False, value=before)
+
+            transport.request(
+                "POST",
+                "/fwd.b",
+                content=content,
+                headers={"Content-Type": "text/plain"},
+                max_response_bytes=MAX_PAYLOAD_BYTES,
+            )
+            after_data = parse_payload(
+                transport.request("GET", "/fwd.b", max_response_bytes=MAX_PAYLOAD_BYTES)
+            )
+
+        if forwarding_write_state_from_payload(after_data, self._identity) != desired:
+            raise ProtocolError(
+                "CSS106 forwarding write failed complete-group read-back verification"
+            )
+        return OperationResult[ForwardingInfo](
+            changed=True,
+            value=forwarding_from_payload(after_data, self._identity),
+        )
+
 
 def _system_configuration(info: SystemInfo) -> tuple[object, ...]:
     return (
@@ -487,6 +666,25 @@ def _system_configuration(info: SystemInfo) -> tuple[object, ...]:
         info.independent_vlan_lookup,
         info.igmp,
         info.discovery_protocol_port_numbers,
+    )
+
+
+def _rstp_configuration(info: RstpInfo) -> tuple[object, ...]:
+    return (
+        info.bridge_priority,
+        info.cost_mode,
+        info.forward_reserved_multicast,
+        tuple(
+            (
+                port.number,
+                port.enabled,
+                port.protocol,
+                port.configured_path_cost,
+                port.point_to_point,
+                port.edge,
+            )
+            for port in info.ports
+        ),
     )
 
 

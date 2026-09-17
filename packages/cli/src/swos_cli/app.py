@@ -20,6 +20,8 @@ from swos_core import (
     DeviceConnection,
     DeviceNameUpdate,
     ForcedPortNegotiation,
+    ForwardingInfo,
+    ForwardingPortPolicyUpdate,
     HostEntry,
     HostEntryType,
     OperationResult,
@@ -29,6 +31,8 @@ from swos_core import (
     PortErrorStatistics,
     PortInfo,
     PortNameUpdate,
+    RstpInfo,
+    RstpPortEnableUpdate,
     SnmpInfo,
     SnmpMetadataUpdate,
     SwOSDevice,
@@ -752,6 +756,85 @@ def forwarding_show(ctx: typer.Context) -> None:
     renderer.success(data, human="\n".join(lines))
 
 
+@forwarding_app.command("configure")
+def forwarding_configure(
+    ctx: typer.Context,
+    number: Annotated[
+        int, typer.Argument(min=1, max=5, help="Ethernet port number to configure (1-5).")
+    ],
+    lock: Annotated[
+        ToggleOption | None, typer.Option("--lock", help="Set port locking on or off.")
+    ] = None,
+    lock_on_first: Annotated[
+        ToggleOption | None,
+        typer.Option("--lock-on-first", help="Set lock-on-first on or off."),
+    ] = None,
+    egress_rate_bps: Annotated[
+        int | None,
+        typer.Option("--egress-rate-bps", min=1, max=0xFFFFFFFF),
+    ] = None,
+    egress_unlimited: Annotated[
+        bool,
+        typer.Option("--egress-unlimited", help="Remove the egress rate limit."),
+    ] = False,
+) -> None:
+    """Set and verify safe per-port forwarding policy without prompting."""
+
+    if lock is None and lock_on_first is None and egress_rate_bps is None and not egress_unlimited:
+        raise typer.BadParameter("At least one forwarding policy option is required")
+    if egress_rate_bps is not None and egress_unlimited:
+        raise typer.BadParameter("--egress-rate-bps cannot be combined with --egress-unlimited")
+    rate: int | Literal["unlimited"] | None = egress_rate_bps
+    if egress_unlimited:
+        rate = "unlimited"
+    update = ForwardingPortPolicyUpdate(
+        number=number,
+        lock=None if lock is None else lock is ToggleOption.ON,
+        lock_on_first=None if lock_on_first is None else lock_on_first is ToggleOption.ON,
+        egress_rate_limit_bps=rate,
+    )
+
+    cli_context: CliContext = ctx.ensure_object(CliContext)
+    renderer = OutputRenderer(cli_context.configuration.settings.output)
+    try:
+        connected_device = _connect_device(cli_context)
+        current = connected_device.get_forwarding()
+        result: OperationResult[ForwardingInfo] = connected_device.set_forwarding_port_policy(
+            update, expected_current=current
+        )
+    except ConfigurationError as exc:
+        renderer.error("configuration_error", str(exc))
+        raise typer.Exit(code=2) from exc
+    except SwOSError as exc:
+        renderer.error(_error_code(exc), str(exc))
+        raise typer.Exit(code=1) from exc
+
+    port = result.value.ports[number - 1]
+    data: dict[str, Any] = {
+        "changed": result.changed,
+        "forwarding": result.value.model_dump(mode="json"),
+    }
+    if result.warnings:
+        data["warnings"] = [warning.model_dump(mode="json") for warning in result.warnings]
+    action = "changed" if result.changed else "already configured; no change required"
+    human = "\n".join(
+        [
+            f"Port {number} forwarding policy {action}.",
+            f"Lock: {_yes_no(port.lock)}",
+            f"Lock on first: {_yes_no(port.lock_on_first)}",
+            "Egress limit: "
+            + (
+                _format_bit_rate(port.egress_rate_limit_bps)
+                if port.egress_rate_limit_bps is not None
+                else "unlimited"
+            ),
+        ]
+    )
+    if result.warnings:
+        human += "\n" + "\n".join(f"Warning: {warning.message}" for warning in result.warnings)
+    renderer.success(data, human=human)
+
+
 @igmp_app.command("list")
 def igmp_list(ctx: typer.Context) -> None:
     """List dynamically learned multicast groups."""
@@ -1134,6 +1217,51 @@ def rstp_show(ctx: typer.Context) -> None:
         )
     lines.extend(f"Warning: {warning.message}" for warning in connected_device.warnings)
     renderer.success(data, human="\n".join(lines))
+
+
+@rstp_app.command("configure")
+def rstp_configure(
+    ctx: typer.Context,
+    number: Annotated[
+        int, typer.Argument(min=1, max=5, help="Ethernet port number to configure (1-5).")
+    ],
+    state: Annotated[
+        PortStateOption, typer.Option("--state", help="Set RSTP enabled or disabled.")
+    ],
+) -> None:
+    """Set and verify one port's RSTP enable state without prompting."""
+
+    cli_context: CliContext = ctx.ensure_object(CliContext)
+    renderer = OutputRenderer(cli_context.configuration.settings.output)
+    try:
+        connected_device = _connect_device(cli_context)
+        current = connected_device.get_rstp()
+        result: OperationResult[RstpInfo] = connected_device.set_rstp_port_enabled(
+            RstpPortEnableUpdate(
+                number=number,
+                enabled=state is PortStateOption.ENABLED,
+            ),
+            expected_current=current,
+        )
+    except ConfigurationError as exc:
+        renderer.error("configuration_error", str(exc))
+        raise typer.Exit(code=2) from exc
+    except SwOSError as exc:
+        renderer.error(_error_code(exc), str(exc))
+        raise typer.Exit(code=1) from exc
+
+    port = result.value.ports[number - 1]
+    data: dict[str, Any] = {
+        "changed": result.changed,
+        "rstp": result.value.model_dump(mode="json"),
+    }
+    if result.warnings:
+        data["warnings"] = [warning.model_dump(mode="json") for warning in result.warnings]
+    action = "changed" if result.changed else "already configured; no change required"
+    human = f"Port {number} RSTP state {action}.\nEnabled: {_yes_no(port.enabled)}"
+    if result.warnings:
+        human += "\n" + "\n".join(f"Warning: {warning.message}" for warning in result.warnings)
+    renderer.success(data, human=human)
 
 
 @snmp_app.command("show")

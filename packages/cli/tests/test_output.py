@@ -9,6 +9,7 @@ from swos_core.models import (
     DeviceNameUpdate,
     ForcedPortNegotiation,
     ForwardingInfo,
+    ForwardingPortPolicyUpdate,
     HostEntry,
     IgmpGroup,
     IgmpInfo,
@@ -24,6 +25,7 @@ from swos_core.models import (
     PortTrafficStatistics,
     PortVlanInfo,
     RstpInfo,
+    RstpPortEnableUpdate,
     RstpPortInfo,
     SfpInfo,
     SnmpInfo,
@@ -205,6 +207,8 @@ class FakeDevice:
                     protocol="rstp",
                     role="designated",
                     root_path_cost=0,
+                    point_to_point=True,
+                    edge=True,
                     port_type="edge",
                     state="forwarding",
                 ),
@@ -352,6 +356,41 @@ class FakeDevice:
             }
         )
         return OperationResult[SnmpInfo](changed=info != before, value=info)
+
+    def set_rstp_port_enabled(
+        self,
+        update: RstpPortEnableUpdate,
+        *,
+        expected_current: RstpInfo,
+    ) -> OperationResult[RstpInfo]:
+        assert expected_current == self.get_rstp()
+        before = expected_current
+        ports = tuple(
+            port.model_copy(update={"enabled": update.enabled})
+            if port.number == update.number
+            else port
+            for port in before.ports
+        )
+        value = before.model_copy(update={"ports": ports})
+        return OperationResult[RstpInfo](changed=value != before, value=value)
+
+    def set_forwarding_port_policy(
+        self,
+        update: ForwardingPortPolicyUpdate,
+        *,
+        expected_current: ForwardingInfo,
+    ) -> OperationResult[ForwardingInfo]:
+        assert expected_current == self.get_forwarding()
+        before = expected_current
+        changes = update.model_dump(exclude={"number"}, exclude_none=True)
+        if changes.get("egress_rate_limit_bps") == "unlimited":
+            changes["egress_rate_limit_bps"] = None
+        ports = tuple(
+            port.model_copy(update=changes) if port.number == update.number else port
+            for port in before.ports
+        )
+        value = before.model_copy(update={"ports": ports})
+        return OperationResult[ForwardingInfo](changed=value != before, value=value)
 
     def replace_static_hosts(
         self,
@@ -938,6 +977,49 @@ def test_forwarding_show_human_and_json_output(monkeypatch) -> None:  # type: ig
     assert json.loads(machine.stdout)["data"]["ports"][0]["lock"] is True
 
 
+def test_forwarding_configure_is_direct_and_returns_verified_state(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    mock_registry(monkeypatch)
+
+    changed = runner.invoke(
+        app,
+        [
+            "forwarding",
+            "configure",
+            "2",
+            "--lock",
+            "on",
+            "--lock-on-first",
+            "on",
+            "--egress-rate-bps",
+            "1000000",
+            "--url",
+            "http://192.0.2.1",
+            "-ojson",
+        ],
+    )
+    cleared = runner.invoke(
+        app,
+        [
+            "forwarding",
+            "configure",
+            "1",
+            "--egress-unlimited",
+            "--url",
+            "http://192.0.2.1",
+        ],
+    )
+
+    assert changed.exit_code == 0
+    data = json.loads(changed.stdout)["data"]
+    assert data["changed"] is True
+    assert data["forwarding"]["ports"][1]["lock"] is True
+    assert data["forwarding"]["ports"][1]["lock_on_first"] is True
+    assert data["forwarding"]["ports"][1]["egress_rate_limit_bps"] == 1_000_000
+    assert cleared.exit_code == 0
+    assert "no change required" not in cleared.stdout
+    assert "unlimited" in cleared.stdout
+
+
 def test_igmp_list_human_and_json_output(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     mock_registry(monkeypatch)
 
@@ -1134,6 +1216,43 @@ def test_rstp_show_human_and_json_output(monkeypatch) -> None:  # type: ignore[n
     data = json.loads(machine.stdout)["data"]
     assert data["cost_mode"] == "short"
     assert data["ports"][0]["state"] == "forwarding"
+
+
+def test_rstp_configure_is_direct_and_returns_verified_state(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    mock_registry(monkeypatch)
+
+    changed = runner.invoke(
+        app,
+        [
+            "rstp",
+            "configure",
+            "1",
+            "--state",
+            "disabled",
+            "--url",
+            "http://192.0.2.1",
+            "-ojson",
+        ],
+    )
+    no_op = runner.invoke(
+        app,
+        [
+            "rstp",
+            "configure",
+            "1",
+            "--state",
+            "enabled",
+            "--url",
+            "http://192.0.2.1",
+        ],
+    )
+
+    assert changed.exit_code == 0
+    data = json.loads(changed.stdout)["data"]
+    assert data["changed"] is True
+    assert data["rstp"]["ports"][0]["enabled"] is False
+    assert no_op.exit_code == 0
+    assert "no change required" in no_op.stdout
 
 
 def test_snmp_show_outputs_community_normally(monkeypatch) -> None:  # type: ignore[no-untyped-def]

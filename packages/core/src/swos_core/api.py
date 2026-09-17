@@ -11,6 +11,9 @@ from swos_core.models import (
     DeviceIdentity,
     DeviceNameUpdate,
     ForwardingInfo,
+    ForwardingMatrixUpdate,
+    ForwardingMirroringUpdate,
+    ForwardingPortPolicyUpdate,
     HostEntry,
     IgmpGroup,
     OperationResult,
@@ -19,7 +22,9 @@ from swos_core.models import (
     PortNameUpdate,
     PortStatistics,
     PortVlanInfo,
+    RstpBridgeUpdate,
     RstpInfo,
+    RstpPortEnableUpdate,
     SafetyWarning,
     SfpInfo,
     SnmpInfo,
@@ -122,6 +127,56 @@ class DeviceAdapter(Protocol):
 
     def set_snmp_metadata(self, update: SnmpMetadataUpdate) -> OperationResult[SnmpInfo]:
         """Set and verify SNMP contact and location metadata."""
+
+        ...
+
+    def set_rstp_port_enabled(
+        self,
+        update: RstpPortEnableUpdate,
+        *,
+        expected_current: RstpInfo,
+    ) -> OperationResult[RstpInfo]:
+        """Set one port's RSTP state if fresh configuration matches the baseline."""
+
+        ...
+
+    def set_rstp_bridge(
+        self,
+        update: RstpBridgeUpdate,
+        *,
+        expected_current: RstpInfo,
+    ) -> OperationResult[RstpInfo]:
+        """Set bridge configuration if fresh configuration matches the baseline."""
+
+        ...
+
+    def set_forwarding_port_policy(
+        self,
+        update: ForwardingPortPolicyUpdate,
+        *,
+        expected_current: ForwardingInfo,
+    ) -> OperationResult[ForwardingInfo]:
+        """Set safe per-port forwarding policy against an expected baseline."""
+
+        ...
+
+    def set_forwarding_matrix(
+        self,
+        update: ForwardingMatrixUpdate,
+        *,
+        expected_current: ForwardingInfo,
+    ) -> OperationResult[ForwardingInfo]:
+        """Set one forwarding matrix row against an expected baseline."""
+
+        ...
+
+    def set_forwarding_mirroring(
+        self,
+        update: ForwardingMirroringUpdate,
+        *,
+        expected_current: ForwardingInfo,
+    ) -> OperationResult[ForwardingInfo]:
+        """Set mirroring configuration against an expected baseline."""
 
         ...
 
@@ -323,6 +378,96 @@ class SwOSDevice:
             raise UnsupportedFeatureError("snmp_metadata_write")
         result = self._adapter.set_snmp_metadata(update)
         return OperationResult[SnmpInfo](
+            changed=result.changed,
+            value=result.value,
+            warnings=warnings,
+        )
+
+    def set_rstp_port_enabled(
+        self,
+        update: RstpPortEnableUpdate,
+        *,
+        expected_current: RstpInfo,
+    ) -> OperationResult[RstpInfo]:
+        """Set one port's RSTP state after write safety and capability checks."""
+
+        warnings = self._authorize(write=True)
+        if not self.capabilities.supports("rstp_port_enable_write"):
+            raise UnsupportedFeatureError("rstp_port_enable_write")
+        result = self._adapter.set_rstp_port_enabled(update, expected_current=expected_current)
+        return OperationResult[RstpInfo](
+            changed=result.changed,
+            value=result.value,
+            warnings=warnings,
+        )
+
+    def set_rstp_bridge(
+        self,
+        update: RstpBridgeUpdate,
+        *,
+        expected_current: RstpInfo,
+    ) -> OperationResult[RstpInfo]:
+        """Set bridge configuration after write safety and capability checks."""
+
+        warnings = self._authorize(write=True)
+        if not self.capabilities.supports("rstp_bridge_write"):
+            raise UnsupportedFeatureError("rstp_bridge_write")
+        result = self._adapter.set_rstp_bridge(update, expected_current=expected_current)
+        return OperationResult[RstpInfo](
+            changed=result.changed,
+            value=result.value,
+            warnings=warnings,
+        )
+
+    def set_forwarding_port_policy(
+        self,
+        update: ForwardingPortPolicyUpdate,
+        *,
+        expected_current: ForwardingInfo,
+    ) -> OperationResult[ForwardingInfo]:
+        """Set safe per-port policy after write safety and capability checks."""
+
+        warnings = self._authorize(write=True)
+        if not self.capabilities.supports("forwarding_port_policy_write"):
+            raise UnsupportedFeatureError("forwarding_port_policy_write")
+        result = self._adapter.set_forwarding_port_policy(update, expected_current=expected_current)
+        return OperationResult[ForwardingInfo](
+            changed=result.changed,
+            value=result.value,
+            warnings=warnings,
+        )
+
+    def set_forwarding_matrix(
+        self,
+        update: ForwardingMatrixUpdate,
+        *,
+        expected_current: ForwardingInfo,
+    ) -> OperationResult[ForwardingInfo]:
+        """Set one matrix row after write safety and capability checks."""
+
+        warnings = self._authorize(write=True)
+        if not self.capabilities.supports("forwarding_matrix_write"):
+            raise UnsupportedFeatureError("forwarding_matrix_write")
+        result = self._adapter.set_forwarding_matrix(update, expected_current=expected_current)
+        return OperationResult[ForwardingInfo](
+            changed=result.changed,
+            value=result.value,
+            warnings=warnings,
+        )
+
+    def set_forwarding_mirroring(
+        self,
+        update: ForwardingMirroringUpdate,
+        *,
+        expected_current: ForwardingInfo,
+    ) -> OperationResult[ForwardingInfo]:
+        """Set mirroring after write safety and capability checks."""
+
+        warnings = self._authorize(write=True)
+        if not self.capabilities.supports("forwarding_mirroring_write"):
+            raise UnsupportedFeatureError("forwarding_mirroring_write")
+        result = self._adapter.set_forwarding_mirroring(update, expected_current=expected_current)
+        return OperationResult[ForwardingInfo](
             changed=result.changed,
             value=result.value,
             warnings=warnings,

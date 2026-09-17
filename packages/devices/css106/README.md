@@ -40,6 +40,21 @@ full/half duplex. The complete `/link.b` body contains only `en`, `nm`, `an`,
 device-name body contains only `id`. The complete SNMP body is ordered `en`,
 `com`, `ci`, `loc` and preserves the raw enabled and community fields.
 
+The profile also advertises guarded per-port RSTP enable and forwarding lock,
+lock-on-first, and egress-rate writes for ports 1-5. CLI plans carry an expected
+configuration; the adapter rechecks it from fresh `/sys.b` plus `/rstp.b` or
+`/fwd.b` reads and rejects stale plans before POST. RSTP posts the complete
+`ena` group. Forwarding posts `fp1` through `fp6`, `lck`, `lckf`, `imr`, `omr`,
+`mrto`, and `or`, preserving every omitted value and verifying that complete
+group after the write. Port 6's RSTP bit, `fp6`, and every destination
+relationship involving port 6 cannot change. Port 6 is rejected as a mirror
+source or target.
+
+Bridge-global (`prio`, `cost`, `frmc`), forwarding-matrix, and mirroring
+serialization use the same identity, baseline, no-op, complete-group, and
+readback guards, but their independent capabilities remain disabled pending
+hardware validation.
+
 Complete static-host table replacement is also guarded on that exact device
 identity. It validates row limits and the complete desired table before
 transport, requires the fresh table to match the caller's expected baseline,
@@ -59,4 +74,5 @@ hardware.
 SwOS does not expose a revision token or compare-and-swap operation. Table
 writes detect changes between the CLI read and the adapter's fresh read, but
 concurrent web-UI or API edits remain unsafe between that read and POST.
-`/link.b` and `/snmp.b` require complete writable-state POSTs.
+`/link.b`, `/snmp.b`, `/rstp.b`, and `/fwd.b` require complete writable-group
+POSTs.

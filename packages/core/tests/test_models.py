@@ -7,6 +7,9 @@ from swos_core.models import (
     DeviceNameUpdate,
     ForcedPortNegotiation,
     ForwardingInfo,
+    ForwardingMatrixUpdate,
+    ForwardingMirroringUpdate,
+    ForwardingPortPolicyUpdate,
     HostEntry,
     IgmpGroup,
     OperationResult,
@@ -16,6 +19,8 @@ from swos_core.models import (
     PortNameUpdate,
     PortStatistics,
     PortVlanInfo,
+    RstpBridgeUpdate,
+    RstpPortEnableUpdate,
     SafetyWarning,
     SnmpMetadataUpdate,
     SystemManagementInfo,
@@ -245,6 +250,40 @@ def test_new_read_models_validate_addresses_and_port_numbers() -> None:
             allowed_port_numbers=(1,),
             watchdog_enabled=True,
         )
+
+
+def test_rstp_and_forwarding_desired_states_are_typed_and_non_empty() -> None:
+    assert RstpPortEnableUpdate(number=5, enabled=False).model_dump(mode="json") == {
+        "number": 5,
+        "enabled": False,
+    }
+    assert RstpBridgeUpdate(bridge_priority=0x9000).bridge_priority == 0x9000
+    assert (
+        ForwardingPortPolicyUpdate(
+            number=5, egress_rate_limit_bps="unlimited"
+        ).egress_rate_limit_bps
+        == "unlimited"
+    )
+    assert ForwardingMatrixUpdate(
+        number=5, destination_port_numbers=(1, 2, 6)
+    ).destination_port_numbers == (1, 2, 6)
+    assert (
+        ForwardingMirroringUpdate(
+            source_port_number=5, mirror_target_port="none"
+        ).mirror_target_port
+        == "none"
+    )
+
+    with pytest.raises(ValidationError, match="at least one"):
+        RstpBridgeUpdate()
+    with pytest.raises(ValidationError, match="multiple of 4096"):
+        RstpBridgeUpdate(bridge_priority=1)
+    with pytest.raises(ValidationError, match="at least one"):
+        ForwardingPortPolicyUpdate(number=5)
+    with pytest.raises(ValidationError):
+        ForwardingPortPolicyUpdate(number=5, egress_rate_limit_bps=0)
+    with pytest.raises(ValidationError, match="at least one"):
+        ForwardingMirroringUpdate(source_port_number=5)
 
 
 def test_host_entries_validate_dynamic_and_static_invariants() -> None:
