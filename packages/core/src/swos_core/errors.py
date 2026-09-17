@@ -15,8 +15,16 @@ class AuthenticationError(TransportError):
     """The SwOS device rejected the supplied credentials."""
 
 
+class ProtocolError(SwOSError):
+    """A device returned a response that could not be decoded safely."""
+
+
 class DevicePluginError(SwOSError):
     """A device plugin could not be loaded or selected."""
+
+
+class DeviceDetectionError(DevicePluginError):
+    """No installed plugin recognized the connected device."""
 
 
 class DuplicateDevicePluginError(DevicePluginError):

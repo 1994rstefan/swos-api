@@ -26,6 +26,9 @@ The global CLI safety overrides are:
 - `--allow-untested-firmware` for read operations
 - `--allow-untested-firmware-writes` for writes, also implying read permission
 
+Commands that use an override include a machine-readable warning in JSON output
+and a `Warning:` line in human output.
+
 The write override must be explicit for an invocation. It is enforced in
 `swos-core`, so CLI and future Ansible consumers have identical safeguards.
 
@@ -36,5 +39,6 @@ and safe hardware validation where hardware is available. Model capabilities
 must be tested independently even when multiple products share a firmware
 image.
 
-The current `swos-device-css106` package is only a development placeholder and
-declares no supported combinations.
+The current `swos-device-css106` package supports read-only system information
+for RB260GS (`CSS106-5G-1S`) running SwOS `2.19`, build `0x6a181cd5`.
+RB260GSP is recognized as a separate product but remains unsupported.

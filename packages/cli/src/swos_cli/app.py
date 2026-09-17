@@ -1,4 +1,4 @@
-"""swos command-line application."""
+"""swosctl command-line application."""
 
 from __future__ import annotations
 
@@ -12,8 +12,10 @@ from typing import Annotated, Any
 import typer
 import typer._click as click
 from dotenv import dotenv_values
+from swos_core import DeviceConnection, PluginRegistry
+from swos_core.errors import SwOSError
 from swos_core.safety import FirmwareSafetyPolicy
-from typer.core import TyperGroup
+from typer.core import TyperGroup, TyperOption
 
 from swos_cli import __version__
 from swos_cli.config import (
@@ -35,6 +37,62 @@ class CliContext:
 
 class OutputAwareGroup(TyperGroup):
     """Render parser errors as JSON when machine output was requested."""
+
+    def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
+        """Allow root options before, between, or after nested command names."""
+
+        option_arity: dict[str, int] = {}
+        for parameter in self.params:
+            if isinstance(parameter, TyperOption):
+                arity = 0 if parameter.is_flag or parameter.count else parameter.nargs
+                for option in (*parameter.opts, *parameter.secondary_opts):
+                    option_arity[option] = arity
+
+        global_arguments: list[str] = []
+        command_arguments: list[str] = []
+        index = 0
+        while index < len(args):
+            argument = args[index]
+            if argument == "--":
+                command_arguments.extend(args[index:])
+                break
+
+            option = argument
+            attached_value = False
+            if argument.startswith("--") and "=" in argument:
+                option = argument.partition("=")[0]
+                attached_value = option in option_arity
+            elif argument.startswith("-") and not argument.startswith("--"):
+                short_option = next(
+                    (
+                        name
+                        for name, arity in option_arity.items()
+                        if arity == 1
+                        and name.startswith("-")
+                        and not name.startswith("--")
+                        and argument.startswith(name)
+                        and argument != name
+                    ),
+                    None,
+                )
+                if short_option is not None:
+                    option = short_option
+                    attached_value = True
+
+            if option not in option_arity:
+                command_arguments.append(argument)
+                index += 1
+                continue
+
+            global_arguments.append(argument)
+            arity = option_arity[option]
+            if not attached_value and arity:
+                values = args[index + 1 : index + 1 + arity]
+                global_arguments.extend(values)
+                index += len(values)
+            index += 1
+
+        return super().parse_args(ctx, global_arguments + command_arguments)
 
     def main(self, *args: Any, **kwargs: Any) -> Any:
         raw_args = kwargs.get("args")
@@ -72,6 +130,8 @@ app = typer.Typer(
     no_args_is_help=True,
     pretty_exceptions_enable=False,
 )
+system_app = typer.Typer(help="Read system information.", no_args_is_help=True)
+app.add_typer(system_app, name="system")
 
 
 @app.callback(invoke_without_command=True)
@@ -172,6 +232,89 @@ def main(
         raise typer.Exit()
 
 
+@system_app.command("show")
+def system_show(ctx: typer.Context) -> None:
+    """Show normalized system information from the selected device."""
+
+    cli_context: CliContext = ctx.ensure_object(CliContext)
+    settings = cli_context.configuration.settings
+    renderer = OutputRenderer(settings.output)
+    if settings.url is None:
+        renderer.error("configuration_error", "A device URL is required")
+        raise typer.Exit(code=2)
+
+    connection = DeviceConnection(
+        url=settings.url,
+        username=settings.username,
+        password=settings.password,
+        timeout=settings.timeout,
+        verify_tls=settings.verify_tls,
+    )
+    try:
+        registry = PluginRegistry.discover()
+        identity = registry.probe(connection)
+        expected_models = {identity.product_code.casefold()}
+        if identity.marketing_name is not None:
+            expected_models.add(identity.marketing_name.casefold())
+        if settings.model.casefold() != "auto" and settings.model.casefold() not in expected_models:
+            raise ConfigurationError(
+                f"Configured model {settings.model!r} does not match detected "
+                f"device {identity.product_code!r}"
+            )
+        if settings.firmware != "auto" and settings.firmware != identity.firmware_version:
+            raise ConfigurationError(
+                f"Configured firmware {settings.firmware!r} does not match detected "
+                f"firmware {identity.firmware_version!r}"
+            )
+        connected_device = registry.connect(identity, connection, cli_context.firmware_policy)
+        info = connected_device.get_system_info()
+    except ConfigurationError as exc:
+        renderer.error("configuration_error", str(exc))
+        raise typer.Exit(code=2) from exc
+    except SwOSError as exc:
+        renderer.error(_error_code(exc), str(exc))
+        raise typer.Exit(code=1) from exc
+
+    data = info.model_dump(mode="json")
+    if connected_device.warnings:
+        data["warnings"] = [
+            warning.model_dump(mode="json") for warning in connected_device.warnings
+        ]
+    model = identity.marketing_name or identity.product_code
+    details = [
+        f"Name: {info.name}",
+        f"Model: {model} ({identity.product_code})",
+        f"Firmware: SwOS {identity.firmware_version}",
+        f"Uptime: {_format_uptime(info.uptime_seconds)}",
+    ]
+    if identity.build_id is not None:
+        details.insert(3, f"Build: {identity.build_id}")
+    if info.serial_number is not None:
+        details.append(f"Serial Number: {info.serial_number}")
+    if info.mac_address is not None:
+        details.append(f"MAC Address: {info.mac_address}")
+    if info.current_ip is not None:
+        details.append(f"Current IP: {info.current_ip}")
+    if info.static_ip is not None:
+        details.append(f"Static IP: {info.static_ip}")
+    details.extend(f"Warning: {warning.message}" for warning in connected_device.warnings)
+    renderer.success(data, human="\n".join(details))
+
+
+def _error_code(error: SwOSError) -> str:
+    name = type(error).__name__
+    return "".join(
+        f"_{character.lower()}" if character.isupper() else character for character in name
+    ).lstrip("_")
+
+
+def _format_uptime(seconds: int) -> str:
+    days, remainder = divmod(seconds, 86400)
+    hours, remainder = divmod(remainder, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    return f"{days}d {hours:02d}:{minutes:02d}:{seconds:02d}"
+
+
 def _fallback_output_format(
     cli_output: str | None,
     *,
@@ -269,4 +412,4 @@ def _argument_value(arguments: list[str], name: str) -> str | None:
 def run() -> None:
     """Console script entry point."""
 
-    app(prog_name="swos")
+    app(prog_name="swosctl")

@@ -53,6 +53,9 @@ class SystemInfo(BaseModel):
     name: str
     uptime_seconds: int = Field(ge=0)
     current_ip: str | None = None
+    static_ip: str | None = None
+    mac_address: str | None = None
+    serial_number: str | None = None
 
 
 ResultValue = TypeVar("ResultValue")

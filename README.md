@@ -3,8 +3,8 @@
 An independent, device-agnostic Python API for managing MikroTik SwOS devices.
 
 > [!WARNING]
-> The project is in pre-alpha development. No device and firmware combination
-> is declared supported yet.
+> The project is in pre-alpha development. Device support is deliberately
+> limited to exact hardware and firmware combinations listed below.
 
 ## Architecture
 
@@ -12,7 +12,7 @@ This monorepo contains independently versioned Python distributions:
 
 - `swos-core`: public API, transport, plugin contracts, and firmware safeguards
 - `swos-cli`: command-line client built exclusively on `swos-core`
-- `swos-device-css106`: development placeholder for CSS106 device support
+- `swos-device-css106`: CSS106 device support
 - a future `swos-ansible` package will use the same core API
 
 The CLI and future Ansible integration never contain device-specific HTTP
@@ -35,10 +35,15 @@ python -m pip install -r requirements-dev.txt
 Run the initial CLI:
 
 ```bash
-swos --version
-swos -o json --version
-swos -o json-pretty --version
+swosctl --version
+swosctl -o json --version
+swosctl -o json-pretty --version
+swosctl --device office system show
+swosctl system show --device office
 ```
+
+Global options may be placed before, between, or after command names. The two
+`system show` forms above are equivalent.
 
 Run all local checks:
 
@@ -71,6 +76,12 @@ See [the configuration documentation](docs/configuration.md) and
 New firmware versions never become supported implicitly. Each exact model and
 firmware combination must be tested, registered in the relevant device plugin,
 and released. See [the device plugin documentation](docs/device-plugins.md).
+
+Currently supported:
+
+| Device | Product code | Firmware | Build | Operations |
+| --- | --- | --- | --- | --- |
+| RB260GS | `CSS106-5G-1S` | `2.19` | `0x6a181cd5` | Read system information |
 
 ## License
 

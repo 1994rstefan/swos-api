@@ -1,10 +1,61 @@
 import json
+from importlib import import_module
 
 from swos_cli import __version__
-from swos_cli.app import app
+from swos_core.models import DeviceIdentity, SystemInfo
+from swos_core.safety import SafetyWarning
 from typer.testing import CliRunner
 
+app_module = import_module("swos_cli.app")
+app = app_module.app
 runner = CliRunner()
+
+
+class FakeDevice:
+    def __init__(
+        self,
+        identity: DeviceIdentity,
+        warnings: tuple[SafetyWarning, ...] = (),
+    ) -> None:
+        self.identity = identity
+        self.warnings = warnings
+
+    def get_system_info(self) -> SystemInfo:
+        return SystemInfo(
+            identity=self.identity,
+            name="Office Switch",
+            uptime_seconds=90061,
+            current_ip="192.168.88.1",
+            static_ip="192.168.88.1",
+            mac_address="02:00:00:00:00:01",
+            serial_number="TEST1234",
+        )
+
+
+class FakeRegistry:
+    identity = DeviceIdentity(
+        firmware_family="css106",
+        product_code="CSS106-5G-1S",
+        firmware_version="2.19",
+        marketing_name="RB260GS",
+        build_id="0x6a181cd5",
+    )
+
+    def probe(self, connection):  # type: ignore[no-untyped-def]
+        del connection
+        return self.identity
+
+    def connect(self, identity, connection, policy):  # type: ignore[no-untyped-def]
+        del connection, policy
+        return FakeDevice(identity)
+
+
+def mock_registry(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setattr(
+        app_module.PluginRegistry,
+        "discover",
+        classmethod(lambda cls: FakeRegistry()),
+    )
 
 
 def test_human_version() -> None:
@@ -120,3 +171,120 @@ def test_untested_firmware_safety_flags_are_global_options() -> None:
 
     assert result.exit_code == 0
     assert result.stdout.startswith("swos-cli ")
+
+
+def test_system_show_human_output(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    mock_registry(monkeypatch)
+
+    result = runner.invoke(app, ["--url", "http://192.0.2.1", "system", "show"])
+
+    assert result.exit_code == 0
+    assert "Model: RB260GS (CSS106-5G-1S)" in result.stdout
+    assert "Firmware: SwOS 2.19" in result.stdout
+    assert "Uptime: 1d 01:01:01" in result.stdout
+    assert "Current IP: 192.168.88.1" in result.stdout
+
+
+def test_system_show_accepts_global_url_after_command(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    mock_registry(monkeypatch)
+
+    after_command = runner.invoke(
+        app,
+        ["system", "show", "--url", "https://192.0.2.1"],
+    )
+    between_commands = runner.invoke(
+        app,
+        ["system", "--url", "https://192.0.2.1", "show"],
+    )
+
+    assert after_command.exit_code == 0
+    assert between_commands.exit_code == 0
+    assert "Model: RB260GS (CSS106-5G-1S)" in after_command.stdout
+    assert "Model: RB260GS (CSS106-5G-1S)" in between_commands.stdout
+
+
+def test_system_show_accepts_all_global_options_after_command(
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    mock_registry(monkeypatch)
+
+    result = runner.invoke(
+        app,
+        [
+            "system",
+            "show",
+            "--url",
+            "http://192.0.2.1",
+            "--username",
+            "admin",
+            "--password",
+            "secret",
+            "--model",
+            "RB260GS",
+            "--firmware",
+            "2.19",
+            "--timeout",
+            "3",
+            "--no-verify-tls",
+            "--allow-untested-firmware",
+            "-ojson",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout)["data"]["identity"]["product_code"] == "CSS106-5G-1S"
+
+
+def test_system_show_json_output(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    mock_registry(monkeypatch)
+
+    result = runner.invoke(
+        app,
+        ["--url", "http://192.0.2.1", "-o", "json", "system", "show"],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["data"]["identity"]["product_code"] == "CSS106-5G-1S"
+    assert payload["data"]["serial_number"] == "TEST1234"
+
+
+def test_system_show_requires_url() -> None:
+    result = runner.invoke(app, ["system", "show"])
+
+    assert result.exit_code == 2
+    assert "A device URL is required" in result.stderr
+
+
+def test_system_show_checks_configured_model(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    mock_registry(monkeypatch)
+
+    result = runner.invoke(
+        app,
+        ["--url", "http://192.0.2.1", "--model", "RB260GSP", "system", "show"],
+    )
+
+    assert result.exit_code == 2
+    assert "does not match detected device" in result.stderr
+
+
+def test_system_show_includes_firmware_warnings(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    class WarningRegistry(FakeRegistry):
+        def connect(self, identity, connection, policy):  # type: ignore[no-untyped-def]
+            del connection, policy
+            warning = SafetyWarning(code="untested_firmware", message="Firmware is untested")
+            return FakeDevice(identity, (warning,))
+
+    monkeypatch.setattr(
+        app_module.PluginRegistry,
+        "discover",
+        classmethod(lambda cls: WarningRegistry()),
+    )
+
+    result = runner.invoke(
+        app,
+        ["--url", "http://192.0.2.1", "-o", "json", "system", "show"],
+    )
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout)["data"]["warnings"][0]["code"] == "untested_firmware"

@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "swos-device-css106"
-version = "0.0.0"
-description = "CSS106 device plugin for swos-core (development placeholder)"
+version = "2.19"
+description = "CSS106 device plugin for swos-core"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
@@ -21,7 +21,7 @@ classifiers = [
   "Programming Language :: Python :: 3.14",
   "Typing :: Typed",
 ]
-dependencies = ["swos-core>=0.1.0,<0.2.0"]
+dependencies = ["swos-core>=0.1.1,<0.2.0"]
 
 [project.entry-points."swos.devices"]
 css106 = "swos_device_css106.plugin:plugin"

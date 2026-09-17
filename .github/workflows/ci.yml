@@ -55,5 +55,5 @@ jobs:
         run: |
           python -m venv .wheel-venv
           .wheel-venv/bin/python -m pip install dist/*.whl
-          .wheel-venv/bin/swos -o json --version
+          .wheel-venv/bin/swosctl -o json --version
           .wheel-venv/bin/python -c "from swos_core import PluginRegistry; assert PluginRegistry.discover().known_families == ('css106',)"

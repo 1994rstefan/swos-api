@@ -1,12 +1,17 @@
-"""CSS106 plugin registration without prematurely claiming device support."""
+"""CSS106 device probing and adapter registration."""
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from swos_core.api import DeviceAdapter
-from swos_core.errors import UnsupportedFirmwareError
 from swos_core.models import DeviceConnection, DeviceIdentity
 from swos_core.plugins import SupportRecord
 from swos_core.safety import FirmwareSafetyPolicy
+from swos_core.transport import HttpTransport
+
+from swos_device_css106.adapter import CSS106Adapter
+from swos_device_css106.protocol import MAX_PAYLOAD_BYTES, identity_from_system, parse_payload
 
 
 class CSS106Plugin:
@@ -15,10 +20,35 @@ class CSS106Plugin:
     family = "css106"
     distribution_name = "swos-device-css106"
 
-    def support_records(self) -> tuple[SupportRecord, ...]:
-        """Return no records until the independent adapter is implemented."""
+    def __init__(
+        self,
+        transport_factory: Callable[[DeviceConnection], HttpTransport] = HttpTransport,
+    ) -> None:
+        self._transport_factory = transport_factory
 
-        return ()
+    def support_records(self) -> tuple[SupportRecord, ...]:
+        """Return exact model, firmware, and build combinations tested on hardware."""
+
+        return (
+            SupportRecord(
+                firmware_family=self.family,
+                product_code="CSS106-5G-1S",
+                firmware_version="2.19",
+                build_id="0x6a181cd5",
+                marketing_names=("RB260GS",),
+            ),
+        )
+
+    def probe(self, connection: DeviceConnection) -> DeviceIdentity | None:
+        """Identify known CSS106 products through the read-only system endpoint."""
+
+        with self._transport_factory(connection) as transport:
+            payload = transport.request(
+                "GET",
+                "/sys.b",
+                max_response_bytes=MAX_PAYLOAD_BYTES,
+            )
+        return identity_from_system(parse_payload(payload))
 
     def create(
         self,
@@ -28,13 +58,13 @@ class CSS106Plugin:
         policy: FirmwareSafetyPolicy,
         support: SupportRecord | None,
     ) -> DeviceAdapter:
-        """Reject adapter creation until CSS106 support is implemented."""
+        """Create the read-only adapter for a recognized CSS106 identity."""
 
-        del connection, policy, support
-        raise UnsupportedFirmwareError(
-            identity.product_code,
-            identity.firmware_version,
-            "adapter creation",
+        del policy, support
+        return CSS106Adapter(
+            connection,
+            identity,
+            transport_factory=self._transport_factory,
         )
 
 

@@ -3,8 +3,10 @@ from __future__ import annotations
 import pytest
 from swos_core.api import DeviceAdapter
 from swos_core.errors import (
+    DeviceDetectionError,
     DuplicateDevicePluginError,
     MissingDevicePluginError,
+    ProtocolError,
     UnsupportedFirmwareError,
 )
 from swos_core.models import (
@@ -30,6 +32,10 @@ class FakePlugin:
                 marketing_names=("RB260GS",),
             ),
         )
+
+    def probe(self, connection: DeviceConnection) -> DeviceIdentity | None:
+        del connection
+        return identity()
 
     def create(
         self,
@@ -79,6 +85,17 @@ def test_registry_resolves_exact_support() -> None:
     assert resolution.warnings == ()
 
 
+def test_registry_probes_and_connects_a_device() -> None:
+    registry = PluginRegistry([FakePlugin()])
+    connection = DeviceConnection(url="http://192.0.2.1")
+
+    detected = registry.probe(connection)
+    device = registry.connect_auto(connection, FirmwareSafetyPolicy())
+
+    assert detected == identity()
+    assert device.identity == identity()
+
+
 def test_registry_rejects_unknown_firmware() -> None:
     with pytest.raises(UnsupportedFirmwareError):
         PluginRegistry([FakePlugin()]).resolve(
@@ -106,6 +123,7 @@ def test_policy_bound_device_rechecks_read_permission() -> None:
     )
 
     assert device.get_system_info().name == "test"
+    assert device.warnings[0].code == "untested_firmware"
     with pytest.raises(UnsupportedFirmwareError):
         device._authorize(write=True)
 
@@ -115,6 +133,26 @@ def test_registry_reports_missing_plugin() -> None:
         PluginRegistry().resolve(identity(), FirmwareSafetyPolicy())
 
     assert error.value.suggested_package == "swos-device-css106"
+
+
+def test_registry_reports_an_unrecognized_device() -> None:
+    with pytest.raises(DeviceDetectionError):
+        PluginRegistry().probe(DeviceConnection(url="http://192.0.2.1"))
+
+
+def test_registry_ignores_plugin_protocol_mismatches_during_probe() -> None:
+    class NonMatchingPlugin(FakePlugin):
+        family = "other"
+
+        def probe(self, connection: DeviceConnection) -> DeviceIdentity | None:
+            del connection
+            raise ProtocolError("not this protocol")
+
+    detected = PluginRegistry([NonMatchingPlugin(), FakePlugin()]).probe(
+        DeviceConnection(url="http://192.0.2.1")
+    )
+
+    assert detected == identity()
 
 
 def test_registry_rejects_duplicate_family() -> None:

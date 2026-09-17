@@ -1,7 +1,10 @@
 # swos-device-css106
 
-Development placeholder for the CSS106 device family plugin.
+Device support for the MikroTik CSS106 firmware family.
 
-No device/firmware combination is declared supported yet. The first planned
-target is RB260GS (`CSS106-5G-1S`) with SwOS 2.19 after the independent adapter
-and its hardware tests have been implemented.
+The current release supports read-only system information for RB260GS
+(`CSS106-5G-1S`) running SwOS `2.19`, build `0x6a181cd5`. RB260GSP is detected
+but remains unsupported until separately validated on hardware.
+
+CSS106 reports system uptime in 100 Hz ticks. The adapter normalizes this value
+to whole seconds in the device-independent `SystemInfo` model.

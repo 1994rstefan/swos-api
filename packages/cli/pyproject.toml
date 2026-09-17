@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "swos-cli"
-version = "0.1.0"
+version = "0.1.1"
 description = "Command-line client for the swos-core API"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -27,12 +27,12 @@ dependencies = [
   "pydantic>=2.11,<3",
   "python-dotenv>=1.1,<2",
   "rich>=14,<15",
-  "swos-core>=0.1.0,<0.2.0",
+  "swos-core>=0.1.1,<0.2.0",
   "typer>=0.19,<1",
 ]
 
 [project.scripts]
-swos = "swos_cli.app:run"
+swosctl = "swos_cli.app:run"
 
 [project.urls]
 Homepage = "https://github.com/1994rstefan/swos-api"

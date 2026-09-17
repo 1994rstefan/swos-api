@@ -10,7 +10,12 @@ from typing import Protocol
 from pydantic import BaseModel, ConfigDict, Field
 
 from swos_core.api import DeviceAdapter, SwOSDevice
-from swos_core.errors import DuplicateDevicePluginError, MissingDevicePluginError
+from swos_core.errors import (
+    DeviceDetectionError,
+    DuplicateDevicePluginError,
+    MissingDevicePluginError,
+    ProtocolError,
+)
 from swos_core.models import DeviceConnection, DeviceIdentity
 from swos_core.safety import FirmwareSafetyPolicy, SafetyWarning, enforce_firmware_policy
 
@@ -48,6 +53,11 @@ class DevicePlugin(Protocol):
 
     def support_records(self) -> tuple[SupportRecord, ...]:
         """Return all explicitly tested model and firmware combinations."""
+
+        ...
+
+    def probe(self, connection: DeviceConnection) -> DeviceIdentity | None:
+        """Return the identity when this plugin recognizes the device."""
 
         ...
 
@@ -95,7 +105,10 @@ class PluginRegistry:
         for entry_point in metadata.entry_points(group=ENTRY_POINT_GROUP):
             loaded = entry_point.load()
             plugin = loaded() if isinstance(loaded, type) else loaded
-            if not hasattr(plugin, "family") or not hasattr(plugin, "support_records"):
+            if not all(
+                hasattr(plugin, attribute)
+                for attribute in ("family", "support_records", "probe", "create")
+            ):
                 raise TypeError(f"Entry point {entry_point.name!r} is not a device plugin")
             plugins.append(plugin)
         return cls(plugins)
@@ -138,7 +151,7 @@ class PluginRegistry:
         """Create a policy-bound facade without exposing the raw adapter."""
 
         plugin, support = self._select(identity)
-        enforce_firmware_policy(
+        warnings = enforce_firmware_policy(
             identity,
             policy,
             supported=support is not None,
@@ -155,7 +168,35 @@ class PluginRegistry:
             identity,
             policy,
             supported=support is not None,
+            warnings=warnings,
         )
+
+    def probe(self, connection: DeviceConnection) -> DeviceIdentity:
+        """Probe installed plugins and return the single detected identity."""
+
+        detected: list[DeviceIdentity] = []
+        for plugin in self._plugins.values():
+            try:
+                identity = plugin.probe(connection)
+            except ProtocolError:
+                continue
+            if identity is not None:
+                detected.append(identity)
+        if not detected:
+            raise DeviceDetectionError("No installed device plugin recognized the device")
+        if len(detected) > 1:
+            families = ", ".join(identity.firmware_family for identity in detected)
+            raise DeviceDetectionError(f"Multiple device plugins recognized the device: {families}")
+        return detected[0]
+
+    def connect_auto(
+        self,
+        connection: DeviceConnection,
+        policy: FirmwareSafetyPolicy,
+    ) -> SwOSDevice:
+        """Probe a connection and create its policy-bound facade."""
+
+        return self.connect(self.probe(connection), connection, policy)
 
     def _select(self, identity: DeviceIdentity) -> tuple[DevicePlugin, SupportRecord | None]:
         plugin = self._plugins.get(identity.firmware_family.casefold())

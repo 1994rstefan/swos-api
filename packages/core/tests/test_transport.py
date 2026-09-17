@@ -1,3 +1,5 @@
+import gzip
+
 import httpx
 import pytest
 from swos_core.errors import AuthenticationError, TransportError
@@ -59,3 +61,37 @@ def test_transport_normalizes_request_failure() -> None:
     with make_transport(httpx.MockTransport(fail)) as transport:
         with pytest.raises(TransportError, match="request failed"):
             transport.request("GET", "/sys.b")
+
+
+def test_transport_limits_streamed_response_size() -> None:
+    def oversized(request: httpx.Request) -> httpx.Response:
+        assert request.headers["Accept-Encoding"] == "identity"
+        return httpx.Response(200, stream=httpx.ByteStream(b"12345"))
+
+    mock = httpx.MockTransport(oversized)
+
+    with make_transport(mock) as transport:
+        with pytest.raises(TransportError, match="safety limit"):
+            transport.request("GET", "/sys.b", max_response_bytes=4)
+
+
+def test_transport_rejects_encoded_size_limited_response() -> None:
+    mock = httpx.MockTransport(
+        lambda request: httpx.Response(
+            200,
+            stream=httpx.ByteStream(gzip.compress(b"expanded")),
+            headers={"Content-Encoding": "gzip"},
+        )
+    )
+
+    with make_transport(mock) as transport:
+        with pytest.raises(TransportError, match="Encoded"):
+            transport.request("GET", "/sys.b", max_response_bytes=1024)
+
+
+def test_transport_rejects_invalid_response_limit() -> None:
+    mock = httpx.MockTransport(lambda request: httpx.Response(200))
+
+    with make_transport(mock) as transport:
+        with pytest.raises(ValueError, match="must be positive"):
+            transport.request("GET", "/sys.b", max_response_bytes=0)

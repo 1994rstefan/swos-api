@@ -39,11 +39,13 @@ class SwOSDevice:
         policy: FirmwareSafetyPolicy,
         *,
         supported: bool,
+        warnings: tuple[SafetyWarning, ...] = (),
     ) -> None:
         self._adapter = adapter
         self._identity = identity
         self._policy = policy
         self._supported = supported
+        self._warnings = warnings
 
     @property
     def identity(self) -> DeviceIdentity:
@@ -56,6 +58,12 @@ class SwOSDevice:
         """Return capabilities exposed by the protected adapter."""
 
         return self._adapter.capabilities
+
+    @property
+    def warnings(self) -> tuple[SafetyWarning, ...]:
+        """Return safety warnings produced while connecting this device."""
+
+        return self._warnings
 
     def get_system_info(self) -> SystemInfo:
         """Read system information after enforcing read safety."""

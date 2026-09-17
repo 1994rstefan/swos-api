@@ -10,6 +10,10 @@ Read-only integration tests require:
 pytest --run-integration -m integration
 ```
 
+The CSS106 test defaults to `http://192.168.88.1` with user `admin` and an
+empty password. Override these values with `SWOS_INTEGRATION_URL`,
+`SWOS_INTEGRATION_USERNAME`, and `SWOS_INTEGRATION_PASSWORD`.
+
 Destructive tests require both explicit gates:
 
 ```bash

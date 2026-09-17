@@ -3,6 +3,7 @@
 from importlib.metadata import PackageNotFoundError, version
 
 from swos_core.api import DeviceAdapter, SwOSDevice
+from swos_core.errors import DeviceDetectionError
 from swos_core.models import (
     DeviceCapabilities,
     DeviceConnection,
@@ -22,6 +23,7 @@ __all__ = [
     "DeviceAdapter",
     "DeviceCapabilities",
     "DeviceConnection",
+    "DeviceDetectionError",
     "DeviceIdentity",
     "DevicePlugin",
     "FirmwareSafetyPolicy",
