@@ -1,4 +1,4 @@
-"""Read-only CSS106 adapter."""
+"""CSS106 adapter for guarded reads and writes."""
 
 from __future__ import annotations
 
@@ -13,7 +13,9 @@ from swos_core.models import (
     ForwardingInfo,
     HostEntry,
     IgmpGroup,
+    OperationResult,
     PortInfo,
+    PortNameUpdate,
     PortStatistics,
     PortVlanInfo,
     RstpInfo,
@@ -28,9 +30,11 @@ from swos_device_css106.protocol import (
     MAX_PAYLOAD_BYTES,
     acl_rules_from_payload,
     dynamic_hosts_from_payload,
+    encode_port_name_update,
     forwarding_from_payload,
     identity_from_system,
     igmp_groups_from_payload,
+    link_write_state_from_payload,
     parse_payload,
     parse_table_payload,
     port_statistics_from_payload,
@@ -41,6 +45,7 @@ from swos_device_css106.protocol import (
     snmp_from_payload,
     static_hosts_from_payload,
     system_info_from_payload,
+    validate_port_name,
     vlans_from_payload,
 )
 
@@ -64,23 +69,22 @@ class CSS106Adapter:
 
     @property
     def capabilities(self) -> DeviceCapabilities:
-        return DeviceCapabilities(
-            features=frozenset(
-                {
-                    "acl",
-                    "forwarding",
-                    "hosts",
-                    "igmp_groups",
-                    "port_statistics",
-                    "ports",
-                    "rstp",
-                    "sfp",
-                    "snmp",
-                    "system",
-                    "vlan",
-                }
-            )
-        )
+        features = {
+            "acl",
+            "forwarding",
+            "hosts",
+            "igmp_groups",
+            "port_statistics",
+            "ports",
+            "rstp",
+            "sfp",
+            "snmp",
+            "system",
+            "vlan",
+        }
+        if self._identity.product_code == "CSS106-5G-1S":
+            features.add("port_name_write")
+        return DeviceCapabilities(features=frozenset(features))
 
     def get_system_info(self) -> SystemInfo:
         with self._transport_factory(self._connection) as transport:
@@ -186,3 +190,53 @@ class CSS106Adapter:
                 max_response_bytes=MAX_PAYLOAD_BYTES,
             )
         return vlans_from_payload(parse_table_payload(payload), self._identity)
+
+    def set_port_name(self, update: PortNameUpdate) -> OperationResult[PortInfo]:
+        """Set one port name with a fresh identity check and full read-back."""
+
+        validate_port_name(update.name)
+        with self._transport_factory(self._connection) as transport:
+            system_payload = transport.request(
+                "GET", "/sys.b", max_response_bytes=MAX_PAYLOAD_BYTES
+            )
+            if identity_from_system(parse_payload(system_payload)) != self._identity:
+                raise ProtocolError("CSS106 identity changed after device probing")
+
+            before_payload = transport.request(
+                "GET", "/link.b", max_response_bytes=MAX_PAYLOAD_BYTES
+            )
+            before_data = parse_payload(before_payload)
+            before_ports = ports_from_link_payload(before_data, self._identity)
+            if (
+                update.number <= len(before_ports)
+                and before_ports[update.number - 1].name == update.name
+            ):
+                return OperationResult[PortInfo](
+                    changed=False,
+                    value=before_ports[update.number - 1],
+                )
+
+            content, expected_state = encode_port_name_update(
+                before_data,
+                self._identity,
+                update,
+            )
+            transport.request(
+                "POST",
+                "/link.b",
+                content=content,
+                headers={"Content-Type": "text/plain"},
+                max_response_bytes=MAX_PAYLOAD_BYTES,
+            )
+            after_payload = transport.request(
+                "GET", "/link.b", max_response_bytes=MAX_PAYLOAD_BYTES
+            )
+
+        after_data = parse_payload(after_payload)
+        if link_write_state_from_payload(after_data, self._identity) != expected_state:
+            raise ProtocolError("CSS106 port-name write failed read-back verification")
+        after_ports = ports_from_link_payload(after_data, self._identity)
+        return OperationResult[PortInfo](
+            changed=True,
+            value=after_ports[update.number - 1],
+        )

@@ -18,10 +18,12 @@ from swos_core.models import (
     ForwardingInfo,
     HostEntry,
     IgmpGroup,
+    OperationResult,
     PacketSizeStatistics,
     PortErrorStatistics,
     PortForwardingInfo,
     PortInfo,
+    PortNameUpdate,
     PortRateStatistics,
     PortStatistics,
     PortTrafficStatistics,
@@ -87,6 +89,7 @@ class FakeAdapter:
                     "igmp_groups",
                     "port_statistics",
                     "ports",
+                    "port_name_write",
                     "rstp",
                     "sfp",
                     "snmp",
@@ -106,11 +109,11 @@ class FakeAdapter:
                 name="Port1",
                 enabled=True,
                 link_up=True,
-                speed_mbps=1000,
+                speed_bps=1_000_000_000,
                 full_duplex=True,
                 auto_negotiation=True,
                 flow_control=True,
-                configured_speed_mbps=100,
+                configured_speed_bps=100_000_000,
                 configured_full_duplex=True,
             ),
         )
@@ -222,6 +225,10 @@ class FakeAdapter:
                 ports=(VlanPortMembership(port_number=1, mode="strip"),),
             ),
         )
+
+    def set_port_name(self, update: PortNameUpdate) -> OperationResult[PortInfo]:
+        port = self.get_ports()[0].model_copy(update={"number": update.number, "name": update.name})
+        return OperationResult[PortInfo](changed=True, value=port)
 
 
 def identity(version: str = "2.19") -> DeviceIdentity:
@@ -379,6 +386,44 @@ def test_policy_bound_device_rejects_unsupported_feature() -> None:
         device.get_port_vlans()
     with pytest.raises(UnsupportedFeatureError, match="vlan"):
         device.get_vlans()
+    with pytest.raises(UnsupportedFeatureError, match="port name write"):
+        device.set_port_name(PortNameUpdate(number=1, name="Uplink"))
+
+
+def test_policy_bound_device_authorizes_and_returns_write_result() -> None:
+    device = PluginRegistry([FakePlugin()]).connect(
+        identity(),
+        DeviceConnection(url="http://192.0.2.1"),
+        FirmwareSafetyPolicy(),
+    )
+
+    result = device.set_port_name(PortNameUpdate(number=1, name="Uplink"))
+
+    assert result.changed
+    assert result.value.name == "Uplink"
+    assert result.warnings == ()
+
+
+def test_policy_bound_device_requires_explicit_untested_write_permission() -> None:
+    registry = PluginRegistry([FakePlugin()])
+    connection = DeviceConnection(url="http://192.0.2.1")
+    read_only = registry.connect(
+        identity("2.20"),
+        connection,
+        FirmwareSafetyPolicy(allow_untested_firmware=True),
+    )
+
+    with pytest.raises(UnsupportedFirmwareError, match="write operations"):
+        read_only.set_port_name(PortNameUpdate(number=1, name="Uplink"))
+
+    writable = registry.connect(
+        identity("2.20"),
+        connection,
+        FirmwareSafetyPolicy(allow_untested_firmware_writes=True),
+    )
+    result = writable.set_port_name(PortNameUpdate(number=1, name="Uplink"))
+
+    assert result.warnings[0].code == "untested_firmware_write"
 
 
 def test_registry_reports_missing_plugin() -> None:

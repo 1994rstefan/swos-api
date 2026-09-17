@@ -41,6 +41,7 @@ swosctl -o json-pretty --version
 swosctl --device office system show
 swosctl system show --device office
 swosctl port list --device office
+swosctl port rename 1 Uplink --device office
 swosctl port stats --device office
 swosctl port stats --full --device office
 swosctl sfp show --device office
@@ -56,6 +57,9 @@ swosctl vlan list --device office
 
 Global options may be placed before, between, or after command names. The two
 `system show` forms above are equivalent.
+
+Writes remain restricted to exact supported firmware unless the invocation
+passes `--allow-untested-firmware-writes`.
 
 `port stats` shows cumulative byte, packet, and aggregate error counters by
 default. Add `--rates`, `--traffic`, `--sizes`, or `--errors` for individual
@@ -98,13 +102,15 @@ Currently supported:
 
 | Device | Product code | Firmware | Build | Operations |
 | --- | --- | --- | --- | --- |
-| RB260GS | `CSS106-5G-1S` | `2.19` | `0x6a181cd5` | Complete local read-only web-UI data surface |
+| RB260GS | `CSS106-5G-1S` | `2.19` | `0x6a181cd5` | Complete local reads; guarded port-name writes |
 
 The supported read surface includes system, management, health, port
 configuration/state, complete statistics, SFP diagnostics, forwarding, port
 lock, mirroring, bandwidth limits, VLANs, hosts, RSTP, SNMP, learned IGMP
 groups, and ACL rules. See the
 [CSS106 2.19 read-coverage matrix](docs/css106-2.19-read-coverage.md).
+Port-name writes use read-before-write, preserve all unrelated link settings,
+skip no-op POSTs, and verify the complete writable link state after the change.
 
 ## License
 

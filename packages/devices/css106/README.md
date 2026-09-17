@@ -25,3 +25,14 @@ module was installed. Their endpoint availability and empty response behavior
 are hardware-validated; populated decoding is covered by UI-derived sanitized
 fixtures. See the repository's `docs/css106-2.19-read-coverage.md` for the exact
 field-level matrix and remaining validation limits.
+
+Guarded port-name writes are supported on the exact RB260GS firmware/build
+listed above. The adapter revalidates device identity, reads the current
+`/link.b` state, skips no-op changes, sends one complete `text/plain` write that
+preserves all unrelated settings, and verifies the writable state through a
+fresh read. Names are limited to 16 printable ASCII characters. Other write
+operations are not yet exposed.
+
+SwOS does not expose a revision token or compare-and-swap operation. Avoid
+concurrent web-UI or API edits while a write is running because `/link.b`
+requires a complete writable-state POST.

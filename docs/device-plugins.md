@@ -44,6 +44,8 @@ read-only web-UI surface for RB260GS (`CSS106-5G-1S`) running SwOS `2.19`, build
 `0x6a181cd5`: system, management, health, port configuration/state, complete
 statistics, SFP diagnostics, forwarding, port lock, mirroring, bandwidth
 limits, VLANs, hosts, RSTP, SNMP, learned IGMP groups, and ACL rules.
+Guarded, idempotent port-name writes are also supported for this exact
+hardware, firmware, and build combination.
 
 The exact field-level matrix, endpoint inventory, scaling rules, fixture status,
 and hardware-validation limits are documented in

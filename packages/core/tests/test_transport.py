@@ -18,6 +18,27 @@ def test_transport_returns_raw_response() -> None:
         assert transport.request("GET", "/sys.b") == b"{upt:0x01}"
 
 
+def test_transport_sends_exact_post_content_and_headers() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url.path == "/link.b"
+        assert request.headers["Content-Type"] == "text/plain"
+        assert request.content == b"{nm:['55706c696e6b']}"
+        return httpx.Response(200, stream=httpx.ByteStream(b""))
+
+    with make_transport(httpx.MockTransport(handler)) as transport:
+        assert (
+            transport.request(
+                "POST",
+                "/link.b",
+                content=b"{nm:['55706c696e6b']}",
+                headers={"Content-Type": "text/plain"},
+                max_response_bytes=1024,
+            )
+            == b""
+        )
+
+
 def test_transport_normalizes_authentication_failure() -> None:
     mock = httpx.MockTransport(lambda request: httpx.Response(401))
 

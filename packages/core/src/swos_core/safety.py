@@ -5,7 +5,7 @@ from __future__ import annotations
 from pydantic import BaseModel, ConfigDict
 
 from swos_core.errors import UnsupportedFirmwareError
-from swos_core.models import DeviceIdentity
+from swos_core.models import DeviceIdentity, SafetyWarning
 
 
 class FirmwareSafetyPolicy(BaseModel):
@@ -21,15 +21,6 @@ class FirmwareSafetyPolicy(BaseModel):
         """Write permission implies read permission for the same invocation."""
 
         return self.allow_untested_firmware or self.allow_untested_firmware_writes
-
-
-class SafetyWarning(BaseModel):
-    """Machine-readable warning returned when a safety override is used."""
-
-    model_config = ConfigDict(frozen=True)
-
-    code: str
-    message: str
 
 
 def enforce_firmware_policy(

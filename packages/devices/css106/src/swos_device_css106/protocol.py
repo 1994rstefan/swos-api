@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from ipaddress import IPv4Address
 from math import floor, log10
@@ -10,7 +11,7 @@ from typing import Any, NoReturn, TypeAlias, TypeVar
 from unicodedata import category
 
 from pydantic import ValidationError
-from swos_core.errors import ProtocolError
+from swos_core.errors import InvalidOperationError, ProtocolError
 from swos_core.models import (
     AclRule,
     AclVlanTagMode,
@@ -28,6 +29,7 @@ from swos_core.models import (
     PortErrorStatistics,
     PortForwardingInfo,
     PortInfo,
+    PortNameUpdate,
     PortRateStatistics,
     PortStatistics,
     PortTrafficStatistics,
@@ -62,16 +64,29 @@ PORT_COUNTS = {
     "CSS106-5G-1S": 6,
     "CSS106-1G-4P-1S": 6,
 }
-LINK_SPEEDS_MBPS = {0: 10, 1: 100, 2: 1000}
-FORCED_LINK_SPEEDS_MBPS = {0: 10, 1: 100}
+LINK_SPEEDS_BPS = {0: 10_000_000, 1: 100_000_000, 2: 1_000_000_000}
+FORCED_LINK_SPEEDS_BPS = {0: 10_000_000, 1: 100_000_000}
 MAX_PAYLOAD_BYTES = 1024 * 1024
 MAX_NESTING_DEPTH = 64
 MAX_NUMBER_DIGITS = 32
 UPTIME_TICKS_PER_SECOND = 100
 MAX_VLAN_ENTRIES = 250
 MAX_ACL_RULES = 32
+MAX_PORT_NAME_BYTES = 16
 
 EnumValue = TypeVar("EnumValue", bound=StrEnum)
+
+
+@dataclass(frozen=True, slots=True)
+class LinkWriteState:
+    """Validated writable subset of a CSS106 link payload."""
+
+    enabled_mask: int
+    raw_names: tuple[str, ...]
+    auto_negotiation_mask: int
+    configured_speeds: tuple[int, ...]
+    configured_duplex_mask: int
+    flow_control_mask: int
 
 
 def parse_payload(payload: bytes) -> dict[str, SwOSValue]:
@@ -178,7 +193,7 @@ def ports_from_link_payload(
     raw_names = _array(data, "nm", port_count)
     raw_speeds = _array(data, "spd", port_count)
     configured_speeds = _bounded_integer_values(
-        data, "spdc", port_count, minimum=0, maximum=len(FORCED_LINK_SPEEDS_MBPS) - 1
+        data, "spdc", port_count, minimum=0, maximum=len(FORCED_LINK_SPEEDS_BPS) - 1
     )
     enabled = _bit_values(data, "en", port_count)
     link_up = _bit_values(data, "lnk", port_count)
@@ -195,11 +210,11 @@ def ports_from_link_payload(
             raise ProtocolError(f"CSS106 field 'nm[{index}]' must be a string")
         if not isinstance(raw_speed, int):
             raise ProtocolError(f"CSS106 field 'spd[{index}]' must be an integer")
-        speed_mbps = None
+        speed_bps = None
         duplex = None
         if link_up[index]:
             try:
-                speed_mbps = LINK_SPEEDS_MBPS[raw_speed]
+                speed_bps = LINK_SPEEDS_BPS[raw_speed]
             except KeyError as exc:
                 raise ProtocolError(
                     f"CSS106 field 'spd[{index}]' has unknown link speed {raw_speed}"
@@ -212,10 +227,10 @@ def ports_from_link_payload(
                     name=_decode_hex_text(raw_name, f"nm[{index}]"),
                     enabled=enabled[index],
                     link_up=link_up[index],
-                    speed_mbps=speed_mbps,
+                    speed_bps=speed_bps,
                     full_duplex=duplex,
                     auto_negotiation=auto_negotiation[index],
-                    configured_speed_mbps=FORCED_LINK_SPEEDS_MBPS[configured_speeds[index]],
+                    configured_speed_bps=FORCED_LINK_SPEEDS_BPS[configured_speeds[index]],
                     configured_full_duplex=configured_full_duplex[index],
                     flow_control=flow_control[index],
                     **_poe_port_fields(data, identity, index, port_count),
@@ -224,6 +239,75 @@ def ports_from_link_payload(
         except ValidationError as exc:
             raise ProtocolError(f"CSS106 port {index + 1} contains invalid values") from exc
     return tuple(ports)
+
+
+def link_write_state_from_payload(
+    data: dict[str, SwOSValue], identity: DeviceIdentity
+) -> LinkWriteState:
+    """Extract and validate exactly the writable CSS106 link fields."""
+
+    port_count = _port_count(identity)
+    raw_names = _array(data, "nm", port_count)
+    names: list[str] = []
+    for index, raw_name in enumerate(raw_names):
+        if not isinstance(raw_name, str):
+            raise ProtocolError(f"CSS106 field 'nm[{index}]' must be a string")
+        _decode_hex_text(raw_name, f"nm[{index}]")
+        names.append(raw_name)
+
+    masks: dict[str, int] = {}
+    for field in ("en", "an", "dpxc", "fct"):
+        _bit_values(data, field, port_count)
+        masks[field] = _integer(data, field)
+
+    return LinkWriteState(
+        enabled_mask=masks["en"],
+        raw_names=tuple(names),
+        auto_negotiation_mask=masks["an"],
+        configured_speeds=_bounded_integer_values(
+            data,
+            "spdc",
+            port_count,
+            minimum=0,
+            maximum=len(FORCED_LINK_SPEEDS_BPS) - 1,
+        ),
+        configured_duplex_mask=masks["dpxc"],
+        flow_control_mask=masks["fct"],
+    )
+
+
+def encode_port_name_update(
+    data: dict[str, SwOSValue], identity: DeviceIdentity, update: PortNameUpdate
+) -> tuple[bytes, LinkWriteState]:
+    """Encode a complete CSS106 link write with only one changed port name."""
+
+    encoded_name = validate_port_name(update.name)
+    state = link_write_state_from_payload(data, identity)
+    if update.number > len(state.raw_names):
+        raise InvalidOperationError(
+            f"Port {update.number} does not exist on {identity.product_code}"
+        )
+
+    names = list(state.raw_names)
+    names[update.number - 1] = encoded_name.hex()
+    desired = replace(state, raw_names=tuple(names))
+    return _serialize_link_write_state(desired), desired
+
+
+def validate_port_name(name: str) -> bytes:
+    """Validate and encode a port name accepted by tested CSS106 firmware."""
+
+    try:
+        encoded_name = name.encode("ascii")
+    except UnicodeEncodeError as exc:
+        raise InvalidOperationError("CSS106 port names must contain printable ASCII only") from exc
+    if any(byte < 0x20 or byte > 0x7E for byte in encoded_name):
+        raise InvalidOperationError("CSS106 port names must contain printable ASCII only")
+    if len(encoded_name) > MAX_PORT_NAME_BYTES:
+        raise InvalidOperationError(
+            f"CSS106 port names cannot exceed {MAX_PORT_NAME_BYTES} characters"
+        )
+    return encoded_name
 
 
 def port_statistics_from_payload(
@@ -691,6 +775,18 @@ def _port_count(identity: DeviceIdentity) -> int:
         return PORT_COUNTS[identity.product_code]
     except KeyError as exc:
         raise ProtocolError(f"Unknown CSS106 product {identity.product_code!r}") from exc
+
+
+def _serialize_link_write_state(state: LinkWriteState) -> bytes:
+    names = ",".join(f"'{name}'" for name in state.raw_names)
+    speeds = ",".join(f"0x{speed:02x}" for speed in state.configured_speeds)
+    payload = (
+        f"{{en:0x{state.enabled_mask:02x},nm:[{names}],"
+        f"an:0x{state.auto_negotiation_mask:02x},spdc:[{speeds}],"
+        f"dpxc:0x{state.configured_duplex_mask:02x},"
+        f"fct:0x{state.flow_control_mask:02x}}}"
+    )
+    return payload.encode("ascii")
 
 
 def _selected_ports(data: dict[str, SwOSValue], field: str, port_count: int) -> tuple[int, ...]:

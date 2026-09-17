@@ -10,10 +10,12 @@ from swos_core.models import (
     HostEntry,
     IgmpGroup,
     IgmpInfo,
+    OperationResult,
     PacketSizeStatistics,
     PortErrorStatistics,
     PortForwardingInfo,
     PortInfo,
+    PortNameUpdate,
     PortRateStatistics,
     PortStatistics,
     PortTrafficStatistics,
@@ -117,13 +119,13 @@ class FakeDevice:
         return (
             PortInfo(
                 number=1,
-                name="Port1",
+                name="LongPortName1234",
                 enabled=True,
                 link_up=True,
-                speed_mbps=1000,
+                speed_bps=1_000_000_000,
                 full_duplex=True,
                 auto_negotiation=True,
-                configured_speed_mbps=100,
+                configured_speed_bps=100_000_000,
                 configured_full_duplex=True,
                 flow_control=True,
             ),
@@ -132,9 +134,9 @@ class FakeDevice:
                 name="Port2",
                 enabled=True,
                 link_up=False,
-                auto_negotiation=True,
-                configured_speed_mbps=100,
-                configured_full_duplex=True,
+                auto_negotiation=False,
+                configured_speed_bps=10_000_000,
+                configured_full_duplex=False,
                 flow_control=False,
             ),
         )
@@ -282,6 +284,7 @@ class FakeDevice:
                 redirect_port_numbers=(6,),
                 drop=False,
                 mirror=True,
+                ingress_rate_limit_bps=1_000_000,
             ),
         )
 
@@ -309,6 +312,10 @@ class FakeDevice:
                 ),
             ),
         )
+
+    def set_port_name(self, update: PortNameUpdate) -> OperationResult[PortInfo]:
+        port = self.get_ports()[0].model_copy(update={"number": update.number, "name": update.name})
+        return OperationResult[PortInfo](changed=update.name != "LongPortName1234", value=port)
 
 
 class FakeRegistry:
@@ -604,11 +611,16 @@ def test_port_list_human_output_and_trailing_options(monkeypatch) -> None:  # ty
     )
 
     assert result.exit_code == 0
-    assert "PORT  NAME" in result.stdout
-    assert "Port1" in result.stdout
-    assert "1000 Mbps" in result.stdout
+    assert "PORT   NAME" in result.stdout
+    assert "LongPortName1234" in result.stdout
+    assert "1 Gbps" in result.stdout
     assert "Port2" in result.stdout
     assert "down" in result.stdout
+    assert "1 Gbps      auto" in result.stdout
+    assert "10 Mbps (half)" in result.stdout
+    assert len(result.stdout.splitlines()[0]) == 80
+    assert all(len(line) <= 80 for line in result.stdout.splitlines())
+    assert len(result.stdout.splitlines()) == 3
 
 
 def test_port_list_json_output(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -621,8 +633,58 @@ def test_port_list_json_output(monkeypatch) -> None:  # type: ignore[no-untyped-
 
     assert result.exit_code == 0
     ports = json.loads(result.stdout)["data"]["ports"]
-    assert ports[0]["speed_mbps"] == 1000
-    assert ports[1]["speed_mbps"] is None
+    assert ports[0]["speed_bps"] == 1_000_000_000
+    assert ports[0]["full_duplex"] is True
+    assert ports[0]["negotiation"] == "auto"
+    assert ports[1]["speed_bps"] is None
+    assert ports[1]["negotiation"] == {"speed_bps": 10_000_000, "duplex": "half"}
+    assert "auto_negotiation" not in ports[0]
+    assert "configured_speed_bps" not in ports[0]
+    assert "configured_full_duplex" not in ports[0]
+
+
+def test_port_rename_human_changed_and_no_change(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    mock_registry(monkeypatch)
+
+    changed = runner.invoke(
+        app,
+        ["port", "rename", "1", "Uplink", "--url", "http://192.0.2.1"],
+    )
+    unchanged = runner.invoke(
+        app,
+        ["port", "rename", "1", "LongPortName1234", "--url", "http://192.0.2.1"],
+    )
+
+    assert changed.exit_code == 0
+    assert "name changed to 'Uplink'" in changed.stdout
+    assert unchanged.exit_code == 0
+    assert "no change required" in unchanged.stdout
+
+
+def test_port_rename_json_success(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    mock_registry(monkeypatch)
+
+    result = runner.invoke(
+        app,
+        [
+            "port",
+            "rename",
+            "1",
+            "Uplink",
+            "--url",
+            "http://192.0.2.1",
+            "-o",
+            "json",
+        ],
+    )
+
+    assert result.exit_code == 0
+    data = json.loads(result.stdout)["data"]
+    assert data["changed"] is True
+    assert data["port"]["number"] == 1
+    assert data["port"]["name"] == "Uplink"
+    assert data["port"]["speed_bps"] == 1_000_000_000
+    assert data["port"]["negotiation"] == "auto"
 
 
 def test_port_stats_human_and_json_output(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -662,6 +724,7 @@ def test_port_stats_optional_groups_and_full_output(monkeypatch) -> None:  # typ
     assert "traffic" not in port
     assert "rx_sizes" not in port
     assert full.exit_code == 0
+    assert "RX 1 Kbps" in full.stdout
     assert "RX sizes:" in full.stdout
     assert "TX errors:" in full.stdout
 
@@ -687,7 +750,7 @@ def test_forwarding_show_human_and_json_output(monkeypatch) -> None:  # type: ig
 
     assert human.exit_code == 0
     assert "Mirror Target: 6" in human.stdout
-    assert "1000000 bps" in human.stdout
+    assert "1 Mbps" in human.stdout
     assert machine.exit_code == 0
     assert json.loads(machine.stdout)["data"]["ports"][0]["lock"] is True
 
@@ -713,8 +776,11 @@ def test_acl_list_human_and_json_output(monkeypatch) -> None:  # type: ignore[no
     assert human.exit_code == 0
     assert "Rule 1" in human.stdout
     assert "redirect=6" in human.stdout
+    assert "rate=1 Mbps" in human.stdout
     assert machine.exit_code == 0
-    assert json.loads(machine.stdout)["data"]["rules"][0]["ether_type"] == 0x0800
+    rule = json.loads(machine.stdout)["data"]["rules"][0]
+    assert rule["ether_type"] == 0x0800
+    assert rule["ingress_rate_limit_bps"] == 1_000_000
 
 
 def test_host_list_human_and_json_output(monkeypatch) -> None:  # type: ignore[no-untyped-def]

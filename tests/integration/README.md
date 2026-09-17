@@ -19,3 +19,7 @@ Destructive tests require both explicit gates:
 ```bash
 pytest --run-integration --run-destructive -m destructive
 ```
+
+The CSS106 write test uses port 1 by default, changes only its name, and restores
+the original name in `finally`. Select another port with
+`SWOS_INTEGRATION_WRITE_PORT`.

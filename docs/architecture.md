@@ -20,8 +20,8 @@ CSS106 field names or endpoint mappings.
 
 Raw plugin adapters are not returned to consumers. `swos-core` wraps them in a
 policy-bound `SwOSDevice` facade that checks firmware support immediately before
-each exposed operation. Future write methods must enforce write policy in this
-facade rather than relying on CLI checks.
+each exposed operation. Write methods enforce write policy and a distinct write
+capability in this facade rather than relying on CLI checks.
 
 `swos-cli` owns argument parsing, layered user configuration, output rendering,
 and process exit behavior. It performs no direct HTTP requests.

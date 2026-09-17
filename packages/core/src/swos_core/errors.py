@@ -19,6 +19,10 @@ class ProtocolError(SwOSError):
     """A device returned a response that could not be decoded safely."""
 
 
+class InvalidOperationError(SwOSError):
+    """A requested operation is invalid for the selected device."""
+
+
 class UnsupportedFeatureError(SwOSError):
     """The connected device adapter does not expose a requested feature."""
 

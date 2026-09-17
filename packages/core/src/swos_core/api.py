@@ -12,16 +12,19 @@ from swos_core.models import (
     ForwardingInfo,
     HostEntry,
     IgmpGroup,
+    OperationResult,
     PortInfo,
+    PortNameUpdate,
     PortStatistics,
     PortVlanInfo,
     RstpInfo,
+    SafetyWarning,
     SfpInfo,
     SnmpInfo,
     SystemInfo,
     VlanInfo,
 )
-from swos_core.safety import FirmwareSafetyPolicy, SafetyWarning, enforce_firmware_policy
+from swos_core.safety import FirmwareSafetyPolicy, enforce_firmware_policy
 
 
 class DeviceAdapter(Protocol):
@@ -96,6 +99,11 @@ class DeviceAdapter(Protocol):
 
     def get_vlans(self) -> tuple[VlanInfo, ...]:
         """Read normalized configured VLAN table entries."""
+
+        ...
+
+    def set_port_name(self, update: PortNameUpdate) -> OperationResult[PortInfo]:
+        """Set and verify the configured name of one port."""
 
         ...
 
@@ -229,6 +237,19 @@ class SwOSDevice:
         if not self.capabilities.supports("vlan"):
             raise UnsupportedFeatureError("vlan")
         return self._adapter.get_vlans()
+
+    def set_port_name(self, update: PortNameUpdate) -> OperationResult[PortInfo]:
+        """Set a port name after enforcing write safety and capability checks."""
+
+        warnings = self._authorize(write=True)
+        if not self.capabilities.supports("port_name_write"):
+            raise UnsupportedFeatureError("port_name_write")
+        result = self._adapter.set_port_name(update)
+        return OperationResult[PortInfo](
+            changed=result.changed,
+            value=result.value,
+            warnings=warnings,
+        )
 
     def _authorize(self, *, write: bool) -> tuple[SafetyWarning, ...]:
         return enforce_firmware_policy(

@@ -7,10 +7,13 @@ from swos_core.models import (
     ForwardingInfo,
     HostEntry,
     IgmpGroup,
+    OperationResult,
     PortForwardingInfo,
     PortInfo,
+    PortNameUpdate,
     PortStatistics,
     PortVlanInfo,
+    SafetyWarning,
     SystemManagementInfo,
     VlanInfo,
     VlanPortMembership,
@@ -52,28 +55,47 @@ def test_port_operational_state_is_consistent() -> None:
         name="Port1",
         enabled=True,
         link_up=True,
-        speed_mbps=1000,
+        speed_bps=1_000_000_000,
         full_duplex=True,
         auto_negotiation=True,
-        configured_speed_mbps=100,
+        configured_speed_bps=100_000_000,
         configured_full_duplex=True,
         flow_control=True,
     )
 
-    assert port.speed_mbps == 1000
+    assert port.speed_bps == 1_000_000_000
     with pytest.raises(ValidationError, match="link-down"):
         PortInfo(
             number=1,
             name="Port1",
             enabled=True,
             link_up=False,
-            speed_mbps=1000,
+            speed_bps=1_000_000_000,
             full_duplex=True,
             auto_negotiation=True,
-            configured_speed_mbps=100,
+            configured_speed_bps=100_000_000,
             configured_full_duplex=True,
             flow_control=True,
         )
+
+
+def test_port_name_update_and_operation_result_are_typed_and_immutable() -> None:
+    update = PortNameUpdate(number=1, name="Uplink")
+    result = OperationResult[PortNameUpdate](
+        changed=True,
+        value=update,
+        warnings=(SafetyWarning(code="test", message="Test warning"),),
+    )
+
+    assert result.model_dump(mode="json") == {
+        "changed": True,
+        "value": {"number": 1, "name": "Uplink"},
+        "warnings": [{"code": "test", "message": "Test warning"}],
+    }
+    with pytest.raises(ValidationError):
+        PortNameUpdate(number=0, name="Uplink")
+    with pytest.raises(ValidationError):
+        result.changed = False  # type: ignore[misc]
 
 
 def test_port_statistics_reject_negative_counters() -> None:

@@ -16,8 +16,8 @@ from swos_core.errors import (
     MissingDevicePluginError,
     ProtocolError,
 )
-from swos_core.models import DeviceConnection, DeviceIdentity
-from swos_core.safety import FirmwareSafetyPolicy, SafetyWarning, enforce_firmware_policy
+from swos_core.models import DeviceConnection, DeviceIdentity, SafetyWarning
+from swos_core.safety import FirmwareSafetyPolicy, enforce_firmware_policy
 
 ENTRY_POINT_GROUP = "swos.devices"
 

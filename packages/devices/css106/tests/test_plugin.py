@@ -1,8 +1,8 @@
 from pathlib import Path
 
 import pytest
-from swos_core.errors import ProtocolError, UnsupportedFirmwareError
-from swos_core.models import DeviceConnection
+from swos_core.errors import InvalidOperationError, ProtocolError, UnsupportedFirmwareError
+from swos_core.models import DeviceConnection, PortNameUpdate
 from swos_core.plugins import PluginRegistry
 from swos_core.safety import FirmwareSafetyPolicy
 from swos_device_css106 import CSS106Plugin, plugin
@@ -10,10 +10,12 @@ from swos_device_css106.protocol import (
     MAX_ACL_RULES,
     MAX_NESTING_DEPTH,
     MAX_PAYLOAD_BYTES,
+    MAX_PORT_NAME_BYTES,
     MAX_VLAN_ENTRIES,
     UPTIME_TICKS_PER_SECOND,
     acl_rules_from_payload,
     dynamic_hosts_from_payload,
+    encode_port_name_update,
     forwarding_from_payload,
     identity_from_system,
     igmp_groups_from_payload,
@@ -50,15 +52,19 @@ class FakeTransport:
         self.responses = iter(response) if isinstance(response, tuple) else None
         self.response = response if isinstance(response, bytes) else None
         self.requests: list[tuple[str, str]] = []
+        self.request_details: list[tuple[str, str, bytes | str | None, dict[str, str] | None]] = []
 
     def request(
         self,
         method: str,
         path: str,
         *,
+        content: bytes | str | None = None,
+        headers: dict[str, str] | None = None,
         max_response_bytes: int | None = None,
     ) -> bytes:
         self.requests.append((method, path))
+        self.request_details.append((method, path, content, headers))
         assert max_response_bytes == MAX_PAYLOAD_BYTES
         if self.responses is not None:
             return next(self.responses)
@@ -78,6 +84,11 @@ def fixture_payload() -> bytes:
 
 def link_fixture_payload() -> bytes:
     return LINK_FIXTURE.read_bytes()
+
+
+def renamed_link_payload(name: str) -> bytes:
+    encoded = name.encode("ascii").hex().encode("ascii")
+    return link_fixture_payload().replace(b"506f727431", encoded, 1)
 
 
 def stats_fixture_payload() -> bytes:
@@ -193,14 +204,14 @@ def test_adapter_normalizes_port_state() -> None:
     assert len(ports) == 6
     assert ports[0].name == "Port1"
     assert ports[0].link_up
-    assert ports[0].speed_mbps == 1000
+    assert ports[0].speed_bps == 1_000_000_000
     assert ports[0].full_duplex is True
-    assert ports[0].configured_speed_mbps == 100
+    assert ports[0].configured_speed_bps == 100_000_000
     assert ports[0].configured_full_duplex
     assert ports[0].poe_mode is None
     assert ports[4].name == "Port5"
     assert not ports[4].link_up
-    assert ports[4].speed_mbps is None
+    assert ports[4].speed_bps is None
     assert ports[4].full_duplex is None
     assert ports[5].name == "SFP"
     assert transport.requests == [("GET", "/link.b")]
@@ -246,11 +257,133 @@ def test_port_parser_handles_supported_link_variants_and_empty_names() -> None:
 
     assert ports[0].name == ""
     assert not ports[0].enabled
-    assert ports[0].speed_mbps == 10
+    assert ports[0].speed_bps == 10_000_000
     assert not ports[0].auto_negotiation
     assert not ports[0].flow_control
-    assert ports[1].speed_mbps == 100
+    assert ports[1].speed_bps == 100_000_000
     assert ports[1].full_duplex is False
+
+
+def test_port_name_encoder_emits_exact_complete_link_write() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+
+    content, _ = encode_port_name_update(
+        parse_payload(link_fixture_payload()),
+        identity,
+        PortNameUpdate(number=1, name="Uplink"),
+    )
+
+    assert content == (
+        b"{en:0x3f,nm:['55706c696e6b','506f727432','506f727433','506f727434',"
+        b"'506f727435','534650'],an:0x3f,spdc:[0x01,0x01,0x01,0x01,0x01,0x00],"
+        b"dpxc:0x3f,fct:0x3f}"
+    )
+
+
+@pytest.mark.parametrize(
+    "name, message",
+    [
+        ("x" * (MAX_PORT_NAME_BYTES + 1), "cannot exceed"),
+        ("Upl\nink", "printable ASCII"),
+        ("Uplänk", "printable ASCII"),
+    ],
+)
+def test_port_name_encoder_rejects_unvalidated_values(name: str, message: str) -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+
+    with pytest.raises(InvalidOperationError, match=message):
+        encode_port_name_update(
+            parse_payload(link_fixture_payload()),
+            identity,
+            PortNameUpdate(number=1, name=name),
+        )
+
+
+def test_adapter_sets_and_verifies_port_name() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    transport = FakeTransport(
+        (fixture_payload(), link_fixture_payload(), b"", renamed_link_payload("Uplink"))
+    )
+    adapter = CSS106Plugin(transport_factory=lambda connection: transport).create(  # type: ignore[arg-type]
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+
+    result = adapter.set_port_name(PortNameUpdate(number=1, name="Uplink"))
+
+    assert result.changed
+    assert result.value.name == "Uplink"
+    assert transport.requests == [
+        ("GET", "/sys.b"),
+        ("GET", "/link.b"),
+        ("POST", "/link.b"),
+        ("GET", "/link.b"),
+    ]
+    post = transport.request_details[2]
+    assert post[2] == (
+        b"{en:0x3f,nm:['55706c696e6b','506f727432','506f727433','506f727434',"
+        b"'506f727435','534650'],an:0x3f,spdc:[0x01,0x01,0x01,0x01,0x01,0x00],"
+        b"dpxc:0x3f,fct:0x3f}"
+    )
+    assert post[3] == {"Content-Type": "text/plain"}
+
+
+def test_adapter_skips_post_when_port_name_is_already_configured() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    transport = FakeTransport((fixture_payload(), link_fixture_payload()))
+    adapter = CSS106Plugin(transport_factory=lambda connection: transport).create(  # type: ignore[arg-type]
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+
+    result = adapter.set_port_name(PortNameUpdate(number=1, name="Port1"))
+
+    assert not result.changed
+    assert result.value.name == "Port1"
+    assert transport.requests == [("GET", "/sys.b"), ("GET", "/link.b")]
+
+
+def test_adapter_rejects_identity_change_before_port_name_post() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    changed_system = fixture_payload().replace(b"322e3139", b"322e3230")
+    transport = FakeTransport(changed_system)
+    adapter = CSS106Plugin(transport_factory=lambda connection: transport).create(  # type: ignore[arg-type]
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+
+    with pytest.raises(ProtocolError, match="identity changed"):
+        adapter.set_port_name(PortNameUpdate(number=1, name="Uplink"))
+
+    assert transport.requests == [("GET", "/sys.b")]
+
+
+def test_adapter_rejects_port_name_read_back_mismatch() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    transport = FakeTransport(
+        (fixture_payload(), link_fixture_payload(), b"", link_fixture_payload())
+    )
+    adapter = CSS106Plugin(transport_factory=lambda connection: transport).create(  # type: ignore[arg-type]
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+
+    with pytest.raises(ProtocolError, match="read-back verification"):
+        adapter.set_port_name(PortNameUpdate(number=1, name="Uplink"))
 
 
 def test_shared_decoder_model_gates_rb260gsp_health_and_poe_fields() -> None:
@@ -286,6 +419,31 @@ def test_shared_decoder_model_gates_rb260gsp_health_and_poe_fields() -> None:
     assert ports[1].poe_current_ma == 100
     assert ports[1].poe_power_watts == 1
     assert ports[5].poe_mode is None
+
+    adapter = CSS106Plugin().create(
+        identity=poe_identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(allow_untested_firmware_writes=True),
+        support=None,
+    )
+    assert not adapter.capabilities.supports("port_name_write")
+
+
+def test_adapter_validates_port_name_before_no_op_or_transport() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    transport = FakeTransport((fixture_payload(), renamed_link_payload("Port1")))
+    adapter = CSS106Plugin(transport_factory=lambda connection: transport).create(  # type: ignore[arg-type]
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+
+    with pytest.raises(InvalidOperationError, match="printable ASCII"):
+        adapter.set_port_name(PortNameUpdate(number=1, name="Pört1"))
+
+    assert transport.requests == []
 
 
 def test_adapter_normalizes_cumulative_port_statistics() -> None:

@@ -20,11 +20,11 @@ def test_rb260gs_219_port_state() -> None:
     assert [port.number for port in ports] == [1, 2, 3, 4, 5, 6]
     assert all(isinstance(port.name, str) for port in ports)
     for port in ports:
-        assert port.configured_speed_mbps in {10, 100}
+        assert port.configured_speed_bps in {10_000_000, 100_000_000}
         assert port.poe_mode is None
         if port.link_up:
-            assert port.speed_mbps in {10, 100, 1000}
+            assert port.speed_bps in {10_000_000, 100_000_000, 1_000_000_000}
             assert port.full_duplex is not None
         else:
-            assert port.speed_mbps is None
+            assert port.speed_bps is None
             assert port.full_duplex is None

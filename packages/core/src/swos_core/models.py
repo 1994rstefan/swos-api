@@ -66,6 +66,15 @@ class DeviceCapabilities(BaseModel):
         return feature in self.features
 
 
+class SafetyWarning(BaseModel):
+    """Machine-readable warning returned when a safety override is used."""
+
+    model_config = ConfigDict(frozen=True)
+
+    code: str
+    message: str
+
+
 class AddressMode(StrEnum):
     DHCP_WITH_FALLBACK = "dhcp_with_fallback"
     STATIC = "static"
@@ -169,10 +178,10 @@ class PortInfo(BaseModel):
     name: str
     enabled: bool
     link_up: bool
-    speed_mbps: int | None = Field(default=None, ge=1)
+    speed_bps: int | None = Field(default=None, ge=1)
     full_duplex: bool | None = None
     auto_negotiation: bool
-    configured_speed_mbps: int = Field(ge=1)
+    configured_speed_bps: int = Field(ge=1)
     configured_full_duplex: bool
     flow_control: bool
     poe_mode: PoeMode | None = None
@@ -183,11 +192,20 @@ class PortInfo(BaseModel):
 
     @model_validator(mode="after")
     def validate_operational_state(self) -> Self:
-        if self.link_up and (self.speed_mbps is None or self.full_duplex is None):
+        if self.link_up and (self.speed_bps is None or self.full_duplex is None):
             raise ValueError("link-up ports require speed and duplex state")
-        if not self.link_up and (self.speed_mbps is not None or self.full_duplex is not None):
+        if not self.link_up and (self.speed_bps is not None or self.full_duplex is not None):
             raise ValueError("link-down ports cannot have operational speed or duplex state")
         return self
+
+
+class PortNameUpdate(BaseModel):
+    """Desired name for one numbered switch port."""
+
+    model_config = ConfigDict(frozen=True)
+
+    number: int = Field(ge=1)
+    name: str
 
 
 class PortRateStatistics(BaseModel):
@@ -604,3 +622,4 @@ class OperationResult(BaseModel, Generic[ResultValue]):
 
     changed: bool = False
     value: ResultValue
+    warnings: tuple[SafetyWarning, ...] = ()

@@ -58,7 +58,7 @@ class CSS106Plugin:
         policy: FirmwareSafetyPolicy,
         support: SupportRecord | None,
     ) -> DeviceAdapter:
-        """Create the read-only adapter for a recognized CSS106 identity."""
+        """Create the guarded adapter for a recognized CSS106 identity."""
 
         del policy, support
         return CSS106Adapter(

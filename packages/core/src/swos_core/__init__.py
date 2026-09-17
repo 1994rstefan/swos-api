@@ -3,7 +3,7 @@
 from importlib.metadata import PackageNotFoundError, version
 
 from swos_core.api import DeviceAdapter, SwOSDevice
-from swos_core.errors import DeviceDetectionError, UnsupportedFeatureError
+from swos_core.errors import DeviceDetectionError, InvalidOperationError, UnsupportedFeatureError
 from swos_core.models import (
     AclRule,
     AclVlanTagMode,
@@ -24,6 +24,7 @@ from swos_core.models import (
     PortErrorStatistics,
     PortForwardingInfo,
     PortInfo,
+    PortNameUpdate,
     PortRateStatistics,
     PortStatistics,
     PortTrafficStatistics,
@@ -35,6 +36,7 @@ from swos_core.models import (
     RstpProtocol,
     RstpRole,
     RstpState,
+    SafetyWarning,
     SfpInfo,
     SnmpInfo,
     SystemHealth,
@@ -48,7 +50,7 @@ from swos_core.models import (
     VlanReceiveMode,
 )
 from swos_core.plugins import DevicePlugin, PluginRegistry, SupportRecord
-from swos_core.safety import FirmwareSafetyPolicy, SafetyWarning
+from swos_core.safety import FirmwareSafetyPolicy
 
 try:
     __version__ = version("swos-core")
@@ -72,6 +74,7 @@ __all__ = [
     "IgmpGroup",
     "IgmpInfo",
     "IgmpVersion",
+    "InvalidOperationError",
     "OperationResult",
     "PacketSizeStatistics",
     "PluginRegistry",
@@ -80,6 +83,7 @@ __all__ = [
     "PortErrorStatistics",
     "PortForwardingInfo",
     "PortInfo",
+    "PortNameUpdate",
     "PortRateStatistics",
     "PortStatistics",
     "PortTrafficStatistics",

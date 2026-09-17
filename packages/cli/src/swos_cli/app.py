@@ -14,9 +14,12 @@ import typer._click as click
 from dotenv import dotenv_values
 from swos_core import (
     DeviceConnection,
+    OperationResult,
     PacketSizeStatistics,
     PluginRegistry,
     PortErrorStatistics,
+    PortInfo,
+    PortNameUpdate,
     SwOSDevice,
 )
 from swos_core.errors import SwOSError
@@ -138,7 +141,7 @@ app = typer.Typer(
 )
 system_app = typer.Typer(help="Read system information.", no_args_is_help=True)
 app.add_typer(system_app, name="system")
-port_app = typer.Typer(help="Read port state.", no_args_is_help=True)
+port_app = typer.Typer(help="Read and configure port state.", no_args_is_help=True)
 app.add_typer(port_app, name="port")
 host_app = typer.Typer(help="Read forwarding-database entries.", no_args_is_help=True)
 app.add_typer(host_app, name="host")
@@ -356,28 +359,74 @@ def port_list(ctx: typer.Context) -> None:
         renderer.error(_error_code(exc), str(exc))
         raise typer.Exit(code=1) from exc
 
-    data: dict[str, Any] = {
-        "ports": [port.model_dump(mode="json") for port in ports],
-    }
+    data: dict[str, Any] = {"ports": [_serialize_port(port) for port in ports]}
     if connected_device.warnings:
         data["warnings"] = [
             warning.model_dump(mode="json") for warning in connected_device.warnings
         ]
-    lines = ["PORT  NAME   ENABLED  LINK  SPEED      DUPLEX  AUTONEG  CONFIG       FLOW-CONTROL"]
+    name_width = max(4, max((len(port.name) for port in ports), default=0))
+    lines = [
+        f"{'PORT':<4}   {'NAME':<{name_width}}   {'EN':<3}   {'LINK':<4}   "
+        f"{'SPEED':<9}   {'NEGOTIATION':<17}   FLOW-CTRL"
+    ]
     for port in ports:
-        speed = f"{port.speed_mbps} Mbps" if port.speed_mbps is not None else "-"
-        duplex = "full" if port.full_duplex else "half" if port.full_duplex is not None else "-"
-        configured = (
-            f"{port.configured_speed_mbps}/{'full' if port.configured_full_duplex else 'half'}"
+        speed = _format_bit_rate(port.speed_bps)
+        negotiation = (
+            "auto"
+            if port.auto_negotiation
+            else f"{_format_bit_rate(port.configured_speed_bps)} "
+            f"({'full' if port.configured_full_duplex else 'half'})"
         )
         lines.append(
-            f"{port.number:<5} {port.name:<6} {_yes_no(port.enabled):<8} "
-            f"{'up' if port.link_up else 'down':<5} {speed:<10} {duplex:<7} "
-            f"{_yes_no(port.auto_negotiation):<8} {configured:<12} "
+            f"{port.number:<4}   {port.name:<{name_width}}   {_yes_no(port.enabled):<3}   "
+            f"{'up' if port.link_up else 'down':<4}   {speed:<9}   {negotiation:<17}   "
             f"{_yes_no(port.flow_control)}"
         )
     lines.extend(f"Warning: {warning.message}" for warning in connected_device.warnings)
     renderer.success(data, human="\n".join(lines))
+
+
+@port_app.command("rename")
+def port_rename(
+    ctx: typer.Context,
+    number: Annotated[int, typer.Argument(min=1, help="Port number to rename.")],
+    name: Annotated[
+        str, typer.Argument(help="New port name (up to 16 printable ASCII characters).")
+    ],
+) -> None:
+    """Set and verify the configured name of one port."""
+
+    cli_context: CliContext = ctx.ensure_object(CliContext)
+    settings = cli_context.configuration.settings
+    renderer = OutputRenderer(settings.output)
+
+    try:
+        connected_device = _connect_device(cli_context)
+        result: OperationResult[PortInfo] = connected_device.set_port_name(
+            PortNameUpdate(number=number, name=name)
+        )
+    except ConfigurationError as exc:
+        renderer.error("configuration_error", str(exc))
+        raise typer.Exit(code=2) from exc
+    except SwOSError as exc:
+        renderer.error(_error_code(exc), str(exc))
+        raise typer.Exit(code=1) from exc
+
+    data: dict[str, Any] = {
+        "changed": result.changed,
+        "port": _serialize_port(result.value),
+    }
+    if result.warnings:
+        data["warnings"] = [warning.model_dump(mode="json") for warning in result.warnings]
+    if result.changed:
+        human = f"Port {result.value.number} name changed to {result.value.name!r}."
+    else:
+        human = (
+            f"Port {result.value.number} name is already {result.value.name!r}; no change required."
+        )
+    if result.warnings:
+        human += "\n" + "\n".join(f"Warning: {warning.message}" for warning in result.warnings)
+    renderer.success(data, human=human)
 
 
 @port_app.command("stats")
@@ -440,9 +489,9 @@ def port_stats(
             if rates:
                 lines.append(
                     "  Rates: "
-                    f"RX {port.rates.rx_bits_per_second:g} bps / "
+                    f"RX {_format_bit_rate(port.rates.rx_bits_per_second)} / "
                     f"{port.rates.rx_packets_per_second:g} pps, "
-                    f"TX {port.rates.tx_bits_per_second:g} bps / "
+                    f"TX {_format_bit_rate(port.rates.tx_bits_per_second)} / "
                     f"{port.rates.tx_packets_per_second:g} pps"
                 )
             if traffic:
@@ -530,7 +579,11 @@ def forwarding_show(ctx: typer.Context) -> None:
         "PORT  FORWARD TO   LOCK  LOCK FIRST  MIRROR RX  MIRROR TX  EGRESS LIMIT",
     ]
     for port in info.ports:
-        limit = f"{port.egress_rate_limit_bps} bps" if port.egress_rate_limit_bps else "unlimited"
+        limit = (
+            _format_bit_rate(port.egress_rate_limit_bps)
+            if port.egress_rate_limit_bps
+            else "unlimited"
+        )
         lines.append(
             f"{port.number:<5} {_ports(port.destination_port_numbers):<12} "
             f"{_yes_no(port.lock):<5} {_yes_no(port.lock_on_first):<11} "
@@ -600,7 +653,7 @@ def acl_list(ctx: typer.Context) -> None:
         if rule.mirror:
             actions.append("mirror")
         if rule.ingress_rate_limit_bps is not None:
-            actions.append(f"rate={rule.ingress_rate_limit_bps} bps")
+            actions.append(f"rate={_format_bit_rate(rule.ingress_rate_limit_bps)}")
         if rule.set_vlan_id is not None:
             actions.append(f"set-vlan={rule.set_vlan_id}")
         if rule.set_vlan_priority is not None:
@@ -850,6 +903,34 @@ def _network(address: str | None, prefix_length: int) -> str:
 
 def _measurement(value: int | float | None, unit: str) -> str:
     return f"{value:g} {unit}" if value is not None else "-"
+
+
+def _serialize_port(port: PortInfo) -> dict[str, Any]:
+    serialized = port.model_dump(mode="json")
+    auto_negotiation = serialized.pop("auto_negotiation")
+    configured_speed = serialized.pop("configured_speed_bps")
+    configured_duplex = serialized.pop("configured_full_duplex")
+    serialized["negotiation"] = (
+        "auto"
+        if auto_negotiation
+        else {
+            "speed_bps": configured_speed,
+            "duplex": "full" if configured_duplex else "half",
+        }
+    )
+    return serialized
+
+
+def _format_bit_rate(bits_per_second: int | float | None) -> str:
+    if bits_per_second is None:
+        return "-"
+    if bits_per_second >= 1_000_000_000:
+        return f"{bits_per_second / 1_000_000_000:g} Gbps"
+    if bits_per_second >= 1_000_000:
+        return f"{bits_per_second / 1_000_000:g} Mbps"
+    if bits_per_second >= 1_000:
+        return f"{bits_per_second / 1_000:g} Kbps"
+    return f"{bits_per_second:g} bps"
 
 
 def _packet_sizes(value: PacketSizeStatistics) -> str:
