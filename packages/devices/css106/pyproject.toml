@@ -1,0 +1,35 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "swos-device-css106"
+version = "0.0.0"
+description = "CSS106 device plugin for swos-core (development placeholder)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "1994rstefan" }]
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Typing :: Typed",
+]
+dependencies = ["swos-core>=0.1.0,<0.2.0"]
+
+[project.entry-points."swos.devices"]
+css106 = "swos_device_css106.plugin:plugin"
+
+[project.urls]
+Homepage = "https://github.com/1994rstefan/swos-api"
+Repository = "https://github.com/1994rstefan/swos-api"
+Issues = "https://github.com/1994rstefan/swos-api/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/swos_device_css106"]

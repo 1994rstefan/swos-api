@@ -1,0 +1,17 @@
+[defaults]
+device = "office"
+output = "human"
+timeout = 10
+verify_tls = true
+
+[devices.office]
+url = "http://192.168.88.1"
+username = "admin"
+model = "auto"
+firmware = "auto"
+
+[devices.lab]
+url = "http://192.168.88.2"
+username = "admin"
+model = "css106-5g-1s"
+firmware = "2.19"
