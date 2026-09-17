@@ -18,6 +18,7 @@ from swos_device_css106.protocol import (
     port_statistics_from_payload,
     port_vlans_from_forwarding_payload,
     ports_from_link_payload,
+    rstp_from_payloads,
     static_hosts_from_payload,
     system_info_from_payload,
     vlans_from_payload,
@@ -30,6 +31,8 @@ FORWARDING_FIXTURE = Path(__file__).parent / "fixtures" / "fwd.b"
 VLAN_FIXTURE = Path(__file__).parent / "fixtures" / "vlan.b"
 STATIC_HOST_FIXTURE = Path(__file__).parent / "fixtures" / "host.b"
 DYNAMIC_HOST_FIXTURE = Path(__file__).parent / "fixtures" / "dhost.b"
+RSTP_FIXTURE = Path(__file__).parent / "fixtures" / "rstp.b"
+RSTP_SYSTEM_FIXTURE = Path(__file__).parent / "fixtures" / "rstp_sys.b"
 
 
 class FakeTransport:
@@ -85,6 +88,14 @@ def static_host_fixture_payload() -> bytes:
 
 def dynamic_host_fixture_payload() -> bytes:
     return DYNAMIC_HOST_FIXTURE.read_bytes()
+
+
+def rstp_fixture_payload() -> bytes:
+    return RSTP_FIXTURE.read_bytes()
+
+
+def rstp_system_fixture_payload() -> bytes:
+    return RSTP_SYSTEM_FIXTURE.read_bytes()
 
 
 def test_plugin_declares_exact_hardware_validated_support() -> None:
@@ -300,6 +311,98 @@ def test_host_decoders_reject_invalid_rows() -> None:
     invalid_port[0]["prt"] = 6
     with pytest.raises(ProtocolError, match="between 0 and 5"):
         dynamic_hosts_from_payload(invalid_port, identity)
+
+
+def test_adapter_normalizes_rstp_state() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    transport = FakeTransport((rstp_system_fixture_payload(), rstp_fixture_payload()))
+    tested_plugin = CSS106Plugin(transport_factory=lambda connection: transport)  # type: ignore[arg-type]
+    adapter = tested_plugin.create(
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=tested_plugin.support_records()[0],
+    )
+
+    info = adapter.get_rstp()
+
+    assert info.bridge_priority == 0x8000
+    assert info.cost_mode.value == "short"
+    assert not info.forward_reserved_multicast
+    assert info.root_bridge_priority == 0x8000
+    assert info.root_bridge_mac == "02:00:00:00:00:01"
+    assert len(info.ports) == 6
+    assert info.ports[0].protocol.value == "rstp"
+    assert info.ports[0].role.value == "designated"
+    assert info.ports[0].port_type.value == "edge"
+    assert info.ports[0].state.value == "forwarding"
+    assert info.ports[4].port_type.value == "point_to_point"
+    assert info.ports[4].state.value == "discarding"
+    assert transport.requests == [("GET", "/sys.b"), ("GET", "/rstp.b")]
+
+
+def test_rstp_decoder_handles_all_combined_states_and_rejects_roles() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    rstp_data = parse_payload(rstp_fixture_payload())
+    rstp_data["rstp"] = 0x3E
+    rstp_data["ena"] = 0x2A
+    rstp_data["p2p"] = 0x0A
+    rstp_data["edge"] = 0x0C
+    rstp_data["lrn"] = 0x0A
+    rstp_data["fwd"] = 0x0C
+    rstp_data["role"] = [0, 1, 2, 3, 4, 0]
+    rstp_data["rpc"] = [0, 1, 2, 3, 4, 5]
+
+    info = rstp_from_payloads(rstp_data, parse_payload(rstp_system_fixture_payload()), identity)
+
+    assert info.ports[0].protocol.value == "stp"
+    assert not info.ports[0].enabled
+    assert info.ports[0].port_type.value == "shared"
+    assert info.ports[0].state.value == "discarding"
+    assert info.ports[1].port_type.value == "point_to_point"
+    assert info.ports[1].state.value == "learning"
+    assert info.ports[1].enabled
+    assert info.ports[2].port_type.value == "edge"
+    assert info.ports[2].state.value == "forwarding"
+    assert info.ports[3].port_type.value == "edge"
+    assert info.ports[3].state.value == "forwarding"
+    assert info.ports[5].root_path_cost == 5
+    assert [port.role.value for port in info.ports[:5]] == [
+        "disabled",
+        "alternate",
+        "root",
+        "designated",
+        "backup",
+    ]
+
+    rstp_data["role"] = [5, 0, 0, 0, 0, 0]
+    with pytest.raises(ProtocolError, match="unknown value 5"):
+        rstp_from_payloads(rstp_data, parse_payload(rstp_system_fixture_payload()), identity)
+
+    system_data = parse_payload(rstp_system_fixture_payload())
+    system_data["cost"] = 2
+    with pytest.raises(ProtocolError, match="between 0 and 1"):
+        rstp_from_payloads(parse_payload(rstp_fixture_payload()), system_data, identity)
+
+
+def test_rstp_adapter_revalidates_identity_before_reading_state() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    changed_system = rstp_system_fixture_payload().replace(b"322e3139", b"322e3230")
+    transport = FakeTransport(changed_system)
+    tested_plugin = CSS106Plugin(transport_factory=lambda connection: transport)  # type: ignore[arg-type]
+    adapter = tested_plugin.create(
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=tested_plugin.support_records()[0],
+    )
+
+    with pytest.raises(ProtocolError, match="identity changed"):
+        adapter.get_rstp()
+    assert transport.requests == [("GET", "/sys.b")]
 
 
 def test_adapter_normalizes_port_vlan_policy() -> None:

@@ -18,6 +18,8 @@ from swos_core.models import (
     PortInfo,
     PortStatistics,
     PortVlanInfo,
+    RstpInfo,
+    RstpPortInfo,
     SystemInfo,
     VlanInfo,
     VlanPortMembership,
@@ -67,7 +69,7 @@ class FakeAdapter:
     @property
     def capabilities(self) -> DeviceCapabilities:
         return DeviceCapabilities(
-            features=frozenset({"hosts", "port_statistics", "ports", "system", "vlan"})
+            features=frozenset({"hosts", "port_statistics", "ports", "rstp", "system", "vlan"})
         )
 
     def get_system_info(self) -> SystemInfo:
@@ -106,6 +108,26 @@ class FakeAdapter:
                 entry_type="dynamic",
                 mac_address="02:00:00:00:00:01",
                 port_numbers=(1,),
+            ),
+        )
+
+    def get_rstp(self) -> RstpInfo:
+        return RstpInfo(
+            bridge_priority=0x8000,
+            cost_mode="short",
+            forward_reserved_multicast=False,
+            root_bridge_priority=0x8000,
+            root_bridge_mac="02:00:00:00:00:01",
+            ports=(
+                RstpPortInfo(
+                    number=1,
+                    enabled=True,
+                    protocol="rstp",
+                    role="designated",
+                    root_path_cost=0,
+                    port_type="edge",
+                    state="forwarding",
+                ),
             ),
         )
 
@@ -193,6 +215,7 @@ def test_policy_bound_device_rechecks_read_permission() -> None:
     assert device.get_ports()[0].name == "Port1"
     assert device.get_port_statistics()[0].tx_bytes == 2
     assert device.get_hosts()[0].port_numbers == (1,)
+    assert device.get_rstp().ports[0].role.value == "designated"
     assert device.get_port_vlans()[0].default_vlan_id == 10
     assert device.get_vlans()[0].vlan_id == 10
     assert device.warnings[0].code == "untested_firmware"
@@ -231,6 +254,8 @@ def test_policy_bound_device_rejects_unsupported_feature() -> None:
     assert error.value.feature == "port_statistics"
     with pytest.raises(UnsupportedFeatureError, match="hosts"):
         device.get_hosts()
+    with pytest.raises(UnsupportedFeatureError, match="rstp"):
+        device.get_rstp()
     with pytest.raises(UnsupportedFeatureError, match="vlan"):
         device.get_port_vlans()
     with pytest.raises(UnsupportedFeatureError, match="vlan"):

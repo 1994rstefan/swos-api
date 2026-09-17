@@ -136,6 +136,8 @@ port_app = typer.Typer(help="Read port state.", no_args_is_help=True)
 app.add_typer(port_app, name="port")
 host_app = typer.Typer(help="Read forwarding-database entries.", no_args_is_help=True)
 app.add_typer(host_app, name="host")
+rstp_app = typer.Typer(help="Read spanning-tree state.", no_args_is_help=True)
+app.add_typer(rstp_app, name="rstp")
 vlan_app = typer.Typer(help="Read VLAN configuration.", no_args_is_help=True)
 app.add_typer(vlan_app, name="vlan")
 
@@ -382,6 +384,45 @@ def host_list(ctx: typer.Context) -> None:
         lines.append(
             f"{host.entry_type.value:<8} {host.mac_address:<18} {vlan_id:<5} "
             f"{ports:<6} {_yes_no(host.drop):<5} {_yes_no(host.mirror)}"
+        )
+    lines.extend(f"Warning: {warning.message}" for warning in connected_device.warnings)
+    renderer.success(data, human="\n".join(lines))
+
+
+@rstp_app.command("show")
+def rstp_show(ctx: typer.Context) -> None:
+    """Show normalized bridge and per-port spanning-tree state."""
+
+    cli_context: CliContext = ctx.ensure_object(CliContext)
+    renderer = OutputRenderer(cli_context.configuration.settings.output)
+    try:
+        connected_device = _connect_device(cli_context)
+        info = connected_device.get_rstp()
+    except ConfigurationError as exc:
+        renderer.error("configuration_error", str(exc))
+        raise typer.Exit(code=2) from exc
+    except SwOSError as exc:
+        renderer.error(_error_code(exc), str(exc))
+        raise typer.Exit(code=1) from exc
+
+    data = info.model_dump(mode="json")
+    if connected_device.warnings:
+        data["warnings"] = [
+            warning.model_dump(mode="json") for warning in connected_device.warnings
+        ]
+    lines = [
+        f"Bridge Priority: 0x{info.bridge_priority:04x}",
+        f"Cost Mode: {info.cost_mode.value}",
+        f"Forward Reserved Multicast: {_yes_no(info.forward_reserved_multicast)}",
+        f"Root Bridge: 0x{info.root_bridge_priority:04x}.{info.root_bridge_mac}",
+        "",
+        "PORT  ENABLED  PROTOCOL  ROLE        ROOT COST  TYPE            STATE",
+    ]
+    for port in info.ports:
+        lines.append(
+            f"{port.number:<5} {_yes_no(port.enabled):<8} {port.protocol.value:<9} "
+            f"{port.role.value:<11} {port.root_path_cost:<10} "
+            f"{port.port_type.value.replace('_', ' '):<15} {port.state.value}"
         )
     lines.extend(f"Warning: {warning.message}" for warning in connected_device.warnings)
     renderer.success(data, human="\n".join(lines))

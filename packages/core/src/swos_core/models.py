@@ -147,6 +147,59 @@ class HostEntry(BaseModel):
         return self
 
 
+class RstpProtocol(StrEnum):
+    STP = "stp"
+    RSTP = "rstp"
+
+
+class RstpRole(StrEnum):
+    DISABLED = "disabled"
+    ALTERNATE = "alternate"
+    ROOT = "root"
+    DESIGNATED = "designated"
+    BACKUP = "backup"
+
+
+class RstpPortType(StrEnum):
+    SHARED = "shared"
+    POINT_TO_POINT = "point_to_point"
+    EDGE = "edge"
+
+
+class RstpState(StrEnum):
+    DISCARDING = "discarding"
+    LEARNING = "learning"
+    FORWARDING = "forwarding"
+
+
+class RstpCostMode(StrEnum):
+    SHORT = "short"
+    LONG = "long"
+
+
+class RstpPortInfo(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    number: int = Field(ge=1)
+    enabled: bool
+    protocol: RstpProtocol
+    role: RstpRole
+    root_path_cost: int = Field(ge=0, le=0xFFFFFFFF)
+    port_type: RstpPortType
+    state: RstpState
+
+
+class RstpInfo(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    bridge_priority: int = Field(ge=0, le=0xFFFF)
+    cost_mode: RstpCostMode
+    forward_reserved_multicast: bool
+    root_bridge_priority: int = Field(ge=0, le=0xFFFF)
+    root_bridge_mac: str = Field(pattern=r"(?i)^(?:[0-9a-f]{2}:){5}[0-9a-f]{2}$")
+    ports: tuple[RstpPortInfo, ...]
+
+
 class VlanMode(StrEnum):
     """Ingress VLAN enforcement for a switch port."""
 

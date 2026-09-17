@@ -12,6 +12,7 @@ from swos_core.models import (
     PortInfo,
     PortStatistics,
     PortVlanInfo,
+    RstpInfo,
     SystemInfo,
     VlanInfo,
 )
@@ -50,6 +51,11 @@ class DeviceAdapter(Protocol):
 
     def get_hosts(self) -> tuple[HostEntry, ...]:
         """Read normalized static and dynamically learned host entries."""
+
+        ...
+
+    def get_rstp(self) -> RstpInfo:
+        """Read normalized bridge and per-port RSTP state."""
 
         ...
 
@@ -129,6 +135,14 @@ class SwOSDevice:
         if not self.capabilities.supports("hosts"):
             raise UnsupportedFeatureError("hosts")
         return self._adapter.get_hosts()
+
+    def get_rstp(self) -> RstpInfo:
+        """Read RSTP state after enforcing read safety."""
+
+        self._authorize(write=False)
+        if not self.capabilities.supports("rstp"):
+            raise UnsupportedFeatureError("rstp")
+        return self._adapter.get_rstp()
 
     def get_port_vlans(self) -> tuple[PortVlanInfo, ...]:
         """Read per-port VLAN policy after enforcing read safety."""

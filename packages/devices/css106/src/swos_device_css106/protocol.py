@@ -17,6 +17,13 @@ from swos_core.models import (
     PortInfo,
     PortStatistics,
     PortVlanInfo,
+    RstpCostMode,
+    RstpInfo,
+    RstpPortInfo,
+    RstpPortType,
+    RstpProtocol,
+    RstpRole,
+    RstpState,
     SystemInfo,
     VlanEgressMode,
     VlanInfo,
@@ -252,6 +259,65 @@ def dynamic_hosts_from_payload(
     return tuple(hosts)
 
 
+def rstp_from_payloads(
+    rstp_data: dict[str, SwOSValue],
+    system_data: dict[str, SwOSValue],
+    identity: DeviceIdentity,
+) -> RstpInfo:
+    """Normalize CSS106 bridge and per-port spanning-tree state."""
+
+    try:
+        port_count = PORT_COUNTS[identity.product_code]
+    except KeyError as exc:
+        raise ProtocolError(f"Unknown CSS106 product {identity.product_code!r}") from exc
+
+    enabled = _bit_values(rstp_data, "ena", port_count)
+    rstp_protocol = _bit_values(rstp_data, "rstp", port_count)
+    point_to_point = _bit_values(rstp_data, "p2p", port_count)
+    edge = _bit_values(rstp_data, "edge", port_count)
+    learning = _bit_values(rstp_data, "lrn", port_count)
+    forwarding = _bit_values(rstp_data, "fwd", port_count)
+    roles = _enum_values(rstp_data, "role", port_count, RstpRole)
+    root_path_costs = _uint32_values(rstp_data, "rpc", port_count)
+    cost_modes = tuple(RstpCostMode)
+    cost_mode_index = _bounded_integer(system_data, "cost", minimum=0, maximum=len(cost_modes) - 1)
+
+    try:
+        return RstpInfo(
+            bridge_priority=_bounded_integer(system_data, "prio", minimum=0, maximum=0xFFFF),
+            cost_mode=cost_modes[cost_mode_index],
+            forward_reserved_multicast=_boolean(system_data, "frmc"),
+            root_bridge_priority=_bounded_integer(system_data, "rpr", minimum=0, maximum=0xFFFF),
+            root_bridge_mac=_wire_mac_address(system_data, "rmac"),
+            ports=tuple(
+                RstpPortInfo(
+                    number=index + 1,
+                    enabled=enabled[index],
+                    protocol=RstpProtocol.RSTP if rstp_protocol[index] else RstpProtocol.STP,
+                    role=roles[index],
+                    root_path_cost=root_path_costs[index],
+                    port_type=(
+                        RstpPortType.EDGE
+                        if edge[index]
+                        else RstpPortType.POINT_TO_POINT
+                        if point_to_point[index]
+                        else RstpPortType.SHARED
+                    ),
+                    state=(
+                        RstpState.FORWARDING
+                        if forwarding[index]
+                        else RstpState.LEARNING
+                        if learning[index]
+                        else RstpState.DISCARDING
+                    ),
+                )
+                for index in range(port_count)
+            ),
+        )
+    except ValidationError as exc:
+        raise ProtocolError("CSS106 RSTP response contains invalid values") from exc
+
+
 def port_vlans_from_forwarding_payload(
     data: dict[str, SwOSValue], identity: DeviceIdentity
 ) -> tuple[PortVlanInfo, ...]:
@@ -467,9 +533,14 @@ def _ip_address(data: dict[str, SwOSValue], field: str) -> str | None:
 
 
 def _mac_address(data: dict[str, SwOSValue], field: str) -> str | None:
-    value = _string(data, field).lower()
-    if value == "0" * 12:
+    value = _wire_mac_address(data, field)
+    if value == "00:00:00:00:00:00":
         return None
+    return value
+
+
+def _wire_mac_address(data: dict[str, SwOSValue], field: str) -> str:
+    value = _string(data, field).lower()
     if len(value) != 12 or any(character not in hexdigits for character in value):
         raise ProtocolError(f"CSS106 field {field!r} is not a MAC address")
     return ":".join(value[index : index + 2] for index in range(0, 12, 2))

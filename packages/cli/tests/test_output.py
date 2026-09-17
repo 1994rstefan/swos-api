@@ -8,6 +8,8 @@ from swos_core.models import (
     PortInfo,
     PortStatistics,
     PortVlanInfo,
+    RstpInfo,
+    RstpPortInfo,
     SystemInfo,
     VlanInfo,
     VlanPortMembership,
@@ -88,6 +90,26 @@ class FakeDevice:
                 entry_type="dynamic",
                 mac_address="02:00:00:00:00:02",
                 port_numbers=(6,),
+            ),
+        )
+
+    def get_rstp(self) -> RstpInfo:
+        return RstpInfo(
+            bridge_priority=0x8000,
+            cost_mode="short",
+            forward_reserved_multicast=False,
+            root_bridge_priority=0x8000,
+            root_bridge_mac="02:00:00:00:00:01",
+            ports=(
+                RstpPortInfo(
+                    number=1,
+                    enabled=True,
+                    protocol="rstp",
+                    role="designated",
+                    root_path_cost=0,
+                    port_type="edge",
+                    state="forwarding",
+                ),
             ),
         )
 
@@ -439,6 +461,24 @@ def test_host_list_human_and_json_output(monkeypatch) -> None:  # type: ignore[n
     assert hosts[0]["port_numbers"] == [1, 2]
     assert hosts[0]["mirror"] is True
     assert hosts[1]["vlan_id"] is None
+
+
+def test_rstp_show_human_and_json_output(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    mock_registry(monkeypatch)
+
+    human = runner.invoke(app, ["rstp", "show", "--url", "http://192.0.2.1"])
+    machine = runner.invoke(
+        app,
+        ["rstp", "show", "--url", "http://192.0.2.1", "-ojson"],
+    )
+
+    assert human.exit_code == 0
+    assert "Bridge Priority: 0x8000" in human.stdout
+    assert "designated" in human.stdout
+    assert machine.exit_code == 0
+    data = json.loads(machine.stdout)["data"]
+    assert data["cost_mode"] == "short"
+    assert data["ports"][0]["state"] == "forwarding"
 
 
 def test_vlan_ports_human_and_json_output(monkeypatch) -> None:  # type: ignore[no-untyped-def]

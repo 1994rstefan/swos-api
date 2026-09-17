@@ -13,6 +13,7 @@ from swos_core.models import (
     PortInfo,
     PortStatistics,
     PortVlanInfo,
+    RstpInfo,
     SystemInfo,
     VlanInfo,
 )
@@ -27,6 +28,7 @@ from swos_device_css106.protocol import (
     port_statistics_from_payload,
     port_vlans_from_forwarding_payload,
     ports_from_link_payload,
+    rstp_from_payloads,
     static_hosts_from_payload,
     system_info_from_payload,
     vlans_from_payload,
@@ -53,7 +55,7 @@ class CSS106Adapter:
     @property
     def capabilities(self) -> DeviceCapabilities:
         return DeviceCapabilities(
-            features=frozenset({"hosts", "port_statistics", "ports", "system", "vlan"})
+            features=frozenset({"hosts", "port_statistics", "ports", "rstp", "system", "vlan"})
         )
 
     def get_system_info(self) -> SystemInfo:
@@ -106,6 +108,17 @@ class CSS106Adapter:
             parse_table_payload(dynamic_payload), self._identity
         )
         return static_hosts + dynamic_hosts
+
+    def get_rstp(self) -> RstpInfo:
+        with self._transport_factory(self._connection) as transport:
+            system_payload = transport.request(
+                "GET", "/sys.b", max_response_bytes=MAX_PAYLOAD_BYTES
+            )
+            system_data = parse_payload(system_payload)
+            if identity_from_system(system_data) != self._identity:
+                raise ProtocolError("CSS106 identity changed after device probing")
+            rstp_payload = transport.request("GET", "/rstp.b", max_response_bytes=MAX_PAYLOAD_BYTES)
+        return rstp_from_payloads(parse_payload(rstp_payload), system_data, self._identity)
 
     def get_port_vlans(self) -> tuple[PortVlanInfo, ...]:
         with self._transport_factory(self._connection) as transport:
