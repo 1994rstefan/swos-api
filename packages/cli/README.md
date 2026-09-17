@@ -13,9 +13,16 @@ groups on request.
 separate fields describing the current link. All JSON link speeds use bits per
 second; human output selects an appropriate Mbps or Gbps unit.
 
-The first guarded write command is:
+Guarded write commands are:
 
 ```bash
+swosctl system rename "Office Switch" --device office
 swosctl port rename 1 Uplink --device office
+swosctl snmp metadata set --contact "Network Operations" --device office
+swosctl snmp metadata set --location "" --device office
 swosctl -o json port rename 1 Uplink --device office
 ```
+
+Omitted SNMP metadata options preserve their current values. Passing an empty
+string explicitly clears the selected field. Write commands do not prompt for
+confirmation; firmware write authorization is enforced by `swos-core`.

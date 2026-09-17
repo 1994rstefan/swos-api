@@ -15,6 +15,7 @@ from swos_core.models import (
     DeviceCapabilities,
     DeviceConnection,
     DeviceIdentity,
+    DeviceNameUpdate,
     ForwardingInfo,
     HostEntry,
     IgmpGroup,
@@ -32,6 +33,7 @@ from swos_core.models import (
     RstpPortInfo,
     SfpInfo,
     SnmpInfo,
+    SnmpMetadataUpdate,
     SystemInfo,
     VlanInfo,
     VlanPortMembership,
@@ -84,6 +86,7 @@ class FakeAdapter:
             features=frozenset(
                 {
                     "acl",
+                    "device_name_write",
                     "forwarding",
                     "hosts",
                     "igmp_groups",
@@ -93,6 +96,7 @@ class FakeAdapter:
                     "rstp",
                     "sfp",
                     "snmp",
+                    "snmp_metadata_write",
                     "system",
                     "vlan",
                 }
@@ -229,6 +233,24 @@ class FakeAdapter:
     def set_port_name(self, update: PortNameUpdate) -> OperationResult[PortInfo]:
         port = self.get_ports()[0].model_copy(update={"number": update.number, "name": update.name})
         return OperationResult[PortInfo](changed=True, value=port)
+
+    def set_device_name(self, update: DeviceNameUpdate) -> OperationResult[SystemInfo]:
+        return OperationResult[SystemInfo](
+            changed=True,
+            value=self.get_system_info().model_copy(update={"name": update.name}),
+        )
+
+    def set_snmp_metadata(self, update: SnmpMetadataUpdate) -> OperationResult[SnmpInfo]:
+        before = self.get_snmp()
+        return OperationResult[SnmpInfo](
+            changed=True,
+            value=before.model_copy(
+                update={
+                    "contact": before.contact if update.contact is None else update.contact,
+                    "location": before.location if update.location is None else update.location,
+                }
+            ),
+        )
 
 
 def identity(version: str = "2.19") -> DeviceIdentity:
@@ -388,6 +410,10 @@ def test_policy_bound_device_rejects_unsupported_feature() -> None:
         device.get_vlans()
     with pytest.raises(UnsupportedFeatureError, match="port name write"):
         device.set_port_name(PortNameUpdate(number=1, name="Uplink"))
+    with pytest.raises(UnsupportedFeatureError, match="device name write"):
+        device.set_device_name(DeviceNameUpdate(name="Core Switch"))
+    with pytest.raises(UnsupportedFeatureError, match="snmp metadata write"):
+        device.set_snmp_metadata(SnmpMetadataUpdate(contact="Ops"))
 
 
 def test_policy_bound_device_authorizes_and_returns_write_result() -> None:
@@ -402,6 +428,16 @@ def test_policy_bound_device_authorizes_and_returns_write_result() -> None:
     assert result.changed
     assert result.value.name == "Uplink"
     assert result.warnings == ()
+
+    device_name = device.set_device_name(DeviceNameUpdate(name="Core Switch"))
+    metadata = device.set_snmp_metadata(SnmpMetadataUpdate(contact="NOC", location="Rack 1"))
+
+    assert device_name.value.name == "Core Switch"
+    assert device_name.warnings == ()
+    assert metadata.value.contact == "NOC"
+    assert metadata.value.location == "Rack 1"
+    assert metadata.value.community == "public"
+    assert metadata.warnings == ()
 
 
 def test_policy_bound_device_requires_explicit_untested_write_permission() -> None:
@@ -424,6 +460,14 @@ def test_policy_bound_device_requires_explicit_untested_write_permission() -> No
     result = writable.set_port_name(PortNameUpdate(number=1, name="Uplink"))
 
     assert result.warnings[0].code == "untested_firmware_write"
+    assert (
+        writable.set_device_name(DeviceNameUpdate(name="Core Switch")).warnings[0].code
+        == "untested_firmware_write"
+    )
+    assert (
+        writable.set_snmp_metadata(SnmpMetadataUpdate(location="Rack 1")).warnings[0].code
+        == "untested_firmware_write"
+    )
 
 
 def test_registry_reports_missing_plugin() -> None:

@@ -148,6 +148,14 @@ class SystemInfo(BaseModel):
     health: SystemHealth | None = None
 
 
+class DeviceNameUpdate(BaseModel):
+    """Desired device name."""
+
+    model_config = ConfigDict(frozen=True)
+
+    name: str
+
+
 class PoeMode(StrEnum):
     OFF = "off"
     AUTO = "auto"
@@ -536,6 +544,15 @@ class SnmpInfo(BaseModel):
     community: str = Field(max_length=64)
     contact: str = Field(max_length=64)
     location: str = Field(max_length=64)
+
+
+class SnmpMetadataUpdate(BaseModel):
+    """Desired SNMP metadata, preserving fields omitted as ``None``."""
+
+    model_config = ConfigDict(frozen=True)
+
+    contact: str | None = None
+    location: str | None = None
 
 
 class VlanMode(StrEnum):

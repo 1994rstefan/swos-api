@@ -26,13 +26,15 @@ are hardware-validated; populated decoding is covered by UI-derived sanitized
 fixtures. See the repository's `docs/css106-2.19-read-coverage.md` for the exact
 field-level matrix and remaining validation limits.
 
-Guarded port-name writes are supported on the exact RB260GS firmware/build
-listed above. The adapter revalidates device identity, reads the current
-`/link.b` state, skips no-op changes, sends one complete `text/plain` write that
-preserves all unrelated settings, and verifies the writable state through a
-fresh read. Names are limited to 16 printable ASCII characters. Other write
-operations are not yet exposed.
+Guarded device-name, port-name, and SNMP contact/location writes are supported
+on the exact RB260GS firmware/build listed above. The adapter revalidates device
+identity, reads current state, skips no-op changes, sends one `text/plain` POST,
+and verifies the full relevant writable state through a fresh read. Device and
+port names are limited to 16 printable ASCII characters; SNMP contact and
+location are limited to 64. The sparse device-name body contains only `id`.
+The complete SNMP body is ordered `en`, `com`, `ci`, `loc` and preserves the raw
+enabled and community fields.
 
 SwOS does not expose a revision token or compare-and-swap operation. Avoid
-concurrent web-UI or API edits while a write is running because `/link.b`
-requires a complete writable-state POST.
+concurrent web-UI or API edits while a write is running. `/link.b` and
+`/snmp.b` require complete writable-state POSTs.

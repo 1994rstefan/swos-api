@@ -4,6 +4,7 @@ from swos_core.models import (
     DeviceCapabilities,
     DeviceConnection,
     DeviceIdentity,
+    DeviceNameUpdate,
     ForwardingInfo,
     HostEntry,
     IgmpGroup,
@@ -14,6 +15,7 @@ from swos_core.models import (
     PortStatistics,
     PortVlanInfo,
     SafetyWarning,
+    SnmpMetadataUpdate,
     SystemManagementInfo,
     VlanInfo,
     VlanPortMembership,
@@ -96,6 +98,16 @@ def test_port_name_update_and_operation_result_are_typed_and_immutable() -> None
         PortNameUpdate(number=0, name="Uplink")
     with pytest.raises(ValidationError):
         result.changed = False  # type: ignore[misc]
+
+
+def test_device_name_and_snmp_metadata_updates_are_typed_and_immutable() -> None:
+    device_name = DeviceNameUpdate(name="Core Switch")
+    metadata = SnmpMetadataUpdate(contact="", location=None)
+
+    assert device_name.model_dump(mode="json") == {"name": "Core Switch"}
+    assert metadata.model_dump(mode="json") == {"contact": "", "location": None}
+    with pytest.raises(ValidationError):
+        metadata.contact = "Ops"  # type: ignore[misc]
 
 
 def test_port_statistics_reject_negative_counters() -> None:

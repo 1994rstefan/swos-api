@@ -17,6 +17,7 @@ from swos_core.models import (
     AclVlanTagMode,
     AddressMode,
     DeviceIdentity,
+    DeviceNameUpdate,
     ForwardingInfo,
     HostEntry,
     HostEntryType,
@@ -43,6 +44,7 @@ from swos_core.models import (
     RstpState,
     SfpInfo,
     SnmpInfo,
+    SnmpMetadataUpdate,
     SystemHealth,
     SystemInfo,
     SystemManagementInfo,
@@ -72,7 +74,9 @@ MAX_NUMBER_DIGITS = 32
 UPTIME_TICKS_PER_SECOND = 100
 MAX_VLAN_ENTRIES = 250
 MAX_ACL_RULES = 32
+MAX_DEVICE_NAME_BYTES = 16
 MAX_PORT_NAME_BYTES = 16
+MAX_SNMP_METADATA_BYTES = 64
 
 EnumValue = TypeVar("EnumValue", bound=StrEnum)
 
@@ -87,6 +91,23 @@ class LinkWriteState:
     configured_speeds: tuple[int, ...]
     configured_duplex_mask: int
     flow_control_mask: int
+
+
+@dataclass(frozen=True, slots=True)
+class SystemNameWriteState:
+    """Validated writable subset of a sparse CSS106 system-name payload."""
+
+    raw_name: str
+
+
+@dataclass(frozen=True, slots=True)
+class SnmpWriteState:
+    """Validated complete writable CSS106 SNMP payload."""
+
+    enabled: int
+    raw_community: str
+    raw_contact: str
+    raw_location: str
 
 
 def parse_payload(payload: bytes) -> dict[str, SwOSValue]:
@@ -181,6 +202,31 @@ def system_info_from_payload(data: dict[str, SwOSValue], identity: DeviceIdentit
         )
     except ValidationError as exc:
         raise ProtocolError("CSS106 system response contains invalid values") from exc
+
+
+def system_name_write_state_from_payload(data: dict[str, SwOSValue]) -> SystemNameWriteState:
+    """Extract and validate the writable CSS106 device-name field."""
+
+    raw_name = _string(data, "id")
+    _decode_hex_text(raw_name, "id")
+    return SystemNameWriteState(raw_name=raw_name)
+
+
+def encode_device_name_update(
+    data: dict[str, SwOSValue], update: DeviceNameUpdate
+) -> tuple[bytes, SystemNameWriteState]:
+    """Encode the sparse CSS106 system write for a device-name change."""
+
+    system_name_write_state_from_payload(data)
+    raw_name = validate_device_name(update.name).hex()
+    desired = SystemNameWriteState(raw_name=raw_name)
+    return f"{{id:'{raw_name}'}}".encode("ascii"), desired
+
+
+def validate_device_name(name: str) -> bytes:
+    """Validate and encode a device name accepted by tested CSS106 firmware."""
+
+    return _validate_printable_ascii(name, "device names", MAX_DEVICE_NAME_BYTES)
 
 
 def ports_from_link_payload(
@@ -297,17 +343,7 @@ def encode_port_name_update(
 def validate_port_name(name: str) -> bytes:
     """Validate and encode a port name accepted by tested CSS106 firmware."""
 
-    try:
-        encoded_name = name.encode("ascii")
-    except UnicodeEncodeError as exc:
-        raise InvalidOperationError("CSS106 port names must contain printable ASCII only") from exc
-    if any(byte < 0x20 or byte > 0x7E for byte in encoded_name):
-        raise InvalidOperationError("CSS106 port names must contain printable ASCII only")
-    if len(encoded_name) > MAX_PORT_NAME_BYTES:
-        raise InvalidOperationError(
-            f"CSS106 port names cannot exceed {MAX_PORT_NAME_BYTES} characters"
-        )
-    return encoded_name
+    return _validate_printable_ascii(name, "port names", MAX_PORT_NAME_BYTES)
 
 
 def port_statistics_from_payload(
@@ -534,6 +570,44 @@ def snmp_from_payload(data: dict[str, SwOSValue]) -> SnmpInfo:
         )
     except ValidationError as exc:
         raise ProtocolError("CSS106 SNMP response contains invalid values") from exc
+
+
+def snmp_write_state_from_payload(data: dict[str, SwOSValue]) -> SnmpWriteState:
+    """Extract and validate every writable CSS106 SNMP field."""
+
+    snmp_from_payload(data)
+    return SnmpWriteState(
+        enabled=_integer(data, "en"),
+        raw_community=_string(data, "com"),
+        raw_contact=_string(data, "ci"),
+        raw_location=_string(data, "loc"),
+    )
+
+
+def encode_snmp_metadata_update(
+    data: dict[str, SwOSValue], update: SnmpMetadataUpdate
+) -> tuple[bytes, SnmpWriteState]:
+    """Encode a complete SNMP write while preserving service and community fields."""
+
+    state = snmp_write_state_from_payload(data)
+    contact = (
+        state.raw_contact
+        if update.contact is None
+        else validate_snmp_metadata(update.contact, "contact").hex()
+    )
+    location = (
+        state.raw_location
+        if update.location is None
+        else validate_snmp_metadata(update.location, "location").hex()
+    )
+    desired = replace(state, raw_contact=contact, raw_location=location)
+    return _serialize_snmp_write_state(desired), desired
+
+
+def validate_snmp_metadata(value: str, field: str) -> bytes:
+    """Validate and encode writable CSS106 SNMP metadata."""
+
+    return _validate_printable_ascii(value, f"SNMP {field}", MAX_SNMP_METADATA_BYTES)
 
 
 def sfp_from_payload(data: dict[str, SwOSValue]) -> SfpInfo:
@@ -787,6 +861,26 @@ def _serialize_link_write_state(state: LinkWriteState) -> bytes:
         f"fct:0x{state.flow_control_mask:02x}}}"
     )
     return payload.encode("ascii")
+
+
+def _serialize_snmp_write_state(state: SnmpWriteState) -> bytes:
+    payload = (
+        f"{{en:0x{state.enabled:02x},com:'{state.raw_community}',"
+        f"ci:'{state.raw_contact}',loc:'{state.raw_location}'}}"
+    )
+    return payload.encode("ascii")
+
+
+def _validate_printable_ascii(value: str, label: str, maximum_bytes: int) -> bytes:
+    try:
+        encoded = value.encode("ascii")
+    except UnicodeEncodeError as exc:
+        raise InvalidOperationError(f"CSS106 {label} must contain printable ASCII only") from exc
+    if any(byte < 0x20 or byte > 0x7E for byte in encoded):
+        raise InvalidOperationError(f"CSS106 {label} must contain printable ASCII only")
+    if len(encoded) > maximum_bytes:
+        raise InvalidOperationError(f"CSS106 {label} cannot exceed {maximum_bytes} characters")
+    return encoded
 
 
 def _selected_ports(data: dict[str, SwOSValue], field: str, port_count: int) -> tuple[int, ...]:

@@ -14,13 +14,17 @@ import typer._click as click
 from dotenv import dotenv_values
 from swos_core import (
     DeviceConnection,
+    DeviceNameUpdate,
     OperationResult,
     PacketSizeStatistics,
     PluginRegistry,
     PortErrorStatistics,
     PortInfo,
     PortNameUpdate,
+    SnmpInfo,
+    SnmpMetadataUpdate,
     SwOSDevice,
+    SystemInfo,
 )
 from swos_core.errors import SwOSError
 from swos_core.safety import FirmwareSafetyPolicy
@@ -139,7 +143,7 @@ app = typer.Typer(
     no_args_is_help=True,
     pretty_exceptions_enable=False,
 )
-system_app = typer.Typer(help="Read system information.", no_args_is_help=True)
+system_app = typer.Typer(help="Read and configure system information.", no_args_is_help=True)
 app.add_typer(system_app, name="system")
 port_app = typer.Typer(help="Read and configure port state.", no_args_is_help=True)
 app.add_typer(port_app, name="port")
@@ -147,8 +151,10 @@ host_app = typer.Typer(help="Read forwarding-database entries.", no_args_is_help
 app.add_typer(host_app, name="host")
 rstp_app = typer.Typer(help="Read spanning-tree state.", no_args_is_help=True)
 app.add_typer(rstp_app, name="rstp")
-snmp_app = typer.Typer(help="Read SNMP configuration.", no_args_is_help=True)
+snmp_app = typer.Typer(help="Read and configure SNMP metadata.", no_args_is_help=True)
 app.add_typer(snmp_app, name="snmp")
+snmp_metadata_app = typer.Typer(help="Configure SNMP metadata.", no_args_is_help=True)
+snmp_app.add_typer(snmp_metadata_app, name="metadata")
 vlan_app = typer.Typer(help="Read VLAN configuration.", no_args_is_help=True)
 app.add_typer(vlan_app, name="vlan")
 sfp_app = typer.Typer(help="Read SFP identity and diagnostics.", no_args_is_help=True)
@@ -341,6 +347,45 @@ def system_show(ctx: typer.Context) -> None:
         )
     details.extend(f"Warning: {warning.message}" for warning in connected_device.warnings)
     renderer.success(data, human="\n".join(details))
+
+
+@system_app.command("rename")
+def system_rename(
+    ctx: typer.Context,
+    name: Annotated[
+        str, typer.Argument(help="New device name (up to 16 printable ASCII characters).")
+    ],
+) -> None:
+    """Set and verify the configured device name."""
+
+    cli_context: CliContext = ctx.ensure_object(CliContext)
+    renderer = OutputRenderer(cli_context.configuration.settings.output)
+    try:
+        connected_device = _connect_device(cli_context)
+        result: OperationResult[SystemInfo] = connected_device.set_device_name(
+            DeviceNameUpdate(name=name)
+        )
+    except ConfigurationError as exc:
+        renderer.error("configuration_error", str(exc))
+        raise typer.Exit(code=2) from exc
+    except SwOSError as exc:
+        renderer.error(_error_code(exc), str(exc))
+        raise typer.Exit(code=1) from exc
+
+    data: dict[str, Any] = {
+        "changed": result.changed,
+        "system": result.value.model_dump(mode="json"),
+    }
+    if result.warnings:
+        data["warnings"] = [warning.model_dump(mode="json") for warning in result.warnings]
+    human = (
+        f"Device name changed to {result.value.name!r}."
+        if result.changed
+        else f"Device name is already {result.value.name!r}; no change required."
+    )
+    if result.warnings:
+        human += "\n" + "\n".join(f"Warning: {warning.message}" for warning in result.warnings)
+    renderer.success(data, human=human)
 
 
 @port_app.command("list")
@@ -788,6 +833,63 @@ def snmp_show(ctx: typer.Context) -> None:
     ]
     lines.extend(f"Warning: {warning.message}" for warning in connected_device.warnings)
     renderer.success(data, human="\n".join(lines))
+
+
+@snmp_metadata_app.command("set")
+def snmp_metadata_set(
+    ctx: typer.Context,
+    contact: Annotated[
+        str | None,
+        typer.Option(
+            "--contact",
+            help="SNMP contact; omit to preserve or pass an empty string to clear.",
+        ),
+    ] = None,
+    location: Annotated[
+        str | None,
+        typer.Option(
+            "--location",
+            help="SNMP location; omit to preserve or pass an empty string to clear.",
+        ),
+    ] = None,
+) -> None:
+    """Set and verify SNMP contact and location metadata."""
+
+    cli_context: CliContext = ctx.ensure_object(CliContext)
+    renderer = OutputRenderer(cli_context.configuration.settings.output)
+    try:
+        connected_device = _connect_device(cli_context)
+        result: OperationResult[SnmpInfo] = connected_device.set_snmp_metadata(
+            SnmpMetadataUpdate(contact=contact, location=location)
+        )
+    except ConfigurationError as exc:
+        renderer.error("configuration_error", str(exc))
+        raise typer.Exit(code=2) from exc
+    except SwOSError as exc:
+        renderer.error(_error_code(exc), str(exc))
+        raise typer.Exit(code=1) from exc
+
+    data: dict[str, Any] = {
+        "changed": result.changed,
+        "snmp": {
+            "enabled": result.value.enabled,
+            "contact": result.value.contact,
+            "location": result.value.location,
+        },
+    }
+    if result.warnings:
+        data["warnings"] = [warning.model_dump(mode="json") for warning in result.warnings]
+    action = "changed" if result.changed else "already configured; no change required"
+    human = "\n".join(
+        [
+            f"SNMP metadata {action}.",
+            f"Contact: {result.value.contact}",
+            f"Location: {result.value.location}",
+        ]
+    )
+    if result.warnings:
+        human += "\n" + "\n".join(f"Warning: {warning.message}" for warning in result.warnings)
+    renderer.success(data, human=human)
 
 
 @vlan_app.command("ports")

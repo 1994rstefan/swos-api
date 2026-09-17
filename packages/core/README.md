@@ -14,5 +14,9 @@ containing the verified state, whether a change was required, and any
 operation-specific firmware warning. `SwOSDevice` enforces write authorization
 and a distinct write capability before dispatching to a plugin.
 
+Current desired-state models cover device names, port names, and SNMP contact
+and location metadata. `None` preserves an omitted SNMP metadata field, while an
+empty string explicitly clears it.
+
 Network link speeds and rates use bits per second in public models and JSON
 representations.

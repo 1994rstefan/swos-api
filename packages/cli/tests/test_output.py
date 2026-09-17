@@ -6,6 +6,7 @@ from swos_cli import __version__
 from swos_core.models import (
     AclRule,
     DeviceIdentity,
+    DeviceNameUpdate,
     ForwardingInfo,
     HostEntry,
     IgmpGroup,
@@ -24,6 +25,7 @@ from swos_core.models import (
     RstpPortInfo,
     SfpInfo,
     SnmpInfo,
+    SnmpMetadataUpdate,
     SystemHealth,
     SystemInfo,
     SystemManagementInfo,
@@ -317,6 +319,20 @@ class FakeDevice:
         port = self.get_ports()[0].model_copy(update={"number": update.number, "name": update.name})
         return OperationResult[PortInfo](changed=update.name != "LongPortName1234", value=port)
 
+    def set_device_name(self, update: DeviceNameUpdate) -> OperationResult[SystemInfo]:
+        info = self.get_system_info().model_copy(update={"name": update.name})
+        return OperationResult[SystemInfo](changed=update.name != "Office Switch", value=info)
+
+    def set_snmp_metadata(self, update: SnmpMetadataUpdate) -> OperationResult[SnmpInfo]:
+        before = self.get_snmp()
+        info = before.model_copy(
+            update={
+                "contact": before.contact if update.contact is None else update.contact,
+                "location": before.location if update.location is None else update.location,
+            }
+        )
+        return OperationResult[SnmpInfo](changed=info != before, value=info)
+
 
 class FakeRegistry:
     identity = DeviceIdentity(
@@ -536,6 +552,33 @@ def test_system_show_json_output(monkeypatch) -> None:  # type: ignore[no-untype
     payload = json.loads(result.stdout)
     assert payload["data"]["identity"]["product_code"] == "CSS106-5G-1S"
     assert payload["data"]["serial_number"] == "TEST1234"
+
+
+def test_system_rename_human_and_json_output_without_confirmation(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    mock_registry(monkeypatch)
+
+    human = runner.invoke(
+        app,
+        ["system", "rename", "Core Switch", "--url", "http://192.0.2.1"],
+    )
+    machine = runner.invoke(
+        app,
+        [
+            "system",
+            "rename",
+            "Office Switch",
+            "--url",
+            "http://192.0.2.1",
+            "-ojson",
+        ],
+    )
+
+    assert human.exit_code == 0
+    assert human.stdout == "Device name changed to 'Core Switch'.\n"
+    assert machine.exit_code == 0
+    data = json.loads(machine.stdout)["data"]
+    assert data["changed"] is False
+    assert data["system"]["name"] == "Office Switch"
 
 
 def test_system_show_requires_url() -> None:
@@ -835,6 +878,63 @@ def test_snmp_show_outputs_community_normally(monkeypatch) -> None:  # type: ign
     assert "Community: public" in human.stdout
     assert machine.exit_code == 0
     assert json.loads(machine.stdout)["data"]["community"] == "public"
+
+
+def test_snmp_metadata_set_preserves_omitted_and_allows_explicit_clear(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    mock_registry(monkeypatch)
+
+    human = runner.invoke(
+        app,
+        [
+            "snmp",
+            "metadata",
+            "set",
+            "--contact",
+            "NOC",
+            "--url",
+            "http://192.0.2.1",
+        ],
+    )
+    machine = runner.invoke(
+        app,
+        [
+            "snmp",
+            "metadata",
+            "set",
+            "--location",
+            "",
+            "--url",
+            "http://192.0.2.1",
+            "-ojson",
+        ],
+    )
+
+    assert human.exit_code == 0
+    assert "SNMP metadata changed." in human.stdout
+    assert "Contact: NOC" in human.stdout
+    assert "Location: Office" in human.stdout
+    assert machine.exit_code == 0
+    data = json.loads(machine.stdout)["data"]
+    assert data == {
+        "changed": True,
+        "snmp": {
+            "enabled": True,
+            "contact": "Ops",
+            "location": "",
+        },
+    }
+
+
+def test_snmp_metadata_set_with_no_options_is_a_no_op(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    mock_registry(monkeypatch)
+
+    result = runner.invoke(
+        app,
+        ["snmp", "metadata", "set", "--url", "http://192.0.2.1"],
+    )
+
+    assert result.exit_code == 0
+    assert "already configured; no change required" in result.stdout
 
 
 def test_vlan_ports_human_and_json_output(monkeypatch) -> None:  # type: ignore[no-untyped-def]

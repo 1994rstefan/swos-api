@@ -9,6 +9,7 @@ from swos_core.models import (
     AclRule,
     DeviceCapabilities,
     DeviceIdentity,
+    DeviceNameUpdate,
     ForwardingInfo,
     HostEntry,
     IgmpGroup,
@@ -21,6 +22,7 @@ from swos_core.models import (
     SafetyWarning,
     SfpInfo,
     SnmpInfo,
+    SnmpMetadataUpdate,
     SystemInfo,
     VlanInfo,
 )
@@ -104,6 +106,16 @@ class DeviceAdapter(Protocol):
 
     def set_port_name(self, update: PortNameUpdate) -> OperationResult[PortInfo]:
         """Set and verify the configured name of one port."""
+
+        ...
+
+    def set_device_name(self, update: DeviceNameUpdate) -> OperationResult[SystemInfo]:
+        """Set and verify the configured device name."""
+
+        ...
+
+    def set_snmp_metadata(self, update: SnmpMetadataUpdate) -> OperationResult[SnmpInfo]:
+        """Set and verify SNMP contact and location metadata."""
 
         ...
 
@@ -246,6 +258,32 @@ class SwOSDevice:
             raise UnsupportedFeatureError("port_name_write")
         result = self._adapter.set_port_name(update)
         return OperationResult[PortInfo](
+            changed=result.changed,
+            value=result.value,
+            warnings=warnings,
+        )
+
+    def set_device_name(self, update: DeviceNameUpdate) -> OperationResult[SystemInfo]:
+        """Set the device name after enforcing write safety and capability checks."""
+
+        warnings = self._authorize(write=True)
+        if not self.capabilities.supports("device_name_write"):
+            raise UnsupportedFeatureError("device_name_write")
+        result = self._adapter.set_device_name(update)
+        return OperationResult[SystemInfo](
+            changed=result.changed,
+            value=result.value,
+            warnings=warnings,
+        )
+
+    def set_snmp_metadata(self, update: SnmpMetadataUpdate) -> OperationResult[SnmpInfo]:
+        """Set SNMP metadata after enforcing write safety and capability checks."""
+
+        warnings = self._authorize(write=True)
+        if not self.capabilities.supports("snmp_metadata_write"):
+            raise UnsupportedFeatureError("snmp_metadata_write")
+        result = self._adapter.set_snmp_metadata(update)
+        return OperationResult[SnmpInfo](
             changed=result.changed,
             value=result.value,
             warnings=warnings,

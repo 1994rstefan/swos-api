@@ -2,20 +2,29 @@ from pathlib import Path
 
 import pytest
 from swos_core.errors import InvalidOperationError, ProtocolError, UnsupportedFirmwareError
-from swos_core.models import DeviceConnection, PortNameUpdate
+from swos_core.models import (
+    DeviceConnection,
+    DeviceNameUpdate,
+    PortNameUpdate,
+    SnmpMetadataUpdate,
+)
 from swos_core.plugins import PluginRegistry
 from swos_core.safety import FirmwareSafetyPolicy
 from swos_device_css106 import CSS106Plugin, plugin
 from swos_device_css106.protocol import (
     MAX_ACL_RULES,
+    MAX_DEVICE_NAME_BYTES,
     MAX_NESTING_DEPTH,
     MAX_PAYLOAD_BYTES,
     MAX_PORT_NAME_BYTES,
+    MAX_SNMP_METADATA_BYTES,
     MAX_VLAN_ENTRIES,
     UPTIME_TICKS_PER_SECOND,
     acl_rules_from_payload,
     dynamic_hosts_from_payload,
+    encode_device_name_update,
     encode_port_name_update,
+    encode_snmp_metadata_update,
     forwarding_from_payload,
     identity_from_system,
     igmp_groups_from_payload,
@@ -89,6 +98,21 @@ def link_fixture_payload() -> bytes:
 def renamed_link_payload(name: str) -> bytes:
     encoded = name.encode("ascii").hex().encode("ascii")
     return link_fixture_payload().replace(b"506f727431", encoded, 1)
+
+
+def renamed_system_payload(name: str) -> bytes:
+    encoded = name.encode("ascii").hex().encode("ascii")
+    return fixture_payload().replace(b"4f666669636520537769746368", encoded, 1)
+
+
+def updated_snmp_payload(*, contact: str = "Ops", location: str = "Office") -> bytes:
+    return (
+        b"{en:0x01,com:'7075626c6963',ci:'"
+        + contact.encode("ascii").hex().encode("ascii")
+        + b"',loc:'"
+        + location.encode("ascii").hex().encode("ascii")
+        + b"'}"
+    )
 
 
 def stats_fixture_payload() -> bytes:
@@ -281,6 +305,32 @@ def test_port_name_encoder_emits_exact_complete_link_write() -> None:
     )
 
 
+def test_device_name_encoder_emits_exact_sparse_system_write() -> None:
+    content, desired = encode_device_name_update(
+        parse_payload(fixture_payload()),
+        DeviceNameUpdate(name="Core Switch"),
+    )
+
+    assert content == b"{id:'436f726520537769746368'}"
+    assert desired.raw_name == "436f726520537769746368"
+
+
+@pytest.mark.parametrize(
+    "name, message",
+    [
+        ("x" * (MAX_DEVICE_NAME_BYTES + 1), "cannot exceed"),
+        ("Core\nSwitch", "printable ASCII"),
+        ("Cöre", "printable ASCII"),
+    ],
+)
+def test_device_name_encoder_rejects_unvalidated_values(name: str, message: str) -> None:
+    with pytest.raises(InvalidOperationError, match=message):
+        encode_device_name_update(
+            parse_payload(fixture_payload()),
+            DeviceNameUpdate(name=name),
+        )
+
+
 @pytest.mark.parametrize(
     "name, message",
     [
@@ -386,6 +436,92 @@ def test_adapter_rejects_port_name_read_back_mismatch() -> None:
         adapter.set_port_name(PortNameUpdate(number=1, name="Uplink"))
 
 
+def test_adapter_sets_device_name_with_one_sparse_post_and_verifies_it() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    transport = FakeTransport((fixture_payload(), b"", renamed_system_payload("Core Switch")))
+    adapter = CSS106Plugin(transport_factory=lambda connection: transport).create(  # type: ignore[arg-type]
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+
+    result = adapter.set_device_name(DeviceNameUpdate(name="Core Switch"))
+
+    assert result.changed
+    assert result.value.name == "Core Switch"
+    assert transport.requests == [
+        ("GET", "/sys.b"),
+        ("POST", "/sys.b"),
+        ("GET", "/sys.b"),
+    ]
+    assert transport.request_details[1][2:] == (
+        b"{id:'436f726520537769746368'}",
+        {"Content-Type": "text/plain"},
+    )
+
+
+def test_adapter_skips_device_name_post_when_already_configured() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    transport = FakeTransport(fixture_payload())
+    adapter = CSS106Plugin(transport_factory=lambda connection: transport).create(  # type: ignore[arg-type]
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+
+    result = adapter.set_device_name(DeviceNameUpdate(name="Office Switch"))
+
+    assert not result.changed
+    assert result.value.name == "Office Switch"
+    assert transport.requests == [("GET", "/sys.b")]
+
+
+def test_adapter_rejects_device_name_identity_or_read_back_mismatch() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    changed_identity = fixture_payload().replace(b"322e3139", b"322e3230")
+    transport = FakeTransport(changed_identity)
+    adapter = CSS106Plugin(transport_factory=lambda connection: transport).create(  # type: ignore[arg-type]
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+    with pytest.raises(ProtocolError, match="identity changed"):
+        adapter.set_device_name(DeviceNameUpdate(name="Core Switch"))
+    assert transport.requests == [("GET", "/sys.b")]
+
+    transport = FakeTransport((fixture_payload(), b"", fixture_payload()))
+    adapter = CSS106Plugin(transport_factory=lambda connection: transport).create(  # type: ignore[arg-type]
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+    with pytest.raises(ProtocolError, match="read-back verification"):
+        adapter.set_device_name(DeviceNameUpdate(name="Core Switch"))
+
+
+def test_adapter_validates_device_name_before_transport() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    transport = FakeTransport(fixture_payload())
+    adapter = CSS106Plugin(transport_factory=lambda connection: transport).create(  # type: ignore[arg-type]
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+
+    with pytest.raises(InvalidOperationError, match="printable ASCII"):
+        adapter.set_device_name(DeviceNameUpdate(name="Cöre"))
+    assert transport.requests == []
+
+
 def test_shared_decoder_model_gates_rb260gsp_health_and_poe_fields() -> None:
     identity = identity_from_system(parse_payload(fixture_payload()))
     assert identity is not None
@@ -427,6 +563,8 @@ def test_shared_decoder_model_gates_rb260gsp_health_and_poe_fields() -> None:
         support=None,
     )
     assert not adapter.capabilities.supports("port_name_write")
+    assert not adapter.capabilities.supports("device_name_write")
+    assert not adapter.capabilities.supports("snmp_metadata_write")
 
 
 def test_adapter_validates_port_name_before_no_op_or_transport() -> None:
@@ -804,6 +942,143 @@ def test_snmp_decoder_rejects_invalid_values() -> None:
     data["com"] = "61" * 65
     with pytest.raises(ProtocolError, match="invalid values"):
         snmp_from_payload(data)
+
+
+def test_snmp_metadata_encoder_preserves_raw_service_fields_and_exact_order() -> None:
+    data = parse_payload(snmp_fixture_payload())
+    data["com"] = "5055424c4943"
+
+    content, desired = encode_snmp_metadata_update(
+        data,
+        SnmpMetadataUpdate(contact="Network Ops"),
+    )
+
+    assert content == (
+        b"{en:0x01,com:'5055424c4943',ci:'4e6574776f726b204f7073',loc:'4f6666696365'}"
+    )
+    assert desired.enabled == 1
+    assert desired.raw_community == "5055424c4943"
+    assert desired.raw_location == "4f6666696365"
+
+
+def test_snmp_metadata_encoder_preserves_omitted_and_clears_empty_values() -> None:
+    content, desired = encode_snmp_metadata_update(
+        parse_payload(snmp_fixture_payload()),
+        SnmpMetadataUpdate(contact=None, location=""),
+    )
+
+    assert content == b"{en:0x01,com:'7075626c6963',ci:'4f7073',loc:''}"
+    assert desired.raw_contact == "4f7073"
+    assert desired.raw_location == ""
+
+
+@pytest.mark.parametrize(
+    "update, message",
+    [
+        (SnmpMetadataUpdate(contact="x" * (MAX_SNMP_METADATA_BYTES + 1)), "cannot exceed"),
+        (SnmpMetadataUpdate(location="Rack\n1"), "printable ASCII"),
+        (SnmpMetadataUpdate(contact="Tëam"), "printable ASCII"),
+    ],
+)
+def test_snmp_metadata_encoder_rejects_unvalidated_values(
+    update: SnmpMetadataUpdate, message: str
+) -> None:
+    with pytest.raises(InvalidOperationError, match=message):
+        encode_snmp_metadata_update(parse_payload(snmp_fixture_payload()), update)
+
+
+def test_adapter_sets_and_verifies_complete_snmp_metadata_state() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    after = updated_snmp_payload(contact="Network Ops", location="Rack 1")
+    transport = FakeTransport((fixture_payload(), snmp_fixture_payload(), b"", after))
+    adapter = CSS106Plugin(transport_factory=lambda connection: transport).create(  # type: ignore[arg-type]
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+
+    result = adapter.set_snmp_metadata(SnmpMetadataUpdate(contact="Network Ops", location="Rack 1"))
+
+    assert result.changed
+    assert result.value.contact == "Network Ops"
+    assert result.value.location == "Rack 1"
+    assert result.value.community == "public"
+    assert set(result.model_dump(mode="json")) == {"changed", "value", "warnings"}
+    assert transport.requests == [
+        ("GET", "/sys.b"),
+        ("GET", "/snmp.b"),
+        ("POST", "/snmp.b"),
+        ("GET", "/snmp.b"),
+    ]
+    assert transport.request_details[2][2:] == (
+        b"{en:0x01,com:'7075626c6963',ci:'4e6574776f726b204f7073',loc:'5261636b2031'}",
+        {"Content-Type": "text/plain"},
+    )
+
+
+def test_adapter_skips_snmp_metadata_post_for_omitted_or_matching_values() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    transport = FakeTransport((fixture_payload(), snmp_fixture_payload()))
+    adapter = CSS106Plugin(transport_factory=lambda connection: transport).create(  # type: ignore[arg-type]
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+
+    result = adapter.set_snmp_metadata(SnmpMetadataUpdate(contact="Ops"))
+
+    assert not result.changed
+    assert result.value.location == "Office"
+    assert transport.requests == [("GET", "/sys.b"), ("GET", "/snmp.b")]
+
+
+def test_adapter_rejects_snmp_identity_change_and_full_state_mismatch() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    changed_identity = fixture_payload().replace(b"322e3139", b"322e3230")
+    transport = FakeTransport(changed_identity)
+    adapter = CSS106Plugin(transport_factory=lambda connection: transport).create(  # type: ignore[arg-type]
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+    with pytest.raises(ProtocolError, match="identity changed"):
+        adapter.set_snmp_metadata(SnmpMetadataUpdate(contact="NOC"))
+    assert transport.requests == [("GET", "/sys.b")]
+
+    changed_community = updated_snmp_payload(contact="NOC").replace(
+        b"7075626c6963", b"70726976617465"
+    )
+    transport = FakeTransport((fixture_payload(), snmp_fixture_payload(), b"", changed_community))
+    adapter = CSS106Plugin(transport_factory=lambda connection: transport).create(  # type: ignore[arg-type]
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+    with pytest.raises(ProtocolError, match="read-back verification"):
+        adapter.set_snmp_metadata(SnmpMetadataUpdate(contact="NOC"))
+
+
+def test_adapter_validates_all_snmp_metadata_before_transport() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    transport = FakeTransport(fixture_payload())
+    adapter = CSS106Plugin(transport_factory=lambda connection: transport).create(  # type: ignore[arg-type]
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+
+    with pytest.raises(InvalidOperationError, match="printable ASCII"):
+        adapter.set_snmp_metadata(SnmpMetadataUpdate(contact="Ops", location="Räck"))
+    assert transport.requests == []
 
 
 def test_adapter_normalizes_port_vlan_policy() -> None:

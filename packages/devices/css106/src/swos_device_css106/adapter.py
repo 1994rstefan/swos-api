@@ -10,6 +10,7 @@ from swos_core.models import (
     DeviceCapabilities,
     DeviceConnection,
     DeviceIdentity,
+    DeviceNameUpdate,
     ForwardingInfo,
     HostEntry,
     IgmpGroup,
@@ -21,6 +22,7 @@ from swos_core.models import (
     RstpInfo,
     SfpInfo,
     SnmpInfo,
+    SnmpMetadataUpdate,
     SystemInfo,
     VlanInfo,
 )
@@ -30,7 +32,9 @@ from swos_device_css106.protocol import (
     MAX_PAYLOAD_BYTES,
     acl_rules_from_payload,
     dynamic_hosts_from_payload,
+    encode_device_name_update,
     encode_port_name_update,
+    encode_snmp_metadata_update,
     forwarding_from_payload,
     identity_from_system,
     igmp_groups_from_payload,
@@ -43,9 +47,13 @@ from swos_device_css106.protocol import (
     rstp_from_payloads,
     sfp_from_payload,
     snmp_from_payload,
+    snmp_write_state_from_payload,
     static_hosts_from_payload,
     system_info_from_payload,
+    system_name_write_state_from_payload,
+    validate_device_name,
     validate_port_name,
+    validate_snmp_metadata,
     vlans_from_payload,
 )
 
@@ -83,7 +91,13 @@ class CSS106Adapter:
             "vlan",
         }
         if self._identity.product_code == "CSS106-5G-1S":
-            features.add("port_name_write")
+            features.update(
+                {
+                    "device_name_write",
+                    "port_name_write",
+                    "snmp_metadata_write",
+                }
+            )
         return DeviceCapabilities(features=frozenset(features))
 
     def get_system_info(self) -> SystemInfo:
@@ -240,3 +254,104 @@ class CSS106Adapter:
             changed=True,
             value=after_ports[update.number - 1],
         )
+
+    def set_device_name(self, update: DeviceNameUpdate) -> OperationResult[SystemInfo]:
+        """Set the device name with a fresh identity check and sparse write."""
+
+        validate_device_name(update.name)
+        with self._transport_factory(self._connection) as transport:
+            before_payload = transport.request(
+                "GET", "/sys.b", max_response_bytes=MAX_PAYLOAD_BYTES
+            )
+            before_data = parse_payload(before_payload)
+            reported_identity = identity_from_system(before_data)
+            if reported_identity != self._identity:
+                raise ProtocolError("CSS106 identity changed after device probing")
+            before_info = system_info_from_payload(before_data, reported_identity)
+            content, expected_state = encode_device_name_update(before_data, update)
+            if before_info.name == update.name:
+                return OperationResult[SystemInfo](changed=False, value=before_info)
+
+            transport.request(
+                "POST",
+                "/sys.b",
+                content=content,
+                headers={"Content-Type": "text/plain"},
+                max_response_bytes=MAX_PAYLOAD_BYTES,
+            )
+            after_payload = transport.request("GET", "/sys.b", max_response_bytes=MAX_PAYLOAD_BYTES)
+
+        after_data = parse_payload(after_payload)
+        reported_identity = identity_from_system(after_data)
+        if reported_identity != self._identity:
+            raise ProtocolError("CSS106 identity changed after device-name write")
+        if system_name_write_state_from_payload(after_data) != expected_state:
+            raise ProtocolError("CSS106 device-name write failed read-back verification")
+        after_info = system_info_from_payload(after_data, reported_identity)
+        if _system_configuration(after_info) != _system_configuration(before_info):
+            raise ProtocolError("CSS106 device-name write changed unrelated system configuration")
+        return OperationResult[SystemInfo](
+            changed=True,
+            value=after_info,
+        )
+
+    def set_snmp_metadata(self, update: SnmpMetadataUpdate) -> OperationResult[SnmpInfo]:
+        """Set SNMP metadata with preserved service settings and full read-back."""
+
+        if update.contact is not None:
+            validate_snmp_metadata(update.contact, "contact")
+        if update.location is not None:
+            validate_snmp_metadata(update.location, "location")
+
+        with self._transport_factory(self._connection) as transport:
+            system_payload = transport.request(
+                "GET", "/sys.b", max_response_bytes=MAX_PAYLOAD_BYTES
+            )
+            if identity_from_system(parse_payload(system_payload)) != self._identity:
+                raise ProtocolError("CSS106 identity changed after device probing")
+
+            before_payload = transport.request(
+                "GET", "/snmp.b", max_response_bytes=MAX_PAYLOAD_BYTES
+            )
+            before_data = parse_payload(before_payload)
+            before_info = snmp_from_payload(before_data)
+            content, expected_state = encode_snmp_metadata_update(before_data, update)
+            desired_contact = before_info.contact if update.contact is None else update.contact
+            desired_location = before_info.location if update.location is None else update.location
+            if before_info.contact == desired_contact and before_info.location == desired_location:
+                return OperationResult[SnmpInfo](changed=False, value=before_info)
+
+            transport.request(
+                "POST",
+                "/snmp.b",
+                content=content,
+                headers={"Content-Type": "text/plain"},
+                max_response_bytes=MAX_PAYLOAD_BYTES,
+            )
+            after_payload = transport.request(
+                "GET", "/snmp.b", max_response_bytes=MAX_PAYLOAD_BYTES
+            )
+
+        after_data = parse_payload(after_payload)
+        if snmp_write_state_from_payload(after_data) != expected_state:
+            after_info = snmp_from_payload(after_data)
+            if (
+                after_info.enabled != before_info.enabled
+                or after_info.community != before_info.community
+                or after_info.contact != desired_contact
+                or after_info.location != desired_location
+            ):
+                raise ProtocolError("CSS106 SNMP metadata write failed read-back verification")
+        return OperationResult[SnmpInfo](changed=True, value=snmp_from_payload(after_data))
+
+
+def _system_configuration(info: SystemInfo) -> tuple[object, ...]:
+    return (
+        info.static_ip,
+        info.mac_address,
+        info.serial_number,
+        info.management,
+        info.independent_vlan_lookup,
+        info.igmp,
+        info.discovery_protocol_port_numbers,
+    )
