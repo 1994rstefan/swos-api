@@ -353,6 +353,27 @@ class FakeDevice:
         )
         return OperationResult[SnmpInfo](changed=info != before, value=info)
 
+    def replace_static_hosts(
+        self,
+        hosts: tuple[HostEntry, ...],
+        *,
+        expected_current: tuple[HostEntry, ...],
+    ) -> OperationResult[tuple[HostEntry, ...]]:
+        current = tuple(host for host in self.get_hosts() if host.entry_type.value == "static")
+        assert expected_current == current
+        return OperationResult[tuple[HostEntry, ...]](changed=hosts != current, value=hosts)
+
+    def replace_acl_rules(
+        self,
+        rules: tuple[AclRule, ...],
+        *,
+        expected_current: tuple[AclRule, ...],
+    ) -> OperationResult[tuple[AclRule, ...]]:
+        assert expected_current == self.get_acl_rules()
+        return OperationResult[tuple[AclRule, ...]](
+            changed=rules != self.get_acl_rules(), value=rules
+        )
+
 
 class FakeRegistry:
     identity = DeviceIdentity(
@@ -963,6 +984,137 @@ def test_host_list_human_and_json_output(monkeypatch) -> None:  # type: ignore[n
     assert hosts[0]["port_numbers"] == [1, 2]
     assert hosts[0]["mirror"] is True
     assert hosts[1]["vlan_id"] is None
+
+
+def test_host_add_and_remove_emit_verified_machine_tables(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    mock_registry(monkeypatch)
+
+    added = runner.invoke(
+        app,
+        [
+            "host",
+            "add",
+            "--mac",
+            "02:00:00:00:00:03",
+            "--vlan",
+            "20",
+            "--port",
+            "5",
+            "--url",
+            "http://192.0.2.1",
+            "-ojson",
+        ],
+    )
+    removed = runner.invoke(
+        app,
+        [
+            "host",
+            "remove",
+            "--mac",
+            "02:00:00:00:00:01",
+            "--vlan",
+            "10",
+            "--url",
+            "http://192.0.2.1",
+            "-ojson",
+        ],
+    )
+
+    assert added.exit_code == 0
+    added_data = json.loads(added.stdout)["data"]
+    assert added_data["changed"] is True
+    assert len(added_data["hosts"]) == 2
+    assert added_data["hosts"][0]["mac_address"] == "02:00:00:00:00:01"
+    assert added_data["hosts"][-1]["port_numbers"] == [5]
+    assert added_data["hosts"][-1]["mac_address"] == "02:00:00:00:00:03"
+    assert removed.exit_code == 0
+    assert json.loads(removed.stdout)["data"]["hosts"] == []
+
+
+def test_host_add_updates_existing_key_in_place(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    def two_static_hosts(self) -> tuple[HostEntry, ...]:  # type: ignore[no-untyped-def]
+        del self
+        return (
+            HostEntry(
+                entry_type="static",
+                mac_address="02:00:00:00:00:01",
+                vlan_id=10,
+                port_numbers=(1,),
+            ),
+            HostEntry(
+                entry_type="static",
+                mac_address="02:00:00:00:00:02",
+                vlan_id=20,
+                port_numbers=(2,),
+            ),
+        )
+
+    monkeypatch.setattr(FakeDevice, "get_hosts", two_static_hosts)
+    mock_registry(monkeypatch)
+
+    result = runner.invoke(
+        app,
+        [
+            "host",
+            "add",
+            "--mac",
+            "02:00:00:00:00:01",
+            "--vlan",
+            "10",
+            "--port",
+            "5",
+            "--url",
+            "http://192.0.2.1",
+            "-ojson",
+        ],
+    )
+
+    assert result.exit_code == 0
+    hosts = json.loads(result.stdout)["data"]["hosts"]
+    assert [host["mac_address"] for host in hosts] == [
+        "02:00:00:00:00:01",
+        "02:00:00:00:00:02",
+    ]
+    assert hosts[0]["port_numbers"] == [5]
+
+
+def test_acl_add_and_remove_emit_verified_machine_tables(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    mock_registry(monkeypatch)
+
+    added = runner.invoke(
+        app,
+        [
+            "acl",
+            "add",
+            "--ingress-port",
+            "5",
+            "--drop",
+            "--url",
+            "http://192.0.2.1",
+            "-ojson",
+        ],
+    )
+    removed = runner.invoke(
+        app,
+        [
+            "acl",
+            "remove",
+            "1",
+            "--url",
+            "http://192.0.2.1",
+            "-ojson",
+        ],
+    )
+
+    assert added.exit_code == 0
+    added_data = json.loads(added.stdout)["data"]
+    assert len(added_data["rules"]) == 2
+    assert added_data["rules"][0]["ingress_port_numbers"] == [1, 2]
+    assert added_data["rules"][-1]["number"] == 2
+    assert added_data["rules"][-1]["drop"] is True
+    assert added_data["rules"][-1]["ingress_port_numbers"] == [5]
+    assert removed.exit_code == 0
+    assert json.loads(removed.stdout)["data"]["rules"] == []
 
 
 def test_rstp_show_human_and_json_output(monkeypatch) -> None:  # type: ignore[no-untyped-def]

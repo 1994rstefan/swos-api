@@ -88,6 +88,7 @@ class FakeAdapter:
             features=frozenset(
                 {
                     "acl",
+                    "acl_write",
                     "device_name_write",
                     "forwarding",
                     "hosts",
@@ -100,6 +101,7 @@ class FakeAdapter:
                     "sfp",
                     "snmp",
                     "snmp_metadata_write",
+                    "static_hosts_write",
                     "system",
                     "vlan",
                 }
@@ -272,6 +274,24 @@ class FakeAdapter:
             ),
         )
 
+    def replace_static_hosts(
+        self,
+        hosts: tuple[HostEntry, ...],
+        *,
+        expected_current: tuple[HostEntry, ...],
+    ) -> OperationResult[tuple[HostEntry, ...]]:
+        del expected_current
+        return OperationResult[tuple[HostEntry, ...]](changed=True, value=hosts)
+
+    def replace_acl_rules(
+        self,
+        rules: tuple[AclRule, ...],
+        *,
+        expected_current: tuple[AclRule, ...],
+    ) -> OperationResult[tuple[AclRule, ...]]:
+        del expected_current
+        return OperationResult[tuple[AclRule, ...]](changed=True, value=rules)
+
 
 def identity(version: str = "2.19") -> DeviceIdentity:
     return DeviceIdentity(
@@ -436,6 +456,10 @@ def test_policy_bound_device_rejects_unsupported_feature() -> None:
         device.set_device_name(DeviceNameUpdate(name="Core Switch"))
     with pytest.raises(UnsupportedFeatureError, match="snmp metadata write"):
         device.set_snmp_metadata(SnmpMetadataUpdate(contact="Ops"))
+    with pytest.raises(UnsupportedFeatureError, match="static hosts write"):
+        device.replace_static_hosts((), expected_current=())
+    with pytest.raises(UnsupportedFeatureError, match="acl write"):
+        device.replace_acl_rules((), expected_current=())
 
 
 def test_policy_bound_device_authorizes_and_returns_write_result() -> None:
@@ -452,12 +476,18 @@ def test_policy_bound_device_authorizes_and_returns_write_result() -> None:
             negotiation=ForcedPortNegotiation(speed_bps=10_000_000, duplex="half"),
         )
     )
+    hosts = device.replace_static_hosts((), expected_current=())
+    rules = device.replace_acl_rules((), expected_current=())
 
     assert result.changed
     assert result.value.name == "Uplink"
     assert result.warnings == ()
     assert configured.value.configured_speed_bps == 10_000_000
     assert not configured.value.configured_full_duplex
+    assert hosts.changed
+    assert hosts.value == ()
+    assert rules.changed
+    assert rules.value == ()
     assert configured.warnings == ()
 
     device_name = device.set_device_name(DeviceNameUpdate(name="Core Switch"))

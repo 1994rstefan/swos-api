@@ -33,10 +33,12 @@ from swos_device_css106.protocol import (
     MAX_PAYLOAD_BYTES,
     acl_rules_from_payload,
     dynamic_hosts_from_payload,
+    encode_acl_rules,
     encode_device_name_update,
     encode_port_configuration_update,
     encode_port_name_update,
     encode_snmp_metadata_update,
+    encode_static_hosts,
     forwarding_from_payload,
     identity_from_system,
     igmp_groups_from_payload,
@@ -99,6 +101,7 @@ class CSS106Adapter:
                     "port_configuration_write",
                     "port_name_write",
                     "snmp_metadata_write",
+                    "static_hosts_write",
                 }
             )
         return DeviceCapabilities(features=frozenset(features))
@@ -396,6 +399,83 @@ class CSS106Adapter:
             ):
                 raise ProtocolError("CSS106 SNMP metadata write failed read-back verification")
         return OperationResult[SnmpInfo](changed=True, value=snmp_from_payload(after_data))
+
+    def replace_static_hosts(
+        self,
+        hosts: tuple[HostEntry, ...],
+        *,
+        expected_current: tuple[HostEntry, ...],
+    ) -> OperationResult[tuple[HostEntry, ...]]:
+        """Replace all static hosts with identity, no-op, and read-back guards."""
+
+        content = encode_static_hosts(hosts, self._identity)
+        with self._transport_factory(self._connection) as transport:
+            self._verify_identity(transport)
+            before_payload = transport.request(
+                "GET", "/host.b", max_response_bytes=MAX_PAYLOAD_BYTES
+            )
+            before = static_hosts_from_payload(parse_table_payload(before_payload), self._identity)
+            if before != expected_current:
+                raise InvalidOperationError(
+                    "CSS106 static host table changed since the expected baseline"
+                )
+            if before == hosts:
+                return OperationResult[tuple[HostEntry, ...]](changed=False, value=before)
+
+            transport.request(
+                "POST",
+                "/host.b",
+                content=content,
+                headers={"Content-Type": "text/plain"},
+                max_response_bytes=MAX_PAYLOAD_BYTES,
+            )
+            after_payload = transport.request(
+                "GET", "/host.b", max_response_bytes=MAX_PAYLOAD_BYTES
+            )
+
+        after = static_hosts_from_payload(parse_table_payload(after_payload), self._identity)
+        if after != hosts:
+            raise ProtocolError("CSS106 static-host write failed full-table read-back verification")
+        return OperationResult[tuple[HostEntry, ...]](changed=True, value=after)
+
+    def replace_acl_rules(
+        self,
+        rules: tuple[AclRule, ...],
+        *,
+        expected_current: tuple[AclRule, ...],
+    ) -> OperationResult[tuple[AclRule, ...]]:
+        """Replace all ACL rules with identity, no-op, and read-back guards."""
+
+        content = encode_acl_rules(rules, self._identity)
+        with self._transport_factory(self._connection) as transport:
+            self._verify_identity(transport)
+            before_payload = transport.request(
+                "GET", "/acl.b", max_response_bytes=MAX_PAYLOAD_BYTES
+            )
+            before = acl_rules_from_payload(parse_table_payload(before_payload), self._identity)
+            if before != expected_current:
+                raise InvalidOperationError("CSS106 ACL table changed since the expected baseline")
+            if before == rules:
+                return OperationResult[tuple[AclRule, ...]](changed=False, value=before)
+
+            transport.request(
+                "POST",
+                "/acl.b",
+                content=content,
+                headers={"Content-Type": "text/plain"},
+                max_response_bytes=MAX_PAYLOAD_BYTES,
+            )
+            after_payload = transport.request("GET", "/acl.b", max_response_bytes=MAX_PAYLOAD_BYTES)
+
+        after = acl_rules_from_payload(parse_table_payload(after_payload), self._identity)
+        if after != rules:
+            raise ProtocolError("CSS106 ACL write failed full-table read-back verification")
+        return OperationResult[tuple[AclRule, ...]](changed=True, value=after)
+
+    def _verify_identity(self, transport: HttpTransport) -> None:
+        system_payload = transport.request("GET", "/sys.b", max_response_bytes=MAX_PAYLOAD_BYTES)
+        if identity_from_system(parse_payload(system_payload)) != self._identity:
+            raise ProtocolError("CSS106 identity changed after device probing")
 
 
 def _system_configuration(info: SystemInfo) -> tuple[object, ...]:

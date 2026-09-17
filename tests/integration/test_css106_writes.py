@@ -4,6 +4,8 @@ import pytest
 from swos_core import (
     DeviceConnection,
     DeviceNameUpdate,
+    HostEntry,
+    HostEntryType,
     PluginRegistry,
     PortConfigurationUpdate,
     PortNameUpdate,
@@ -139,3 +141,43 @@ def test_rb260gs_219_snmp_metadata_write_and_restore() -> None:
         assert restored.value.contact == original.contact
         assert restored.value.location == original.location
         assert restored.value.community == original.community
+
+
+@pytest.mark.integration
+@pytest.mark.destructive
+def test_rb260gs_219_static_host_write_and_restore_empty_table() -> None:
+    connection = DeviceConnection(
+        url=os.environ.get("SWOS_INTEGRATION_URL", "http://192.168.88.1"),
+        username=os.environ.get("SWOS_INTEGRATION_USERNAME", "admin"),
+        password=os.environ.get("SWOS_INTEGRATION_PASSWORD", ""),
+    )
+    registry = PluginRegistry.discover()
+    identity = registry.probe(connection)
+    device = registry.connect(identity, connection, FirmwareSafetyPolicy())
+    original = tuple(host for host in device.get_hosts() if host.entry_type is HostEntryType.STATIC)
+    if original:
+        pytest.skip("static host table is not empty; refusing destructive replacement test")
+    temporary = HostEntry(
+        entry_type=HostEntryType.STATIC,
+        mac_address="02:00:00:ff:ff:05",
+        vlan_id=1,
+        port_numbers=(5,),
+    )
+
+    try:
+        changed = device.replace_static_hosts((temporary,), expected_current=original)
+        assert changed.changed
+        assert changed.value == (temporary,)
+        assert tuple(
+            host for host in device.get_hosts() if host.entry_type is HostEntryType.STATIC
+        ) == (temporary,)
+    finally:
+        cleanup_current = tuple(
+            host for host in device.get_hosts() if host.entry_type is HostEntryType.STATIC
+        )
+        assert cleanup_current in ((), (temporary,)), (
+            "static host table changed unexpectedly; refusing to erase unowned rows"
+        )
+        restored = device.replace_static_hosts((), expected_current=cleanup_current)
+        assert restored.value == ()
+        assert not any(host.entry_type is HostEntryType.STATIC for host in device.get_hosts())

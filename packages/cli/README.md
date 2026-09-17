@@ -23,12 +23,24 @@ swosctl port configure 5 --negotiation auto --device office
 swosctl port configure 5 --negotiation forced --speed-bps 100000000 --duplex full --device office
 swosctl snmp metadata set --contact "Network Operations" --device office
 swosctl snmp metadata set --location "" --device office
+swosctl host add --mac 02:00:00:00:00:05 --vlan 10 --port 5 --device office
+swosctl host remove --mac 02:00:00:00:00:05 --vlan 10 --device office
 swosctl -o json port rename 1 Uplink --device office
 ```
 
 Omitted SNMP metadata options preserve their current values. Passing an empty
 string explicitly clears the selected field. Write commands do not prompt for
 confirmation; firmware write authorization is enforced by `swos-core`.
+
+Static-host add updates the exact MAC/VLAN key in place and accepts repeatable
+`--port` options restricted to ports 1-5. CLI table mutations pass their read
+baseline to the adapter and abort if its fresh read differs. Every successful
+table mutation returns the complete verified table in JSON output.
+
+Typed `acl add` and numbered `acl remove` commands are implemented, including
+repeatable `--ingress-port` and `--redirect-port` options. ACL ingress cannot
+include management port 6. These commands require an `acl_write` capability;
+CSS106 does not currently advertise it pending harmless hardware validation.
 
 Port configuration writes accept only Ethernet ports 1-5. Port 6 is the SFP
 management path and cannot be renamed or configured. Forced negotiation requires

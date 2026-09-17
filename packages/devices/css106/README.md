@@ -40,6 +40,23 @@ full/half duplex. The complete `/link.b` body contains only `en`, `nm`, `an`,
 device-name body contains only `id`. The complete SNMP body is ordered `en`,
 `com`, `ci`, `loc` and preserves the raw enabled and community fields.
 
-SwOS does not expose a revision token or compare-and-swap operation. Avoid
-concurrent web-UI or API edits while a write is running. `/link.b` and
-`/snmp.b` require complete writable-state POSTs.
+Complete static-host table replacement is also guarded on that exact device
+identity. It validates row limits and the complete desired table before
+transport, requires the fresh table to match the caller's expected baseline,
+skips exact no-ops, sends one `text/plain` POST, and verifies every row through
+a fresh read. `/host.b` rows are ordered `prt`, `adr`, `vid`, `drp`, `mir`; only
+static entries targeting ports 1-5 are
+accepted, with the table bounded by the 2048-entry forwarding database.
+
+ACL replacement is implemented with the same baseline, serialization, and
+readback guards. `/acl.b` rows preserve the firmware's complete 26-field order
+and 32-rule limit. Rules are numbered consecutively and any rule whose ingress
+includes management port 6 is rejected. Redirecting traffic to port 6 remains
+representable. The plugin deliberately does not advertise `acl_write`: no
+truly no-effect rule on a link-down port 5 has yet been proven and restored on
+hardware.
+
+SwOS does not expose a revision token or compare-and-swap operation. Table
+writes detect changes between the CLI read and the adapter's fresh read, but
+concurrent web-UI or API edits remain unsafe between that read and POST.
+`/link.b` and `/snmp.b` require complete writable-state POSTs.

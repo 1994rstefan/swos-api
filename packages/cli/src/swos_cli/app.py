@@ -13,10 +13,15 @@ from typing import Annotated, Any, Literal, cast
 import typer
 import typer._click as click
 from dotenv import dotenv_values
+from pydantic import ValidationError
 from swos_core import (
+    AclRule,
+    AclVlanTagMode,
     DeviceConnection,
     DeviceNameUpdate,
     ForcedPortNegotiation,
+    HostEntry,
+    HostEntryType,
     OperationResult,
     PacketSizeStatistics,
     PluginRegistry,
@@ -838,6 +843,134 @@ def acl_list(ctx: typer.Context) -> None:
     renderer.success(data, human="\n".join(lines).rstrip())
 
 
+@acl_app.command("add")
+def acl_add(
+    ctx: typer.Context,
+    ingress_port: Annotated[
+        list[int], typer.Option("--ingress-port", min=1, max=5, help="Ingress port (repeatable).")
+    ],
+    source_mac: Annotated[str | None, typer.Option("--source-mac")] = None,
+    source_mac_mask: Annotated[str, typer.Option("--source-mac-mask")] = "ff:ff:ff:ff:ff:ff",
+    destination_mac: Annotated[str | None, typer.Option("--destination-mac")] = None,
+    destination_mac_mask: Annotated[
+        str, typer.Option("--destination-mac-mask")
+    ] = "ff:ff:ff:ff:ff:ff",
+    ether_type: Annotated[int, typer.Option("--ether-type", min=0, max=0xFFFF)] = 0,
+    vlan_tag: Annotated[AclVlanTagMode, typer.Option("--vlan-tag")] = AclVlanTagMode.ANY,
+    vlan_id_min: Annotated[int, typer.Option("--vlan-id-min", min=0, max=4095)] = 0,
+    vlan_id_max: Annotated[int, typer.Option("--vlan-id-max", min=0, max=4095)] = 0,
+    vlan_priority: Annotated[int | None, typer.Option("--vlan-priority", min=0, max=7)] = None,
+    source_ip: Annotated[str | None, typer.Option("--source-ip")] = None,
+    source_prefix_length: Annotated[int, typer.Option("--source-prefix-length", min=0, max=32)] = 0,
+    source_port_min: Annotated[int, typer.Option("--source-port-min", min=0, max=0xFFFF)] = 0,
+    source_port_max: Annotated[int, typer.Option("--source-port-max", min=0, max=0xFFFF)] = 0,
+    destination_ip: Annotated[str | None, typer.Option("--destination-ip")] = None,
+    destination_prefix_length: Annotated[
+        int, typer.Option("--destination-prefix-length", min=0, max=32)
+    ] = 0,
+    destination_port_min: Annotated[
+        int, typer.Option("--destination-port-min", min=0, max=0xFFFF)
+    ] = 0,
+    destination_port_max: Annotated[
+        int, typer.Option("--destination-port-max", min=0, max=0xFFFF)
+    ] = 0,
+    protocol_number: Annotated[int, typer.Option("--protocol-number", min=0, max=0xFF)] = 0,
+    dscp: Annotated[int | None, typer.Option("--dscp", min=0, max=63)] = None,
+    redirect_port: Annotated[
+        list[int] | None,
+        typer.Option("--redirect-port", min=1, max=6, help="Redirect target (repeatable)."),
+    ] = None,
+    drop: Annotated[bool, typer.Option("--drop", help="Drop matching traffic.")] = False,
+    mirror: Annotated[bool, typer.Option("--mirror", help="Mirror matching traffic.")] = False,
+    rate_bps: Annotated[int | None, typer.Option("--rate-bps", min=1, max=0xFFFFFFFF)] = None,
+    set_vlan_id: Annotated[int | None, typer.Option("--set-vlan-id", min=1, max=4095)] = None,
+    set_vlan_priority: Annotated[
+        int | None, typer.Option("--set-vlan-priority", min=0, max=7)
+    ] = None,
+) -> None:
+    """Append and verify one fully typed ACL rule without prompting."""
+
+    if drop and redirect_port:
+        raise typer.BadParameter("--drop cannot be combined with --redirect-port")
+    cli_context: CliContext = ctx.ensure_object(CliContext)
+    renderer = OutputRenderer(cli_context.configuration.settings.output)
+    try:
+        connected_device = _connect_device(cli_context)
+        current = connected_device.get_acl_rules()
+        redirect_ports = tuple(sorted(redirect_port or ()))
+        rule = AclRule(
+            number=len(current) + 1,
+            ingress_port_numbers=tuple(sorted(ingress_port)),
+            source_mac=source_mac,
+            source_mac_mask=source_mac_mask,
+            destination_mac=destination_mac,
+            destination_mac_mask=destination_mac_mask,
+            ether_type=ether_type,
+            vlan_tag=vlan_tag,
+            vlan_id_min=vlan_id_min,
+            vlan_id_max=vlan_id_max,
+            vlan_priority=vlan_priority,
+            source_ip=source_ip,
+            source_prefix_length=source_prefix_length,
+            source_port_min=source_port_min,
+            source_port_max=source_port_max,
+            destination_ip=destination_ip,
+            destination_prefix_length=destination_prefix_length,
+            destination_port_min=destination_port_min,
+            destination_port_max=destination_port_max,
+            protocol_number=protocol_number,
+            dscp=dscp,
+            redirect_enabled=drop or bool(redirect_ports),
+            redirect_port_numbers=redirect_ports,
+            drop=drop,
+            mirror=mirror,
+            ingress_rate_limit_bps=rate_bps,
+            set_vlan_id=set_vlan_id,
+            set_vlan_priority=set_vlan_priority,
+        )
+        result = connected_device.replace_acl_rules((*current, rule), expected_current=current)
+    except ValidationError as exc:
+        renderer.error("invalid_acl_rule", str(exc))
+        raise typer.Exit(code=2) from exc
+    except ConfigurationError as exc:
+        renderer.error("configuration_error", str(exc))
+        raise typer.Exit(code=2) from exc
+    except SwOSError as exc:
+        renderer.error(_error_code(exc), str(exc))
+        raise typer.Exit(code=1) from exc
+
+    _render_acl_write(renderer, result, "ACL rule appended")
+
+
+@acl_app.command("remove")
+def acl_remove(
+    ctx: typer.Context,
+    number: Annotated[int, typer.Argument(min=1, help="Ordered ACL rule number to remove.")],
+) -> None:
+    """Remove an ACL rule by number and verify the complete remaining table."""
+
+    cli_context: CliContext = ctx.ensure_object(CliContext)
+    renderer = OutputRenderer(cli_context.configuration.settings.output)
+    try:
+        connected_device = _connect_device(cli_context)
+        current = connected_device.get_acl_rules()
+        desired = tuple(
+            rule.model_copy(update={"number": index})
+            for index, rule in enumerate(
+                (rule for rule in current if rule.number != number), start=1
+            )
+        )
+        result = connected_device.replace_acl_rules(desired, expected_current=current)
+    except ConfigurationError as exc:
+        renderer.error("configuration_error", str(exc))
+        raise typer.Exit(code=2) from exc
+    except SwOSError as exc:
+        renderer.error(_error_code(exc), str(exc))
+        raise typer.Exit(code=1) from exc
+
+    _render_acl_write(renderer, result, f"ACL rule {number} removed")
+
+
 @host_app.command("list")
 def host_list(ctx: typer.Context) -> None:
     """List normalized static and dynamically learned host entries."""
@@ -871,6 +1004,96 @@ def host_list(ctx: typer.Context) -> None:
         )
     lines.extend(f"Warning: {warning.message}" for warning in connected_device.warnings)
     renderer.success(data, human="\n".join(lines))
+
+
+@host_app.command("add")
+def host_add(
+    ctx: typer.Context,
+    mac_address: Annotated[str, typer.Option("--mac", help="Static host MAC address.")],
+    vlan_id: Annotated[int, typer.Option("--vlan", min=1, max=4095)],
+    port: Annotated[
+        list[int] | None,
+        typer.Option("--port", min=1, max=5, help="Target Ethernet port (repeatable)."),
+    ] = None,
+    drop: Annotated[bool, typer.Option("--drop")] = False,
+    mirror: Annotated[bool, typer.Option("--mirror")] = False,
+) -> None:
+    """Add or replace one static host by MAC and VLAN without prompting."""
+
+    cli_context: CliContext = ctx.ensure_object(CliContext)
+    renderer = OutputRenderer(cli_context.configuration.settings.output)
+    try:
+        connected_device = _connect_device(cli_context)
+        current = tuple(
+            host for host in connected_device.get_hosts() if host.entry_type is HostEntryType.STATIC
+        )
+        host = HostEntry(
+            entry_type=HostEntryType.STATIC,
+            mac_address=mac_address,
+            vlan_id=vlan_id,
+            port_numbers=tuple(sorted(port or ())),
+            drop=drop,
+            mirror=mirror,
+        )
+        desired = list(current)
+        for index, existing in enumerate(desired):
+            if (existing.mac_address, existing.vlan_id) == (host.mac_address, host.vlan_id):
+                desired[index] = host
+                break
+        else:
+            desired.append(host)
+        result = connected_device.replace_static_hosts(tuple(desired), expected_current=current)
+    except ValidationError as exc:
+        renderer.error("invalid_static_host", str(exc))
+        raise typer.Exit(code=2) from exc
+    except ConfigurationError as exc:
+        renderer.error("configuration_error", str(exc))
+        raise typer.Exit(code=2) from exc
+    except SwOSError as exc:
+        renderer.error(_error_code(exc), str(exc))
+        raise typer.Exit(code=1) from exc
+
+    _render_host_write(renderer, result, "Static host added or updated")
+
+
+@host_app.command("remove")
+def host_remove(
+    ctx: typer.Context,
+    mac_address: Annotated[str, typer.Option("--mac", help="Static host MAC address.")],
+    vlan_id: Annotated[int, typer.Option("--vlan", min=1, max=4095)],
+) -> None:
+    """Remove one static host by exact MAC and VLAN identity."""
+
+    cli_context: CliContext = ctx.ensure_object(CliContext)
+    renderer = OutputRenderer(cli_context.configuration.settings.output)
+    try:
+        key = HostEntry(
+            entry_type=HostEntryType.STATIC,
+            mac_address=mac_address,
+            vlan_id=vlan_id,
+            port_numbers=(),
+        )
+        connected_device = _connect_device(cli_context)
+        current = tuple(
+            host for host in connected_device.get_hosts() if host.entry_type is HostEntryType.STATIC
+        )
+        desired = tuple(
+            host
+            for host in current
+            if (host.mac_address, host.vlan_id) != (key.mac_address, key.vlan_id)
+        )
+        result = connected_device.replace_static_hosts(desired, expected_current=current)
+    except ValidationError as exc:
+        renderer.error("invalid_static_host", str(exc))
+        raise typer.Exit(code=2) from exc
+    except ConfigurationError as exc:
+        renderer.error("configuration_error", str(exc))
+        raise typer.Exit(code=2) from exc
+    except SwOSError as exc:
+        renderer.error(_error_code(exc), str(exc))
+        raise typer.Exit(code=1) from exc
+
+    _render_host_write(renderer, result, "Static host removed")
 
 
 @rstp_app.command("show")
@@ -1106,6 +1329,40 @@ def _yes_no(value: bool) -> str:
 
 def _ports(port_numbers: tuple[int, ...]) -> str:
     return ",".join(str(number) for number in port_numbers) or "-"
+
+
+def _render_host_write(
+    renderer: OutputRenderer,
+    result: OperationResult[tuple[HostEntry, ...]],
+    action: str,
+) -> None:
+    data: dict[str, Any] = {
+        "changed": result.changed,
+        "hosts": [host.model_dump(mode="json") for host in result.value],
+    }
+    if result.warnings:
+        data["warnings"] = [warning.model_dump(mode="json") for warning in result.warnings]
+    message = f"{action}." if result.changed else "Static host table unchanged; no change required."
+    if result.warnings:
+        message += "\n" + "\n".join(f"Warning: {warning.message}" for warning in result.warnings)
+    renderer.success(data, human=message)
+
+
+def _render_acl_write(
+    renderer: OutputRenderer,
+    result: OperationResult[tuple[AclRule, ...]],
+    action: str,
+) -> None:
+    data: dict[str, Any] = {
+        "changed": result.changed,
+        "rules": [rule.model_dump(mode="json") for rule in result.value],
+    }
+    if result.warnings:
+        data["warnings"] = [warning.model_dump(mode="json") for warning in result.warnings]
+    message = f"{action}." if result.changed else "ACL table unchanged; no change required."
+    if result.warnings:
+        message += "\n" + "\n".join(f"Warning: {warning.message}" for warning in result.warnings)
+    renderer.success(data, human=message)
 
 
 def _network(address: str | None, prefix_length: int) -> str:

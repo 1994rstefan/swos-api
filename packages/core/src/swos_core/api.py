@@ -125,6 +125,26 @@ class DeviceAdapter(Protocol):
 
         ...
 
+    def replace_static_hosts(
+        self,
+        hosts: tuple[HostEntry, ...],
+        *,
+        expected_current: tuple[HostEntry, ...],
+    ) -> OperationResult[tuple[HostEntry, ...]]:
+        """Replace the static host table if its fresh state matches the expected baseline."""
+
+        ...
+
+    def replace_acl_rules(
+        self,
+        rules: tuple[AclRule, ...],
+        *,
+        expected_current: tuple[AclRule, ...],
+    ) -> OperationResult[tuple[AclRule, ...]]:
+        """Replace the ACL table if its fresh state matches the expected baseline."""
+
+        ...
+
 
 class SwOSDevice:
     """Core-owned device facade that enforces firmware policy per operation."""
@@ -303,6 +323,42 @@ class SwOSDevice:
             raise UnsupportedFeatureError("snmp_metadata_write")
         result = self._adapter.set_snmp_metadata(update)
         return OperationResult[SnmpInfo](
+            changed=result.changed,
+            value=result.value,
+            warnings=warnings,
+        )
+
+    def replace_static_hosts(
+        self,
+        hosts: tuple[HostEntry, ...],
+        *,
+        expected_current: tuple[HostEntry, ...],
+    ) -> OperationResult[tuple[HostEntry, ...]]:
+        """Replace static hosts after enforcing write safety and capability checks."""
+
+        warnings = self._authorize(write=True)
+        if not self.capabilities.supports("static_hosts_write"):
+            raise UnsupportedFeatureError("static_hosts_write")
+        result = self._adapter.replace_static_hosts(hosts, expected_current=expected_current)
+        return OperationResult[tuple[HostEntry, ...]](
+            changed=result.changed,
+            value=result.value,
+            warnings=warnings,
+        )
+
+    def replace_acl_rules(
+        self,
+        rules: tuple[AclRule, ...],
+        *,
+        expected_current: tuple[AclRule, ...],
+    ) -> OperationResult[tuple[AclRule, ...]]:
+        """Replace ACL rules after enforcing write safety and capability checks."""
+
+        warnings = self._authorize(write=True)
+        if not self.capabilities.supports("acl_write"):
+            raise UnsupportedFeatureError("acl_write")
+        result = self._adapter.replace_acl_rules(rules, expected_current=expected_current)
+        return OperationResult[tuple[AclRule, ...]](
             changed=result.changed,
             value=result.value,
             warnings=warnings,

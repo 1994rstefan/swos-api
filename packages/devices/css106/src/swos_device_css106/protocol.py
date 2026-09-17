@@ -75,6 +75,7 @@ MAX_NUMBER_DIGITS = 32
 UPTIME_TICKS_PER_SECOND = 100
 MAX_VLAN_ENTRIES = 250
 MAX_ACL_RULES = 32
+MAX_STATIC_HOSTS = 2048
 MAX_DEVICE_NAME_BYTES = 16
 MAX_PORT_NAME_BYTES = 16
 MAX_SNMP_METADATA_BYTES = 64
@@ -483,34 +484,87 @@ def static_hosts_from_payload(
 ) -> tuple[HostEntry, ...]:
     """Normalize configured static CSS106 forwarding entries."""
 
+    if len(rows) > MAX_STATIC_HOSTS:
+        raise ProtocolError(f"CSS106 static host table exceeds {MAX_STATIC_HOSTS} entries")
     try:
         port_count = PORT_COUNTS[identity.product_code]
     except KeyError as exc:
         raise ProtocolError(f"Unknown CSS106 product {identity.product_code!r}") from exc
 
     hosts: list[HostEntry] = []
+    seen: set[tuple[str, int]] = set()
     for row_index, row in enumerate(rows):
         if not isinstance(row, dict):
             raise ProtocolError(f"CSS106 static host row {row_index} must be an object")
         ports = _bit_values(row, "prt", port_count)
         try:
-            hosts.append(
-                HostEntry(
-                    entry_type=HostEntryType.STATIC,
-                    mac_address=_required_mac_address(row, "adr"),
-                    vlan_id=_bounded_integer(row, "vid", minimum=1, maximum=4095),
-                    port_numbers=tuple(
-                        index + 1 for index, selected in enumerate(ports) if selected
-                    ),
-                    drop=_boolean(row, "drp"),
-                    mirror=_boolean(row, "mir"),
-                )
+            host = HostEntry(
+                entry_type=HostEntryType.STATIC,
+                mac_address=_required_mac_address(row, "adr"),
+                vlan_id=_bounded_integer(row, "vid", minimum=1, maximum=4095),
+                port_numbers=tuple(index + 1 for index, selected in enumerate(ports) if selected),
+                drop=_boolean(row, "drp"),
+                mirror=_boolean(row, "mir"),
             )
         except ValidationError as exc:
             raise ProtocolError(
                 f"CSS106 static host row {row_index} contains invalid values"
             ) from exc
+        if host.vlan_id is None:
+            raise ProtocolError(f"CSS106 static host row {row_index} requires a VLAN ID")
+        key = (host.mac_address, host.vlan_id)
+        if key in seen:
+            raise ProtocolError(
+                f"CSS106 static host table contains duplicate {host.mac_address} "
+                f"VLAN {host.vlan_id}"
+            )
+        seen.add(key)
+        hosts.append(host)
     return tuple(hosts)
+
+
+def encode_static_hosts(hosts: tuple[HostEntry, ...], identity: DeviceIdentity) -> bytes:
+    """Validate and encode the complete ordered CSS106 static host table."""
+
+    _port_count(identity)
+    if len(hosts) > MAX_STATIC_HOSTS:
+        raise InvalidOperationError(
+            f"CSS106 static host table cannot exceed {MAX_STATIC_HOSTS} entries"
+        )
+    seen: set[tuple[str, int]] = set()
+    rows: list[str] = []
+    for index, host in enumerate(hosts):
+        try:
+            validated = HostEntry.model_validate(host.model_dump(mode="python"))
+        except ValidationError as exc:
+            raise InvalidOperationError(
+                f"Static host replacement row {index + 1} is invalid: {exc}"
+            ) from exc
+        if validated != host:
+            raise InvalidOperationError(
+                f"Static host replacement row {index + 1} is not normalized"
+            )
+        if host.entry_type is not HostEntryType.STATIC:
+            raise InvalidOperationError(
+                f"Static host replacement row {index + 1} cannot be dynamic"
+            )
+        if host.vlan_id is None:
+            raise InvalidOperationError(
+                f"Static host replacement row {index + 1} requires a VLAN ID"
+            )
+        _validate_table_ports(host.port_numbers, 5, f"Static host replacement row {index + 1}")
+        key = (host.mac_address, host.vlan_id)
+        if key in seen:
+            raise InvalidOperationError(
+                f"Static host replacement contains duplicate {host.mac_address} VLAN {host.vlan_id}"
+            )
+        seen.add(key)
+        rows.append(
+            f"{{prt:0x{_port_mask(host.port_numbers):02x},"
+            f"adr:'{host.mac_address.replace(':', '')}',vid:0x{host.vlan_id:04x},"
+            f"drp:0x{int(host.drop):02x},mir:0x{int(host.mirror):02x}}}"
+        )
+    return f"[{','.join(rows)}]".encode("ascii")
 
 
 def dynamic_hosts_from_payload(
@@ -813,6 +867,71 @@ def acl_rules_from_payload(rows: list[SwOSValue], identity: DeviceIdentity) -> t
     return tuple(rules)
 
 
+def encode_acl_rules(rules: tuple[AclRule, ...], identity: DeviceIdentity) -> bytes:
+    """Validate and encode the complete ordered CSS106 ACL table."""
+
+    port_count = _port_count(identity)
+    if len(rules) > MAX_ACL_RULES:
+        raise InvalidOperationError(f"CSS106 ACL table cannot exceed {MAX_ACL_RULES} entries")
+    tag_modes = tuple(AclVlanTagMode)
+    rows: list[str] = []
+    for index, rule in enumerate(rules):
+        try:
+            validated = AclRule.model_validate(rule.model_dump(mode="python"))
+        except ValidationError as exc:
+            raise InvalidOperationError(
+                f"ACL replacement rule {index + 1} is invalid: {exc}"
+            ) from exc
+        if validated != rule:
+            raise InvalidOperationError(f"ACL replacement rule {index + 1} is not normalized")
+        expected_number = index + 1
+        if rule.number != expected_number:
+            raise InvalidOperationError(
+                f"ACL replacement rule numbers must be consecutive from 1; expected "
+                f"{expected_number}, got {rule.number}"
+            )
+        _validate_table_ports(
+            rule.ingress_port_numbers,
+            port_count,
+            f"ACL replacement rule {rule.number} ingress",
+        )
+        if 6 in rule.ingress_port_numbers:
+            raise InvalidOperationError(
+                f"ACL replacement rule {rule.number} includes protected management port 6 ingress"
+            )
+        _validate_table_ports(
+            rule.redirect_port_numbers,
+            port_count,
+            f"ACL replacement rule {rule.number} redirect",
+        )
+        vlan_tag = tag_modes.index(rule.vlan_tag)
+        rate = 0 if rule.ingress_rate_limit_bps is None else rule.ingress_rate_limit_bps
+        rows.append(
+            f"{{frm:0x{_port_mask(rule.ingress_port_numbers):02x},"
+            f"smac:'{_wire_optional_mac(rule.source_mac)}',"
+            f"smsk:'{rule.source_mac_mask.replace(':', '').lower()}',"
+            f"dmac:'{_wire_optional_mac(rule.destination_mac)}',"
+            f"dmsk:'{rule.destination_mac_mask.replace(':', '').lower()}',"
+            f"et:0x{rule.ether_type:04x},vlan:0x{vlan_tag:02x},"
+            f"vidl:0x{rule.vlan_id_min:04x},vidh:0x{rule.vlan_id_max:04x},"
+            f"prio:0x{8 if rule.vlan_priority is None else rule.vlan_priority:02x},"
+            f"sip:0x{_wire_ip(rule.source_ip):08x},sipm:0x{rule.source_prefix_length:02x},"
+            f"sptl:0x{rule.source_port_min:04x},spth:0x{rule.source_port_max:04x},"
+            f"dip:0x{_wire_ip(rule.destination_ip):08x},"
+            f"dipm:0x{rule.destination_prefix_length:02x},"
+            f"dptl:0x{rule.destination_port_min:04x},dpth:0x{rule.destination_port_max:04x},"
+            f"prot:0x{rule.protocol_number:02x},"
+            f"dscp:0x{64 if rule.dscp is None else rule.dscp:02x},"
+            f"snde:0x{int(rule.redirect_enabled):02x},"
+            f"snd:0x{_port_mask(rule.redirect_port_numbers):02x},"
+            f"mirr:0x{int(rule.mirror):02x},"
+            f"rate:0x{rate:08x},"
+            f"svid:0x{0 if rule.set_vlan_id is None else rule.set_vlan_id:04x},"
+            f"spri:0x{8 if rule.set_vlan_priority is None else rule.set_vlan_priority:02x}}}"
+        )
+    return f"[{','.join(rows)}]".encode("ascii")
+
+
 def port_vlans_from_forwarding_payload(
     data: dict[str, SwOSValue], identity: DeviceIdentity
 ) -> tuple[PortVlanInfo, ...]:
@@ -905,6 +1024,27 @@ def _validate_writable_port(number: int, identity: DeviceIdentity) -> None:
         raise InvalidOperationError("Port 6 is the SFP management port and cannot be modified")
     if number < 1 or number > min(5, port_count):
         raise InvalidOperationError(f"Port {number} does not exist on {identity.product_code}")
+
+
+def _validate_table_ports(port_numbers: tuple[int, ...], maximum: int, label: str) -> None:
+    if any(number < 1 or number > maximum for number in port_numbers):
+        raise InvalidOperationError(f"{label} ports must be between 1 and {maximum}")
+    if port_numbers != tuple(sorted(set(port_numbers))):
+        raise InvalidOperationError(f"{label} ports must be unique and in ascending order")
+
+
+def _port_mask(port_numbers: tuple[int, ...]) -> int:
+    return sum(1 << (number - 1) for number in port_numbers)
+
+
+def _wire_optional_mac(address: str | None) -> str:
+    return "000000000000" if address is None else address.replace(":", "").lower()
+
+
+def _wire_ip(address: str | None) -> int:
+    if address is None:
+        return 0
+    return int.from_bytes(IPv4Address(address).packed, byteorder="little")
 
 
 def _serialize_link_write_state(state: LinkWriteState) -> bytes:

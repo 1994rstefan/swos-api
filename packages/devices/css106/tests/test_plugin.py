@@ -6,6 +6,7 @@ from swos_core.models import (
     DeviceConnection,
     DeviceNameUpdate,
     ForcedPortNegotiation,
+    HostEntry,
     PortConfigurationUpdate,
     PortNameUpdate,
     SnmpMetadataUpdate,
@@ -20,14 +21,17 @@ from swos_device_css106.protocol import (
     MAX_PAYLOAD_BYTES,
     MAX_PORT_NAME_BYTES,
     MAX_SNMP_METADATA_BYTES,
+    MAX_STATIC_HOSTS,
     MAX_VLAN_ENTRIES,
     UPTIME_TICKS_PER_SECOND,
     acl_rules_from_payload,
     dynamic_hosts_from_payload,
+    encode_acl_rules,
     encode_device_name_update,
     encode_port_configuration_update,
     encode_port_name_update,
     encode_snmp_metadata_update,
+    encode_static_hosts,
     forwarding_from_payload,
     identity_from_system,
     igmp_groups_from_payload,
@@ -211,6 +215,8 @@ def test_probe_and_adapter_normalize_system_data() -> None:
     assert info.discovery_protocol_port_numbers == (1, 2, 3, 4, 5, 6)
     assert info.health is not None
     assert info.health.temperature_celsius is None
+    assert adapter.capabilities.supports("static_hosts_write")
+    assert not adapter.capabilities.supports("acl_write")
     assert transport.requests == [("GET", "/sys.b"), ("GET", "/sys.b")]
 
 
@@ -789,6 +795,8 @@ def test_shared_decoder_model_gates_rb260gsp_health_and_poe_fields() -> None:
     assert not adapter.capabilities.supports("port_configuration_write")
     assert not adapter.capabilities.supports("device_name_write")
     assert not adapter.capabilities.supports("snmp_metadata_write")
+    assert not adapter.capabilities.supports("static_hosts_write")
+    assert not adapter.capabilities.supports("acl_write")
 
 
 def test_adapter_validates_port_name_before_no_op_or_transport() -> None:
@@ -965,6 +973,114 @@ def test_adapter_normalizes_acl_rules_and_drop_action() -> None:
         acl_rules_from_payload([{}] * (MAX_ACL_RULES + 1), identity)
 
 
+def test_acl_encoder_emits_exact_ordered_table_and_guards_management_ingress() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    rules = acl_rules_from_payload(parse_table_payload(acl_fixture_payload()), identity)
+
+    content = encode_acl_rules((rules[0],), identity)
+
+    assert encode_acl_rules((), identity) == b"[]"
+    first_row = acl_fixture_payload().strip()[1:].split(b"},{", 1)[0]
+    assert content == b"[" + first_row + b"}]"
+    zero_rule = type(rules[0]).model_validate(
+        {
+            **rules[0].model_dump(mode="python"),
+            "source_mac": "00:00:00:00:00:00",
+            "destination_mac": "00:00:00:00:00:00",
+            "source_ip": "0.0.0.0",
+            "destination_ip": "0.0.0.0",
+        }
+    )
+    assert zero_rule.source_mac is None
+    assert zero_rule.destination_mac is None
+    assert zero_rule.source_ip is None
+    assert zero_rule.destination_ip is None
+    assert acl_rules_from_payload(
+        parse_table_payload(encode_acl_rules((zero_rule,), identity)), identity
+    ) == (zero_rule,)
+    with pytest.raises(InvalidOperationError, match="management port 6 ingress"):
+        encode_acl_rules(rules, identity)
+    with pytest.raises(InvalidOperationError, match="consecutive"):
+        encode_acl_rules((rules[0].model_copy(update={"number": 2}),), identity)
+    with pytest.raises(InvalidOperationError, match=f"cannot exceed {MAX_ACL_RULES}"):
+        encode_acl_rules(tuple(rules[0] for _ in range(MAX_ACL_RULES + 1)), identity)
+    with pytest.raises(InvalidOperationError, match="is invalid"):
+        encode_acl_rules((rules[0].model_copy(update={"ingress_rate_limit_bps": 0}),), identity)
+    with pytest.raises(InvalidOperationError, match="not normalized"):
+        encode_acl_rules((rules[0].model_copy(update={"source_ip": "0.0.0.0"}),), identity)
+
+
+def test_adapter_replaces_and_verifies_complete_acl_table() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    rule = acl_rules_from_payload(parse_table_payload(acl_fixture_payload()), identity)[0]
+    desired = (rule,)
+    encoded = encode_acl_rules(desired, identity)
+    transport = FakeTransport((fixture_payload(), b"[]", b"", encoded))
+    adapter = CSS106Plugin(transport_factory=lambda connection: transport).create(  # type: ignore[arg-type]
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+
+    result = adapter.replace_acl_rules(desired, expected_current=())
+
+    assert result.changed
+    assert result.value == desired
+    assert transport.requests == [
+        ("GET", "/sys.b"),
+        ("GET", "/acl.b"),
+        ("POST", "/acl.b"),
+        ("GET", "/acl.b"),
+    ]
+    assert transport.request_details[2][2] == encoded
+    assert transport.request_details[2][3] == {"Content-Type": "text/plain"}
+
+
+def test_adapter_skips_acl_post_for_no_op_and_validates_before_transport() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    rules = acl_rules_from_payload(parse_table_payload(acl_fixture_payload()), identity)
+    desired = (rules[0],)
+    encoded = encode_acl_rules(desired, identity)
+    transport = FakeTransport((fixture_payload(), encoded))
+    adapter = CSS106Plugin(transport_factory=lambda connection: transport).create(  # type: ignore[arg-type]
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+
+    result = adapter.replace_acl_rules(desired, expected_current=desired)
+
+    assert not result.changed
+    assert transport.requests == [("GET", "/sys.b"), ("GET", "/acl.b")]
+    with pytest.raises(InvalidOperationError, match="management port 6 ingress"):
+        adapter.replace_acl_rules(rules, expected_current=desired)
+    assert transport.requests == [("GET", "/sys.b"), ("GET", "/acl.b")]
+
+
+def test_adapter_rejects_stale_acl_baseline_before_post() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    desired = (acl_rules_from_payload(parse_table_payload(acl_fixture_payload()), identity)[0],)
+    encoded = encode_acl_rules(desired, identity)
+    transport = FakeTransport((fixture_payload(), encoded))
+    adapter = CSS106Plugin(transport_factory=lambda connection: transport).create(  # type: ignore[arg-type]
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+
+    with pytest.raises(InvalidOperationError, match="changed since the expected baseline"):
+        adapter.replace_acl_rules(desired, expected_current=())
+
+    assert transport.requests == [("GET", "/sys.b"), ("GET", "/acl.b")]
+
+
 def test_port_statistics_reject_invalid_counter_arrays() -> None:
     identity = identity_from_system(parse_payload(fixture_payload()))
     assert identity is not None
@@ -1006,6 +1122,110 @@ def test_adapter_normalizes_static_and_dynamic_hosts() -> None:
     assert transport.requests == [("GET", "/host.b"), ("GET", "/!dhost.b")]
 
 
+def test_static_host_encoder_emits_exact_ordered_table_and_validates_rows() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    hosts = static_hosts_from_payload(parse_table_payload(static_host_fixture_payload()), identity)
+
+    assert encode_static_hosts((), identity) == b"[]"
+    assert encode_static_hosts(hosts, identity) == static_host_fixture_payload().strip()
+    dynamic = HostEntry(
+        entry_type="dynamic",
+        mac_address="02:00:00:00:00:03",
+        port_numbers=(1,),
+    )
+    with pytest.raises(InvalidOperationError, match="cannot be dynamic"):
+        encode_static_hosts((dynamic,), identity)
+    with pytest.raises(InvalidOperationError, match="between 1 and 5"):
+        encode_static_hosts((hosts[0].model_copy(update={"port_numbers": (6,)}),), identity)
+    with pytest.raises(InvalidOperationError, match=f"cannot exceed {MAX_STATIC_HOSTS}"):
+        encode_static_hosts(tuple(hosts[0] for _ in range(MAX_STATIC_HOSTS + 1)), identity)
+    with pytest.raises(InvalidOperationError, match="is invalid"):
+        encode_static_hosts((hosts[0].model_copy(update={"vlan_id": 4096}),), identity)
+    with pytest.raises(ProtocolError, match=f"exceeds {MAX_STATIC_HOSTS}"):
+        static_hosts_from_payload([{}] * (MAX_STATIC_HOSTS + 1), identity)
+
+
+def test_adapter_replaces_and_verifies_complete_static_host_table() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    desired = static_hosts_from_payload(
+        parse_table_payload(static_host_fixture_payload()), identity
+    )
+    encoded = encode_static_hosts(desired, identity)
+    transport = FakeTransport((fixture_payload(), b"[]", b"", encoded))
+    adapter = CSS106Plugin(transport_factory=lambda connection: transport).create(  # type: ignore[arg-type]
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+
+    result = adapter.replace_static_hosts(desired, expected_current=())
+
+    assert result.changed
+    assert result.value == desired
+    assert transport.requests == [
+        ("GET", "/sys.b"),
+        ("GET", "/host.b"),
+        ("POST", "/host.b"),
+        ("GET", "/host.b"),
+    ]
+    assert transport.request_details[2][2] == static_host_fixture_payload().strip()
+
+
+def test_adapter_static_host_no_op_and_read_back_mismatch() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    desired = static_hosts_from_payload(
+        parse_table_payload(static_host_fixture_payload()), identity
+    )
+    transport = FakeTransport((fixture_payload(), static_host_fixture_payload()))
+    adapter = CSS106Plugin(transport_factory=lambda connection: transport).create(  # type: ignore[arg-type]
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+
+    result = adapter.replace_static_hosts(desired, expected_current=desired)
+
+    assert not result.changed
+    assert transport.requests == [("GET", "/sys.b"), ("GET", "/host.b")]
+
+    mismatch_transport = FakeTransport((fixture_payload(), b"[]", b"", b"[]"))
+    mismatch_adapter = CSS106Plugin(
+        transport_factory=lambda connection: mismatch_transport  # type: ignore[arg-type]
+    ).create(
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+    with pytest.raises(ProtocolError, match="full-table read-back"):
+        mismatch_adapter.replace_static_hosts(desired, expected_current=())
+
+
+def test_adapter_rejects_stale_static_host_baseline_before_post() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    current = static_hosts_from_payload(
+        parse_table_payload(static_host_fixture_payload()), identity
+    )
+    transport = FakeTransport((fixture_payload(), static_host_fixture_payload()))
+    adapter = CSS106Plugin(transport_factory=lambda connection: transport).create(  # type: ignore[arg-type]
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+
+    with pytest.raises(InvalidOperationError, match="changed since the expected baseline"):
+        adapter.replace_static_hosts(current, expected_current=())
+
+    assert transport.requests == [("GET", "/sys.b"), ("GET", "/host.b")]
+
+
 def test_host_decoders_reject_invalid_rows() -> None:
     identity = identity_from_system(parse_payload(fixture_payload()))
     assert identity is not None
@@ -1018,6 +1238,11 @@ def test_host_decoders_reject_invalid_rows() -> None:
 
     with pytest.raises(ProtocolError, match="static host row 0 must be an object"):
         static_hosts_from_payload([1], identity)
+
+    duplicate_rows = parse_table_payload(static_host_fixture_payload())
+    duplicate_rows.append(duplicate_rows[0])
+    with pytest.raises(ProtocolError, match="contains duplicate"):
+        static_hosts_from_payload(duplicate_rows, identity)
 
     invalid_action = parse_table_payload(static_host_fixture_payload())
     assert isinstance(invalid_action[0], dict)

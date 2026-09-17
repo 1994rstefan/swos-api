@@ -50,6 +50,8 @@ swosctl port stats --full --device office
 swosctl sfp show --device office
 swosctl forwarding show --device office
 swosctl host list --device office
+swosctl host add --mac 02:00:00:00:00:05 --vlan 10 --port 5 --device office
+swosctl host remove --mac 02:00:00:00:00:05 --vlan 10 --device office
 swosctl igmp list --device office
 swosctl acl list --device office
 swosctl rstp show --device office
@@ -107,18 +109,23 @@ Currently supported:
 
 | Device | Product code | Firmware | Build | Operations |
 | --- | --- | --- | --- | --- |
-| RB260GS | `CSS106-5G-1S` | `2.19` | `0x6a181cd5` | Complete local reads; guarded port, name, and SNMP metadata writes |
+| RB260GS | `CSS106-5G-1S` | `2.19` | `0x6a181cd5` | Complete local reads; guarded port, name, SNMP metadata, and static-host writes |
 
 The supported read surface includes system, management, health, port
 configuration/state, complete statistics, SFP diagnostics, forwarding, port
 lock, mirroring, bandwidth limits, VLANs, hosts, RSTP, SNMP, learned IGMP
 groups, and ACL rules. See the
 [CSS106 2.19 read-coverage matrix](docs/css106-2.19-read-coverage.md).
-Device/port-name, port-configuration, and SNMP contact/location writes use
-read-before-write, skip no-op POSTs, and verify the complete relevant writable
-state after the change. Port writes are limited to Ethernet ports 1-5; port 6
-is reserved for SFP management and is never modified. SNMP writes preserve the
-raw enabled and community fields read from the device.
+Device/port-name, port-configuration, SNMP contact/location, and static-host
+table writes use read-before-write, skip no-op POSTs, and verify the complete
+relevant writable state after the change. Static-host mutations also require the
+fresh adapter state to match the caller's expected baseline. Static-host targets
+are limited to Ethernet ports 1-5; port 6 is reserved for SFP management. SNMP
+writes preserve the raw enabled and community fields read from the device.
+
+Guarded ACL replacement and typed CLI mutation commands are implemented, but
+the exact CSS106 profile does not advertise `acl_write`. ACL writes remain
+disabled until a no-effect rule can be validated and restored on hardware.
 
 ## License
 

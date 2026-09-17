@@ -445,14 +445,30 @@ class AclRule(BaseModel):
     redirect_port_numbers: _PortNumbers
     drop: bool
     mirror: bool
-    ingress_rate_limit_bps: int | None = Field(default=None, ge=1)
+    ingress_rate_limit_bps: int | None = Field(default=None, ge=1, le=0xFFFFFFFF)
     set_vlan_id: int | None = Field(default=None, ge=1, le=4095)
     set_vlan_priority: int | None = Field(default=None, ge=0, le=7)
 
     @field_validator("source_ip", "destination_ip")
     @classmethod
     def validate_ip_address(cls, value: str | None) -> str | None:
-        return str(IPv4Address(value)) if value is not None else None
+        if value is None:
+            return None
+        normalized = str(IPv4Address(value))
+        return None if normalized == "0.0.0.0" else normalized
+
+    @field_validator("source_mac", "destination_mac")
+    @classmethod
+    def normalize_optional_mac_address(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.lower()
+        return None if normalized == "00:00:00:00:00:00" else normalized
+
+    @field_validator("source_mac_mask", "destination_mac_mask")
+    @classmethod
+    def normalize_mac_mask(cls, value: str) -> str:
+        return value.lower()
 
     @model_validator(mode="after")
     def validate_actions_and_ranges(self) -> Self:
