@@ -9,6 +9,7 @@ from swos_core.models import (
     DeviceCapabilities,
     DeviceConnection,
     DeviceIdentity,
+    HostEntry,
     PortInfo,
     PortStatistics,
     PortVlanInfo,
@@ -19,12 +20,14 @@ from swos_core.transport import HttpTransport
 
 from swos_device_css106.protocol import (
     MAX_PAYLOAD_BYTES,
+    dynamic_hosts_from_payload,
     identity_from_system,
     parse_payload,
     parse_table_payload,
     port_statistics_from_payload,
     port_vlans_from_forwarding_payload,
     ports_from_link_payload,
+    static_hosts_from_payload,
     system_info_from_payload,
     vlans_from_payload,
 )
@@ -50,7 +53,7 @@ class CSS106Adapter:
     @property
     def capabilities(self) -> DeviceCapabilities:
         return DeviceCapabilities(
-            features=frozenset({"port_statistics", "ports", "system", "vlan"})
+            features=frozenset({"hosts", "port_statistics", "ports", "system", "vlan"})
         )
 
     def get_system_info(self) -> SystemInfo:
@@ -83,6 +86,26 @@ class CSS106Adapter:
                 max_response_bytes=MAX_PAYLOAD_BYTES,
             )
         return port_statistics_from_payload(parse_payload(payload), self._identity)
+
+    def get_hosts(self) -> tuple[HostEntry, ...]:
+        with self._transport_factory(self._connection) as transport:
+            static_payload = transport.request(
+                "GET",
+                "/host.b",
+                max_response_bytes=MAX_PAYLOAD_BYTES,
+            )
+            dynamic_payload = transport.request(
+                "GET",
+                "/!dhost.b",
+                max_response_bytes=MAX_PAYLOAD_BYTES,
+            )
+        static_hosts = static_hosts_from_payload(
+            parse_table_payload(static_payload), self._identity
+        )
+        dynamic_hosts = dynamic_hosts_from_payload(
+            parse_table_payload(dynamic_payload), self._identity
+        )
+        return static_hosts + dynamic_hosts
 
     def get_port_vlans(self) -> tuple[PortVlanInfo, ...]:
         with self._transport_factory(self._connection) as transport:

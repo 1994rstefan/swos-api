@@ -4,6 +4,7 @@ from swos_core.models import (
     DeviceCapabilities,
     DeviceConnection,
     DeviceIdentity,
+    HostEntry,
     PortInfo,
     PortStatistics,
     PortVlanInfo,
@@ -77,6 +78,56 @@ def test_port_statistics_reject_negative_counters() -> None:
             tx_packets=0,
             rx_errors=0,
             tx_errors=0,
+        )
+
+
+def test_host_entries_validate_dynamic_and_static_invariants() -> None:
+    dynamic = HostEntry(
+        entry_type="dynamic",
+        mac_address="02:00:00:00:00:AA",
+        port_numbers=(2,),
+    )
+
+    assert dynamic.vlan_id is None
+    assert dynamic.mac_address == "02:00:00:00:00:aa"
+    with pytest.raises(ValidationError, match="zero MAC"):
+        HostEntry(
+            entry_type="dynamic",
+            mac_address="00:00:00:00:00:00",
+            port_numbers=(1,),
+        )
+    with pytest.raises(ValidationError, match="exactly one port"):
+        HostEntry(
+            entry_type="dynamic",
+            mac_address="02:00:00:00:00:01",
+            port_numbers=(1, 2),
+        )
+    with pytest.raises(ValidationError, match="require a VLAN ID"):
+        HostEntry(
+            entry_type="static",
+            mac_address="02:00:00:00:00:01",
+            port_numbers=(1,),
+        )
+    with pytest.raises(ValidationError, match="positive"):
+        HostEntry(
+            entry_type="static",
+            mac_address="02:00:00:00:00:01",
+            vlan_id=1,
+            port_numbers=(0,),
+        )
+    with pytest.raises(ValidationError, match="duplicate ports"):
+        HostEntry(
+            entry_type="static",
+            mac_address="02:00:00:00:00:01",
+            vlan_id=1,
+            port_numbers=(1, 1),
+        )
+    with pytest.raises(ValidationError, match="static actions"):
+        HostEntry(
+            entry_type="dynamic",
+            mac_address="02:00:00:00:00:01",
+            port_numbers=(1,),
+            mirror=True,
         )
 
 

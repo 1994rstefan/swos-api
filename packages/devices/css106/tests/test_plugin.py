@@ -11,12 +11,14 @@ from swos_device_css106.protocol import (
     MAX_PAYLOAD_BYTES,
     MAX_VLAN_ENTRIES,
     UPTIME_TICKS_PER_SECOND,
+    dynamic_hosts_from_payload,
     identity_from_system,
     parse_payload,
     parse_table_payload,
     port_statistics_from_payload,
     port_vlans_from_forwarding_payload,
     ports_from_link_payload,
+    static_hosts_from_payload,
     system_info_from_payload,
     vlans_from_payload,
 )
@@ -26,11 +28,14 @@ LINK_FIXTURE = Path(__file__).parent / "fixtures" / "link.b"
 STATS_FIXTURE = Path(__file__).parent / "fixtures" / "stats.b"
 FORWARDING_FIXTURE = Path(__file__).parent / "fixtures" / "fwd.b"
 VLAN_FIXTURE = Path(__file__).parent / "fixtures" / "vlan.b"
+STATIC_HOST_FIXTURE = Path(__file__).parent / "fixtures" / "host.b"
+DYNAMIC_HOST_FIXTURE = Path(__file__).parent / "fixtures" / "dhost.b"
 
 
 class FakeTransport:
-    def __init__(self, response: bytes) -> None:
-        self.response = response
+    def __init__(self, response: bytes | tuple[bytes, ...]) -> None:
+        self.responses = iter(response) if isinstance(response, tuple) else None
+        self.response = response if isinstance(response, bytes) else None
         self.requests: list[tuple[str, str]] = []
 
     def request(
@@ -42,6 +47,9 @@ class FakeTransport:
     ) -> bytes:
         self.requests.append((method, path))
         assert max_response_bytes == MAX_PAYLOAD_BYTES
+        if self.responses is not None:
+            return next(self.responses)
+        assert self.response is not None
         return self.response
 
     def __enter__(self) -> "FakeTransport":
@@ -69,6 +77,14 @@ def forwarding_fixture_payload() -> bytes:
 
 def vlan_fixture_payload() -> bytes:
     return VLAN_FIXTURE.read_bytes()
+
+
+def static_host_fixture_payload() -> bytes:
+    return STATIC_HOST_FIXTURE.read_bytes()
+
+
+def dynamic_host_fixture_payload() -> bytes:
+    return DYNAMIC_HOST_FIXTURE.read_bytes()
 
 
 def test_plugin_declares_exact_hardware_validated_support() -> None:
@@ -220,6 +236,70 @@ def test_port_statistics_reject_invalid_counter_arrays() -> None:
 
     with pytest.raises(ProtocolError, match="unsigned 32-bit"):
         port_statistics_from_payload(data, identity)
+
+
+def test_adapter_normalizes_static_and_dynamic_hosts() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    transport = FakeTransport((static_host_fixture_payload(), dynamic_host_fixture_payload()))
+    tested_plugin = CSS106Plugin(transport_factory=lambda connection: transport)  # type: ignore[arg-type]
+    adapter = tested_plugin.create(
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=tested_plugin.support_records()[0],
+    )
+
+    hosts = adapter.get_hosts()
+
+    assert len(hosts) == 4
+    assert hosts[0].entry_type.value == "static"
+    assert hosts[0].mac_address == "02:00:00:00:00:01"
+    assert hosts[0].port_numbers == (1, 2)
+    assert hosts[0].vlan_id == 10
+    assert hosts[0].mirror
+    assert hosts[1].drop
+    assert hosts[2].entry_type.value == "dynamic"
+    assert hosts[2].port_numbers == (3,)
+    assert hosts[2].vlan_id is None
+    assert hosts[3].port_numbers == (6,)
+    assert hosts[3].vlan_id == 10
+    assert transport.requests == [("GET", "/host.b"), ("GET", "/!dhost.b")]
+
+
+def test_host_decoders_reject_invalid_rows() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+
+    static_rows = parse_table_payload(static_host_fixture_payload())
+    assert isinstance(static_rows[0], dict)
+    static_rows[0]["prt"] = 0x40
+    with pytest.raises(ProtocolError, match="6-port bitmask"):
+        static_hosts_from_payload(static_rows, identity)
+
+    with pytest.raises(ProtocolError, match="static host row 0 must be an object"):
+        static_hosts_from_payload([1], identity)
+
+    invalid_action = parse_table_payload(static_host_fixture_payload())
+    assert isinstance(invalid_action[0], dict)
+    invalid_action[0]["drp"] = 2
+    with pytest.raises(ProtocolError, match="must be 0 or 1"):
+        static_hosts_from_payload(invalid_action, identity)
+
+    dynamic_rows = parse_table_payload(dynamic_host_fixture_payload())
+    assert isinstance(dynamic_rows[0], dict)
+    dynamic_rows[0]["adr"] = "000000000000"
+    with pytest.raises(ProtocolError, match="zero MAC"):
+        dynamic_hosts_from_payload(dynamic_rows, identity)
+
+    with pytest.raises(ProtocolError, match="dynamic host row 0 must be an object"):
+        dynamic_hosts_from_payload([1], identity)
+
+    invalid_port = parse_table_payload(dynamic_host_fixture_payload())
+    assert isinstance(invalid_port[0], dict)
+    invalid_port[0]["prt"] = 6
+    with pytest.raises(ProtocolError, match="between 0 and 5"):
+        dynamic_hosts_from_payload(invalid_port, identity)
 
 
 def test_adapter_normalizes_port_vlan_policy() -> None:

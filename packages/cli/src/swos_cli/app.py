@@ -134,6 +134,8 @@ system_app = typer.Typer(help="Read system information.", no_args_is_help=True)
 app.add_typer(system_app, name="system")
 port_app = typer.Typer(help="Read port state.", no_args_is_help=True)
 app.add_typer(port_app, name="port")
+host_app = typer.Typer(help="Read forwarding-database entries.", no_args_is_help=True)
+app.add_typer(host_app, name="host")
 vlan_app = typer.Typer(help="Read VLAN configuration.", no_args_is_help=True)
 app.add_typer(vlan_app, name="vlan")
 
@@ -345,6 +347,41 @@ def port_stats(ctx: typer.Context) -> None:
             f"{port.number:<5} {port.rx_bytes:<13} {port.tx_bytes:<13} "
             f"{port.rx_packets:<11} {port.tx_packets:<11} "
             f"{port.rx_errors:<10} {port.tx_errors}"
+        )
+    lines.extend(f"Warning: {warning.message}" for warning in connected_device.warnings)
+    renderer.success(data, human="\n".join(lines))
+
+
+@host_app.command("list")
+def host_list(ctx: typer.Context) -> None:
+    """List normalized static and dynamically learned host entries."""
+
+    cli_context: CliContext = ctx.ensure_object(CliContext)
+    renderer = OutputRenderer(cli_context.configuration.settings.output)
+    try:
+        connected_device = _connect_device(cli_context)
+        hosts = connected_device.get_hosts()
+    except ConfigurationError as exc:
+        renderer.error("configuration_error", str(exc))
+        raise typer.Exit(code=2) from exc
+    except SwOSError as exc:
+        renderer.error(_error_code(exc), str(exc))
+        raise typer.Exit(code=1) from exc
+
+    data: dict[str, Any] = {
+        "hosts": [host.model_dump(mode="json") for host in hosts],
+    }
+    if connected_device.warnings:
+        data["warnings"] = [
+            warning.model_dump(mode="json") for warning in connected_device.warnings
+        ]
+    lines = ["TYPE     MAC ADDRESS        VLAN  PORTS  DROP  MIRROR"]
+    for host in hosts:
+        vlan_id = str(host.vlan_id) if host.vlan_id is not None else "-"
+        ports = ",".join(str(port) for port in host.port_numbers) or "-"
+        lines.append(
+            f"{host.entry_type.value:<8} {host.mac_address:<18} {vlan_id:<5} "
+            f"{ports:<6} {_yes_no(host.drop):<5} {_yes_no(host.mirror)}"
         )
     lines.extend(f"Warning: {warning.message}" for warning in connected_device.warnings)
     renderer.success(data, human="\n".join(lines))

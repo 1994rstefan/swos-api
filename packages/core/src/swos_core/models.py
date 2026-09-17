@@ -5,7 +5,15 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Generic, Self, TypeVar
 
-from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, SecretStr, model_validator
+from pydantic import (
+    AnyHttpUrl,
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    field_validator,
+    model_validator,
+)
 
 
 class DeviceIdentity(BaseModel):
@@ -94,6 +102,49 @@ class PortStatistics(BaseModel):
     tx_packets: int = Field(ge=0)
     rx_errors: int = Field(ge=0)
     tx_errors: int = Field(ge=0)
+
+
+class HostEntryType(StrEnum):
+    """Origin of a forwarding-database entry."""
+
+    STATIC = "static"
+    DYNAMIC = "dynamic"
+
+
+class HostEntry(BaseModel):
+    """Device-independent static or dynamically learned forwarding entry."""
+
+    model_config = ConfigDict(frozen=True)
+
+    entry_type: HostEntryType
+    mac_address: str = Field(pattern=r"(?i)^(?:[0-9a-f]{2}:){5}[0-9a-f]{2}$")
+    vlan_id: int | None = Field(default=None, ge=1, le=4095)
+    port_numbers: tuple[int, ...]
+    drop: bool = False
+    mirror: bool = False
+
+    @field_validator("mac_address")
+    @classmethod
+    def normalize_mac_address(cls, value: str) -> str:
+        value = value.lower()
+        if value == "00:00:00:00:00:00":
+            raise ValueError("host entries cannot use the zero MAC address")
+        return value
+
+    @model_validator(mode="after")
+    def validate_entry(self) -> Self:
+        if any(port < 1 for port in self.port_numbers):
+            raise ValueError("host entry port numbers must be positive")
+        if len(self.port_numbers) != len(set(self.port_numbers)):
+            raise ValueError("host entries cannot contain duplicate ports")
+        if self.entry_type is HostEntryType.DYNAMIC:
+            if len(self.port_numbers) != 1:
+                raise ValueError("dynamic host entries require exactly one port")
+            if self.drop or self.mirror:
+                raise ValueError("dynamic host entries cannot set static actions")
+        elif self.vlan_id is None:
+            raise ValueError("static host entries require a VLAN ID")
+        return self
 
 
 class VlanMode(StrEnum):

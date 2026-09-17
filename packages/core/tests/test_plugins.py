@@ -14,6 +14,7 @@ from swos_core.models import (
     DeviceCapabilities,
     DeviceConnection,
     DeviceIdentity,
+    HostEntry,
     PortInfo,
     PortStatistics,
     PortVlanInfo,
@@ -66,7 +67,7 @@ class FakeAdapter:
     @property
     def capabilities(self) -> DeviceCapabilities:
         return DeviceCapabilities(
-            features=frozenset({"port_statistics", "ports", "system", "vlan"})
+            features=frozenset({"hosts", "port_statistics", "ports", "system", "vlan"})
         )
 
     def get_system_info(self) -> SystemInfo:
@@ -96,6 +97,15 @@ class FakeAdapter:
                 tx_packets=4,
                 rx_errors=0,
                 tx_errors=0,
+            ),
+        )
+
+    def get_hosts(self) -> tuple[HostEntry, ...]:
+        return (
+            HostEntry(
+                entry_type="dynamic",
+                mac_address="02:00:00:00:00:01",
+                port_numbers=(1,),
             ),
         )
 
@@ -182,6 +192,7 @@ def test_policy_bound_device_rechecks_read_permission() -> None:
     assert device.get_system_info().name == "test"
     assert device.get_ports()[0].name == "Port1"
     assert device.get_port_statistics()[0].tx_bytes == 2
+    assert device.get_hosts()[0].port_numbers == (1,)
     assert device.get_port_vlans()[0].default_vlan_id == 10
     assert device.get_vlans()[0].vlan_id == 10
     assert device.warnings[0].code == "untested_firmware"
@@ -218,6 +229,8 @@ def test_policy_bound_device_rejects_unsupported_feature() -> None:
     with pytest.raises(UnsupportedFeatureError, match="port statistics") as error:
         device.get_port_statistics()
     assert error.value.feature == "port_statistics"
+    with pytest.raises(UnsupportedFeatureError, match="hosts"):
+        device.get_hosts()
     with pytest.raises(UnsupportedFeatureError, match="vlan"):
         device.get_port_vlans()
     with pytest.raises(UnsupportedFeatureError, match="vlan"):

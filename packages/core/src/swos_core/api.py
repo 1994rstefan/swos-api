@@ -8,6 +8,7 @@ from swos_core.errors import UnsupportedFeatureError
 from swos_core.models import (
     DeviceCapabilities,
     DeviceIdentity,
+    HostEntry,
     PortInfo,
     PortStatistics,
     PortVlanInfo,
@@ -44,6 +45,11 @@ class DeviceAdapter(Protocol):
 
     def get_port_statistics(self) -> tuple[PortStatistics, ...]:
         """Read normalized cumulative port counters from the device."""
+
+        ...
+
+    def get_hosts(self) -> tuple[HostEntry, ...]:
+        """Read normalized static and dynamically learned host entries."""
 
         ...
 
@@ -115,6 +121,14 @@ class SwOSDevice:
         if not self.capabilities.supports("port_statistics"):
             raise UnsupportedFeatureError("port_statistics")
         return self._adapter.get_port_statistics()
+
+    def get_hosts(self) -> tuple[HostEntry, ...]:
+        """Read forwarding-database entries after enforcing read safety."""
+
+        self._authorize(write=False)
+        if not self.capabilities.supports("hosts"):
+            raise UnsupportedFeatureError("hosts")
+        return self._adapter.get_hosts()
 
     def get_port_vlans(self) -> tuple[PortVlanInfo, ...]:
         """Read per-port VLAN policy after enforcing read safety."""

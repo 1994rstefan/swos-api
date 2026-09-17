@@ -4,6 +4,7 @@ from importlib import import_module
 from swos_cli import __version__
 from swos_core.models import (
     DeviceIdentity,
+    HostEntry,
     PortInfo,
     PortStatistics,
     PortVlanInfo,
@@ -71,6 +72,22 @@ class FakeDevice:
                 tx_packets=34,
                 rx_errors=0,
                 tx_errors=1,
+            ),
+        )
+
+    def get_hosts(self) -> tuple[HostEntry, ...]:
+        return (
+            HostEntry(
+                entry_type="static",
+                mac_address="02:00:00:00:00:01",
+                vlan_id=10,
+                port_numbers=(1, 2),
+                mirror=True,
+            ),
+            HostEntry(
+                entry_type="dynamic",
+                mac_address="02:00:00:00:00:02",
+                port_numbers=(6,),
             ),
         )
 
@@ -402,6 +419,26 @@ def test_port_stats_human_and_json_output(monkeypatch) -> None:  # type: ignore[
     assert "1234" in human.stdout
     assert machine.exit_code == 0
     assert json.loads(machine.stdout)["data"]["ports"][0]["tx_errors"] == 1
+
+
+def test_host_list_human_and_json_output(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    mock_registry(monkeypatch)
+
+    human = runner.invoke(app, ["host", "list", "--url", "http://192.0.2.1"])
+    machine = runner.invoke(
+        app,
+        ["host", "list", "--url", "http://192.0.2.1", "-ojson"],
+    )
+
+    assert human.exit_code == 0
+    assert "MAC ADDRESS" in human.stdout
+    assert "02:00:00:00:00:01" in human.stdout
+    assert "dynamic" in human.stdout
+    assert machine.exit_code == 0
+    hosts = json.loads(machine.stdout)["data"]["hosts"]
+    assert hosts[0]["port_numbers"] == [1, 2]
+    assert hosts[0]["mirror"] is True
+    assert hosts[1]["vlan_id"] is None
 
 
 def test_vlan_ports_human_and_json_output(monkeypatch) -> None:  # type: ignore[no-untyped-def]

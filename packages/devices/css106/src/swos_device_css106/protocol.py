@@ -12,6 +12,8 @@ from pydantic import ValidationError
 from swos_core.errors import ProtocolError
 from swos_core.models import (
     DeviceIdentity,
+    HostEntry,
+    HostEntryType,
     PortInfo,
     PortStatistics,
     PortVlanInfo,
@@ -181,6 +183,73 @@ def port_statistics_from_payload(
         )
         for index in range(port_count)
     )
+
+
+def static_hosts_from_payload(
+    rows: list[SwOSValue], identity: DeviceIdentity
+) -> tuple[HostEntry, ...]:
+    """Normalize configured static CSS106 forwarding entries."""
+
+    try:
+        port_count = PORT_COUNTS[identity.product_code]
+    except KeyError as exc:
+        raise ProtocolError(f"Unknown CSS106 product {identity.product_code!r}") from exc
+
+    hosts: list[HostEntry] = []
+    for row_index, row in enumerate(rows):
+        if not isinstance(row, dict):
+            raise ProtocolError(f"CSS106 static host row {row_index} must be an object")
+        ports = _bit_values(row, "prt", port_count)
+        try:
+            hosts.append(
+                HostEntry(
+                    entry_type=HostEntryType.STATIC,
+                    mac_address=_required_mac_address(row, "adr"),
+                    vlan_id=_bounded_integer(row, "vid", minimum=1, maximum=4095),
+                    port_numbers=tuple(
+                        index + 1 for index, selected in enumerate(ports) if selected
+                    ),
+                    drop=_boolean(row, "drp"),
+                    mirror=_boolean(row, "mir"),
+                )
+            )
+        except ValidationError as exc:
+            raise ProtocolError(
+                f"CSS106 static host row {row_index} contains invalid values"
+            ) from exc
+    return tuple(hosts)
+
+
+def dynamic_hosts_from_payload(
+    rows: list[SwOSValue], identity: DeviceIdentity
+) -> tuple[HostEntry, ...]:
+    """Normalize dynamically learned CSS106 forwarding entries."""
+
+    try:
+        port_count = PORT_COUNTS[identity.product_code]
+    except KeyError as exc:
+        raise ProtocolError(f"Unknown CSS106 product {identity.product_code!r}") from exc
+
+    hosts: list[HostEntry] = []
+    for row_index, row in enumerate(rows):
+        if not isinstance(row, dict):
+            raise ProtocolError(f"CSS106 dynamic host row {row_index} must be an object")
+        port_index = _bounded_integer(row, "prt", minimum=0, maximum=port_count - 1)
+        vlan_id = _bounded_integer(row, "vid", minimum=0, maximum=4095)
+        try:
+            hosts.append(
+                HostEntry(
+                    entry_type=HostEntryType.DYNAMIC,
+                    mac_address=_required_mac_address(row, "adr"),
+                    vlan_id=vlan_id or None,
+                    port_numbers=(port_index + 1,),
+                )
+            )
+        except ValidationError as exc:
+            raise ProtocolError(
+                f"CSS106 dynamic host row {row_index} contains invalid values"
+            ) from exc
+    return tuple(hosts)
 
 
 def port_vlans_from_forwarding_payload(
@@ -404,6 +473,13 @@ def _mac_address(data: dict[str, SwOSValue], field: str) -> str | None:
     if len(value) != 12 or any(character not in hexdigits for character in value):
         raise ProtocolError(f"CSS106 field {field!r} is not a MAC address")
     return ":".join(value[index : index + 2] for index in range(0, 12, 2))
+
+
+def _required_mac_address(data: dict[str, SwOSValue], field: str) -> str:
+    value = _mac_address(data, field)
+    if value is None:
+        raise ProtocolError(f"CSS106 field {field!r} cannot be the zero MAC address")
+    return value
 
 
 class _Parser:
