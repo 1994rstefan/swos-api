@@ -7,12 +7,14 @@ from swos_core.errors import (
     DuplicateDevicePluginError,
     MissingDevicePluginError,
     ProtocolError,
+    UnsupportedFeatureError,
     UnsupportedFirmwareError,
 )
 from swos_core.models import (
     DeviceCapabilities,
     DeviceConnection,
     DeviceIdentity,
+    PortInfo,
     SystemInfo,
 )
 from swos_core.plugins import PluginRegistry, SupportRecord
@@ -59,10 +61,24 @@ class FakeAdapter:
 
     @property
     def capabilities(self) -> DeviceCapabilities:
-        return DeviceCapabilities(features=frozenset({"system"}))
+        return DeviceCapabilities(features=frozenset({"ports", "system"}))
 
     def get_system_info(self) -> SystemInfo:
         return SystemInfo(identity=self.identity, name="test", uptime_seconds=1)
+
+    def get_ports(self) -> tuple[PortInfo, ...]:
+        return (
+            PortInfo(
+                number=1,
+                name="Port1",
+                enabled=True,
+                link_up=True,
+                speed_mbps=1000,
+                full_duplex=True,
+                auto_negotiation=True,
+                flow_control=True,
+            ),
+        )
 
 
 def identity(version: str = "2.19") -> DeviceIdentity:
@@ -123,9 +139,38 @@ def test_policy_bound_device_rechecks_read_permission() -> None:
     )
 
     assert device.get_system_info().name == "test"
+    assert device.get_ports()[0].name == "Port1"
     assert device.warnings[0].code == "untested_firmware"
     with pytest.raises(UnsupportedFirmwareError):
         device._authorize(write=True)
+
+
+def test_policy_bound_device_rejects_unsupported_feature() -> None:
+    class SystemOnlyAdapter(FakeAdapter):
+        @property
+        def capabilities(self) -> DeviceCapabilities:
+            return DeviceCapabilities(features=frozenset({"system"}))
+
+    class SystemOnlyPlugin(FakePlugin):
+        def create(
+            self,
+            *,
+            identity: DeviceIdentity,
+            connection: DeviceConnection,
+            policy: FirmwareSafetyPolicy,
+            support: SupportRecord | None,
+        ) -> DeviceAdapter:
+            del connection, policy, support
+            return SystemOnlyAdapter(identity)
+
+    device = PluginRegistry([SystemOnlyPlugin()]).connect(
+        identity(),
+        DeviceConnection(url="http://192.0.2.1"),
+        FirmwareSafetyPolicy(),
+    )
+
+    with pytest.raises(UnsupportedFeatureError, match="ports"):
+        device.get_ports()
 
 
 def test_registry_reports_missing_plugin() -> None:

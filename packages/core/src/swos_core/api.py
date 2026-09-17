@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from swos_core.models import DeviceCapabilities, DeviceIdentity, SystemInfo
+from swos_core.errors import UnsupportedFeatureError
+from swos_core.models import DeviceCapabilities, DeviceIdentity, PortInfo, SystemInfo
 from swos_core.safety import FirmwareSafetyPolicy, SafetyWarning, enforce_firmware_policy
 
 
@@ -25,6 +26,11 @@ class DeviceAdapter(Protocol):
 
     def get_system_info(self) -> SystemInfo:
         """Read normalized system information from the device."""
+
+        ...
+
+    def get_ports(self) -> tuple[PortInfo, ...]:
+        """Read normalized port state from the device."""
 
         ...
 
@@ -70,6 +76,14 @@ class SwOSDevice:
 
         self._authorize(write=False)
         return self._adapter.get_system_info()
+
+    def get_ports(self) -> tuple[PortInfo, ...]:
+        """Read port state after enforcing read safety."""
+
+        self._authorize(write=False)
+        if not self.capabilities.supports("ports"):
+            raise UnsupportedFeatureError("ports")
+        return self._adapter.get_ports()
 
     def _authorize(self, *, write: bool) -> tuple[SafetyWarning, ...]:
         return enforce_firmware_policy(

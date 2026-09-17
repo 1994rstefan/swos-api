@@ -2,7 +2,7 @@ import json
 from importlib import import_module
 
 from swos_cli import __version__
-from swos_core.models import DeviceIdentity, SystemInfo
+from swos_core.models import DeviceIdentity, PortInfo, SystemInfo
 from swos_core.safety import SafetyWarning
 from typer.testing import CliRunner
 
@@ -29,6 +29,28 @@ class FakeDevice:
             static_ip="192.168.88.1",
             mac_address="02:00:00:00:00:01",
             serial_number="TEST1234",
+        )
+
+    def get_ports(self) -> tuple[PortInfo, ...]:
+        return (
+            PortInfo(
+                number=1,
+                name="Port1",
+                enabled=True,
+                link_up=True,
+                speed_mbps=1000,
+                full_duplex=True,
+                auto_negotiation=True,
+                flow_control=True,
+            ),
+            PortInfo(
+                number=2,
+                name="Port2",
+                enabled=True,
+                link_up=False,
+                auto_negotiation=True,
+                flow_control=False,
+            ),
         )
 
 
@@ -288,3 +310,33 @@ def test_system_show_includes_firmware_warnings(monkeypatch) -> None:  # type: i
 
     assert result.exit_code == 0
     assert json.loads(result.stdout)["data"]["warnings"][0]["code"] == "untested_firmware"
+
+
+def test_port_list_human_output_and_trailing_options(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    mock_registry(monkeypatch)
+
+    result = runner.invoke(
+        app,
+        ["port", "list", "--url", "http://192.0.2.1"],
+    )
+
+    assert result.exit_code == 0
+    assert "PORT  NAME" in result.stdout
+    assert "Port1" in result.stdout
+    assert "1000 Mbps" in result.stdout
+    assert "Port2" in result.stdout
+    assert "down" in result.stdout
+
+
+def test_port_list_json_output(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    mock_registry(monkeypatch)
+
+    result = runner.invoke(
+        app,
+        ["port", "list", "--url", "http://192.0.2.1", "-o", "json"],
+    )
+
+    assert result.exit_code == 0
+    ports = json.loads(result.stdout)["data"]["ports"]
+    assert ports[0]["speed_mbps"] == 1000
+    assert ports[1]["speed_mbps"] is None

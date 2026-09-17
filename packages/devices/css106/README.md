@@ -2,7 +2,7 @@
 
 Device support for the MikroTik CSS106 firmware family.
 
-The current release supports read-only system information for RB260GS
+The current release supports read-only system information and port state for RB260GS
 (`CSS106-5G-1S`) running SwOS `2.19`, build `0x6a181cd5`. RB260GSP is detected
 but remains unsupported until separately validated on hardware.
 

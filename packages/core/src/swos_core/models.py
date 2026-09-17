@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Generic, TypeVar
+from typing import Generic, Self, TypeVar
 
-from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, SecretStr
+from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, SecretStr, model_validator
 
 
 class DeviceIdentity(BaseModel):
@@ -56,6 +56,29 @@ class SystemInfo(BaseModel):
     static_ip: str | None = None
     mac_address: str | None = None
     serial_number: str | None = None
+
+
+class PortInfo(BaseModel):
+    """Device-independent operational and basic configured port state."""
+
+    model_config = ConfigDict(frozen=True)
+
+    number: int = Field(ge=1)
+    name: str
+    enabled: bool
+    link_up: bool
+    speed_mbps: int | None = Field(default=None, ge=1)
+    full_duplex: bool | None = None
+    auto_negotiation: bool
+    flow_control: bool
+
+    @model_validator(mode="after")
+    def validate_operational_state(self) -> Self:
+        if self.link_up and (self.speed_mbps is None or self.full_duplex is None):
+            raise ValueError("link-up ports require speed and duplex state")
+        if not self.link_up and (self.speed_mbps is not None or self.full_duplex is not None):
+            raise ValueError("link-down ports cannot have operational speed or duplex state")
+        return self
 
 
 ResultValue = TypeVar("ResultValue")

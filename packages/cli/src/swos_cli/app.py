@@ -12,7 +12,7 @@ from typing import Annotated, Any
 import typer
 import typer._click as click
 from dotenv import dotenv_values
-from swos_core import DeviceConnection, PluginRegistry
+from swos_core import DeviceConnection, PluginRegistry, SwOSDevice
 from swos_core.errors import SwOSError
 from swos_core.safety import FirmwareSafetyPolicy
 from typer.core import TyperGroup, TyperOption
@@ -132,6 +132,8 @@ app = typer.Typer(
 )
 system_app = typer.Typer(help="Read system information.", no_args_is_help=True)
 app.add_typer(system_app, name="system")
+port_app = typer.Typer(help="Read port state.", no_args_is_help=True)
+app.add_typer(port_app, name="port")
 
 
 @app.callback(invoke_without_command=True)
@@ -239,34 +241,8 @@ def system_show(ctx: typer.Context) -> None:
     cli_context: CliContext = ctx.ensure_object(CliContext)
     settings = cli_context.configuration.settings
     renderer = OutputRenderer(settings.output)
-    if settings.url is None:
-        renderer.error("configuration_error", "A device URL is required")
-        raise typer.Exit(code=2)
-
-    connection = DeviceConnection(
-        url=settings.url,
-        username=settings.username,
-        password=settings.password,
-        timeout=settings.timeout,
-        verify_tls=settings.verify_tls,
-    )
     try:
-        registry = PluginRegistry.discover()
-        identity = registry.probe(connection)
-        expected_models = {identity.product_code.casefold()}
-        if identity.marketing_name is not None:
-            expected_models.add(identity.marketing_name.casefold())
-        if settings.model.casefold() != "auto" and settings.model.casefold() not in expected_models:
-            raise ConfigurationError(
-                f"Configured model {settings.model!r} does not match detected "
-                f"device {identity.product_code!r}"
-            )
-        if settings.firmware != "auto" and settings.firmware != identity.firmware_version:
-            raise ConfigurationError(
-                f"Configured firmware {settings.firmware!r} does not match detected "
-                f"firmware {identity.firmware_version!r}"
-            )
-        connected_device = registry.connect(identity, connection, cli_context.firmware_policy)
+        connected_device = _connect_device(cli_context)
         info = connected_device.get_system_info()
     except ConfigurationError as exc:
         renderer.error("configuration_error", str(exc))
@@ -280,6 +256,7 @@ def system_show(ctx: typer.Context) -> None:
         data["warnings"] = [
             warning.model_dump(mode="json") for warning in connected_device.warnings
         ]
+    identity = info.identity
     model = identity.marketing_name or identity.product_code
     details = [
         f"Name: {info.name}",
@@ -299,6 +276,75 @@ def system_show(ctx: typer.Context) -> None:
         details.append(f"Static IP: {info.static_ip}")
     details.extend(f"Warning: {warning.message}" for warning in connected_device.warnings)
     renderer.success(data, human="\n".join(details))
+
+
+@port_app.command("list")
+def port_list(ctx: typer.Context) -> None:
+    """List normalized operational state for every port."""
+
+    cli_context: CliContext = ctx.ensure_object(CliContext)
+    renderer = OutputRenderer(cli_context.configuration.settings.output)
+    try:
+        connected_device = _connect_device(cli_context)
+        ports = connected_device.get_ports()
+    except ConfigurationError as exc:
+        renderer.error("configuration_error", str(exc))
+        raise typer.Exit(code=2) from exc
+    except SwOSError as exc:
+        renderer.error(_error_code(exc), str(exc))
+        raise typer.Exit(code=1) from exc
+
+    data: dict[str, Any] = {
+        "ports": [port.model_dump(mode="json") for port in ports],
+    }
+    if connected_device.warnings:
+        data["warnings"] = [
+            warning.model_dump(mode="json") for warning in connected_device.warnings
+        ]
+    lines = ["PORT  NAME   ENABLED  LINK  SPEED      DUPLEX  AUTONEG  FLOW-CONTROL"]
+    for port in ports:
+        speed = f"{port.speed_mbps} Mbps" if port.speed_mbps is not None else "-"
+        duplex = "full" if port.full_duplex else "half" if port.full_duplex is not None else "-"
+        lines.append(
+            f"{port.number:<5} {port.name:<6} {_yes_no(port.enabled):<8} "
+            f"{'up' if port.link_up else 'down':<5} {speed:<10} {duplex:<7} "
+            f"{_yes_no(port.auto_negotiation):<8} {_yes_no(port.flow_control)}"
+        )
+    lines.extend(f"Warning: {warning.message}" for warning in connected_device.warnings)
+    renderer.success(data, human="\n".join(lines))
+
+
+def _connect_device(cli_context: CliContext) -> SwOSDevice:
+    settings = cli_context.configuration.settings
+    if settings.url is None:
+        raise ConfigurationError("A device URL is required")
+    connection = DeviceConnection(
+        url=settings.url,
+        username=settings.username,
+        password=settings.password,
+        timeout=settings.timeout,
+        verify_tls=settings.verify_tls,
+    )
+    registry = PluginRegistry.discover()
+    identity = registry.probe(connection)
+    expected_models = {identity.product_code.casefold()}
+    if identity.marketing_name is not None:
+        expected_models.add(identity.marketing_name.casefold())
+    if settings.model.casefold() != "auto" and settings.model.casefold() not in expected_models:
+        raise ConfigurationError(
+            f"Configured model {settings.model!r} does not match detected "
+            f"device {identity.product_code!r}"
+        )
+    if settings.firmware != "auto" and settings.firmware != identity.firmware_version:
+        raise ConfigurationError(
+            f"Configured firmware {settings.firmware!r} does not match detected "
+            f"firmware {identity.firmware_version!r}"
+        )
+    return registry.connect(identity, connection, cli_context.firmware_policy)
+
+
+def _yes_no(value: bool) -> str:
+    return "yes" if value else "no"
 
 
 def _error_code(error: SwOSError) -> str:

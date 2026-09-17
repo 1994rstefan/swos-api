@@ -12,10 +12,12 @@ from swos_device_css106.protocol import (
     UPTIME_TICKS_PER_SECOND,
     identity_from_system,
     parse_payload,
+    ports_from_link_payload,
     system_info_from_payload,
 )
 
 FIXTURE = Path(__file__).parent / "fixtures" / "sys.b"
+LINK_FIXTURE = Path(__file__).parent / "fixtures" / "link.b"
 
 
 class FakeTransport:
@@ -43,6 +45,10 @@ class FakeTransport:
 
 def fixture_payload() -> bytes:
     return FIXTURE.read_bytes()
+
+
+def link_fixture_payload() -> bytes:
+    return LINK_FIXTURE.read_bytes()
 
 
 def test_plugin_declares_exact_hardware_validated_support() -> None:
@@ -85,6 +91,80 @@ def test_probe_and_adapter_normalize_system_data() -> None:
     assert info.mac_address == "02:00:00:00:00:01"
     assert info.serial_number == "TEST1234"
     assert transport.requests == [("GET", "/sys.b"), ("GET", "/sys.b")]
+
+
+def test_adapter_normalizes_port_state() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    transport = FakeTransport(link_fixture_payload())
+    tested_plugin = CSS106Plugin(transport_factory=lambda connection: transport)  # type: ignore[arg-type]
+    adapter = tested_plugin.create(
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=tested_plugin.support_records()[0],
+    )
+
+    ports = adapter.get_ports()
+
+    assert len(ports) == 6
+    assert ports[0].name == "Port1"
+    assert ports[0].link_up
+    assert ports[0].speed_mbps == 1000
+    assert ports[0].full_duplex is True
+    assert ports[4].name == "Port5"
+    assert not ports[4].link_up
+    assert ports[4].speed_mbps is None
+    assert ports[4].full_duplex is None
+    assert ports[5].name == "SFP"
+    assert transport.requests == [("GET", "/link.b")]
+
+
+def test_port_parser_rejects_inconsistent_link_fields() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+
+    wrong_length = parse_payload(link_fixture_payload())
+    wrong_length["nm"] = ["506f727431"]
+    with pytest.raises(ProtocolError, match="must contain 6 values"):
+        ports_from_link_payload(wrong_length, identity)
+
+    oversized_mask = parse_payload(link_fixture_payload())
+    oversized_mask["en"] = 0x7F
+    with pytest.raises(ProtocolError, match="6-port bitmask"):
+        ports_from_link_payload(oversized_mask, identity)
+
+    unknown_speed = parse_payload(link_fixture_payload())
+    unknown_speed["lnk"] = 0x3F
+    with pytest.raises(ProtocolError, match="unknown link speed 3"):
+        ports_from_link_payload(unknown_speed, identity)
+
+
+def test_port_parser_handles_supported_link_variants_and_empty_names() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    data = parse_payload(link_fixture_payload())
+    names = data["nm"]
+    speeds = data["spd"]
+    assert isinstance(names, list)
+    assert isinstance(speeds, list)
+    names[0] = ""
+    speeds[0] = 0
+    speeds[1] = 1
+    data["en"] = 0x3E
+    data["an"] = 0x3E
+    data["fct"] = 0x3E
+    data["dpx"] = 0x2D
+
+    ports = ports_from_link_payload(data, identity)
+
+    assert ports[0].name == ""
+    assert not ports[0].enabled
+    assert ports[0].speed_mbps == 10
+    assert not ports[0].auto_negotiation
+    assert not ports[0].flow_control
+    assert ports[1].speed_mbps == 100
+    assert ports[1].full_duplex is False
 
 
 def test_parser_handles_nested_values_without_eval() -> None:

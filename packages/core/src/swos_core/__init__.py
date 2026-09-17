@@ -3,12 +3,13 @@
 from importlib.metadata import PackageNotFoundError, version
 
 from swos_core.api import DeviceAdapter, SwOSDevice
-from swos_core.errors import DeviceDetectionError
+from swos_core.errors import DeviceDetectionError, UnsupportedFeatureError
 from swos_core.models import (
     DeviceCapabilities,
     DeviceConnection,
     DeviceIdentity,
     OperationResult,
+    PortInfo,
     SystemInfo,
 )
 from swos_core.plugins import DevicePlugin, PluginRegistry, SupportRecord
@@ -29,9 +30,11 @@ __all__ = [
     "FirmwareSafetyPolicy",
     "OperationResult",
     "PluginRegistry",
+    "PortInfo",
     "SafetyWarning",
     "SupportRecord",
     "SwOSDevice",
     "SystemInfo",
+    "UnsupportedFeatureError",
     "__version__",
 ]

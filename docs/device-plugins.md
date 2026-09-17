@@ -40,5 +40,6 @@ must be tested independently even when multiple products share a firmware
 image.
 
 The current `swos-device-css106` package supports read-only system information
-for RB260GS (`CSS106-5G-1S`) running SwOS `2.19`, build `0x6a181cd5`.
-RB260GSP is recognized as a separate product but remains unsupported.
+and port state for RB260GS (`CSS106-5G-1S`) running SwOS `2.19`, build
+`0x6a181cd5`. RB260GSP is recognized as a separate product but remains
+unsupported.

@@ -1,5 +1,6 @@
+import pytest
 from pydantic import ValidationError
-from swos_core.models import DeviceCapabilities, DeviceConnection, DeviceIdentity
+from swos_core.models import DeviceCapabilities, DeviceConnection, DeviceIdentity, PortInfo
 
 
 def test_device_identity_is_immutable() -> None:
@@ -29,3 +30,29 @@ def test_capability_lookup() -> None:
 
     assert capabilities.supports("vlan")
     assert not capabilities.supports("poe")
+
+
+def test_port_operational_state_is_consistent() -> None:
+    port = PortInfo(
+        number=1,
+        name="Port1",
+        enabled=True,
+        link_up=True,
+        speed_mbps=1000,
+        full_duplex=True,
+        auto_negotiation=True,
+        flow_control=True,
+    )
+
+    assert port.speed_mbps == 1000
+    with pytest.raises(ValidationError, match="link-down"):
+        PortInfo(
+            number=1,
+            name="Port1",
+            enabled=True,
+            link_up=False,
+            speed_mbps=1000,
+            full_duplex=True,
+            auto_negotiation=True,
+            flow_control=True,
+        )

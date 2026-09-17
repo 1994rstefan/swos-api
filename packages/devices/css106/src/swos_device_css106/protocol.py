@@ -9,7 +9,7 @@ from unicodedata import category
 
 from pydantic import ValidationError
 from swos_core.errors import ProtocolError
-from swos_core.models import DeviceIdentity, SystemInfo
+from swos_core.models import DeviceIdentity, PortInfo, SystemInfo
 
 SwOSValue: TypeAlias = int | str | list["SwOSValue"] | dict[str, "SwOSValue"] | None
 
@@ -17,6 +17,11 @@ PRODUCT_NAMES = {
     "CSS106-5G-1S": "RB260GS",
     "CSS106-1G-4P-1S": "RB260GSP",
 }
+PORT_COUNTS = {
+    "CSS106-5G-1S": 6,
+    "CSS106-1G-4P-1S": 6,
+}
+LINK_SPEEDS_MBPS = {0: 10, 1: 100, 2: 1000}
 MAX_PAYLOAD_BYTES = 1024 * 1024
 MAX_NESTING_DEPTH = 64
 MAX_NUMBER_DIGITS = 32
@@ -75,6 +80,60 @@ def system_info_from_payload(data: dict[str, SwOSValue], identity: DeviceIdentit
         raise ProtocolError("CSS106 system response contains invalid values") from exc
 
 
+def ports_from_link_payload(
+    data: dict[str, SwOSValue], identity: DeviceIdentity
+) -> tuple[PortInfo, ...]:
+    """Normalize CSS106 link fields into ordered public port models."""
+
+    try:
+        port_count = PORT_COUNTS[identity.product_code]
+    except KeyError as exc:
+        raise ProtocolError(f"Unknown CSS106 product {identity.product_code!r}") from exc
+
+    raw_names = _array(data, "nm", port_count)
+    raw_speeds = _array(data, "spd", port_count)
+    enabled = _bit_values(data, "en", port_count)
+    link_up = _bit_values(data, "lnk", port_count)
+    full_duplex = _bit_values(data, "dpx", port_count)
+    auto_negotiation = _bit_values(data, "an", port_count)
+    flow_control = _bit_values(data, "fct", port_count)
+
+    ports: list[PortInfo] = []
+    for index in range(port_count):
+        raw_name = raw_names[index]
+        raw_speed = raw_speeds[index]
+        if not isinstance(raw_name, str):
+            raise ProtocolError(f"CSS106 field 'nm[{index}]' must be a string")
+        if not isinstance(raw_speed, int):
+            raise ProtocolError(f"CSS106 field 'spd[{index}]' must be an integer")
+        speed_mbps = None
+        duplex = None
+        if link_up[index]:
+            try:
+                speed_mbps = LINK_SPEEDS_MBPS[raw_speed]
+            except KeyError as exc:
+                raise ProtocolError(
+                    f"CSS106 field 'spd[{index}]' has unknown link speed {raw_speed}"
+                ) from exc
+            duplex = full_duplex[index]
+        try:
+            ports.append(
+                PortInfo(
+                    number=index + 1,
+                    name=_decode_hex_text(raw_name, f"nm[{index}]"),
+                    enabled=enabled[index],
+                    link_up=link_up[index],
+                    speed_mbps=speed_mbps,
+                    full_duplex=duplex,
+                    auto_negotiation=auto_negotiation[index],
+                    flow_control=flow_control[index],
+                )
+            )
+        except ValidationError as exc:
+            raise ProtocolError(f"CSS106 port {index + 1} contains invalid values") from exc
+    return tuple(ports)
+
+
 def _integer(data: dict[str, SwOSValue], field: str) -> int:
     value = data.get(field)
     if not isinstance(value, int):
@@ -89,6 +148,22 @@ def _string(data: dict[str, SwOSValue], field: str) -> str:
     return value
 
 
+def _array(data: dict[str, SwOSValue], field: str, length: int) -> list[SwOSValue]:
+    value = data.get(field)
+    if not isinstance(value, list):
+        raise ProtocolError(f"CSS106 field {field!r} must be an array")
+    if len(value) != length:
+        raise ProtocolError(f"CSS106 field {field!r} must contain {length} values")
+    return value
+
+
+def _bit_values(data: dict[str, SwOSValue], field: str, count: int) -> tuple[bool, ...]:
+    value = _integer(data, field)
+    if value < 0 or value >> count:
+        raise ProtocolError(f"CSS106 field {field!r} exceeds the {count}-port bitmask")
+    return tuple(bool(value & (1 << index)) for index in range(count))
+
+
 def _unsigned_32(data: dict[str, SwOSValue], field: str) -> int:
     value = _integer(data, field)
     if not 0 <= value <= 0xFFFFFFFF:
@@ -101,7 +176,10 @@ def _uptime_seconds(data: dict[str, SwOSValue]) -> int:
 
 
 def _hex_text(data: dict[str, SwOSValue], field: str) -> str:
-    value = _string(data, field)
+    return _decode_hex_text(_string(data, field), field)
+
+
+def _decode_hex_text(value: str, field: str) -> str:
     try:
         decoded = bytes.fromhex(value).decode("utf-8")
     except (UnicodeDecodeError, ValueError) as exc:

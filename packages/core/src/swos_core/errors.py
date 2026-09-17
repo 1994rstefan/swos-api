@@ -19,6 +19,14 @@ class ProtocolError(SwOSError):
     """A device returned a response that could not be decoded safely."""
 
 
+class UnsupportedFeatureError(SwOSError):
+    """The connected device adapter does not expose a requested feature."""
+
+    def __init__(self, feature: str) -> None:
+        super().__init__(f"The connected device does not support {feature!r}")
+        self.feature = feature
+
+
 class DevicePluginError(SwOSError):
     """A device plugin could not be loaded or selected."""
 

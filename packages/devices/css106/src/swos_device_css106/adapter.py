@@ -5,13 +5,20 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from swos_core.errors import ProtocolError
-from swos_core.models import DeviceCapabilities, DeviceConnection, DeviceIdentity, SystemInfo
+from swos_core.models import (
+    DeviceCapabilities,
+    DeviceConnection,
+    DeviceIdentity,
+    PortInfo,
+    SystemInfo,
+)
 from swos_core.transport import HttpTransport
 
 from swos_device_css106.protocol import (
     MAX_PAYLOAD_BYTES,
     identity_from_system,
     parse_payload,
+    ports_from_link_payload,
     system_info_from_payload,
 )
 
@@ -35,7 +42,7 @@ class CSS106Adapter:
 
     @property
     def capabilities(self) -> DeviceCapabilities:
-        return DeviceCapabilities(features=frozenset({"system"}))
+        return DeviceCapabilities(features=frozenset({"ports", "system"}))
 
     def get_system_info(self) -> SystemInfo:
         with self._transport_factory(self._connection) as transport:
@@ -49,3 +56,12 @@ class CSS106Adapter:
         if reported_identity != self._identity:
             raise ProtocolError("CSS106 identity changed after device probing")
         return system_info_from_payload(data, reported_identity)
+
+    def get_ports(self) -> tuple[PortInfo, ...]:
+        with self._transport_factory(self._connection) as transport:
+            payload = transport.request(
+                "GET",
+                "/link.b",
+                max_response_bytes=MAX_PAYLOAD_BYTES,
+            )
+        return ports_from_link_payload(parse_payload(payload), self._identity)
