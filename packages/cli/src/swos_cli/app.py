@@ -314,6 +314,40 @@ def port_list(ctx: typer.Context) -> None:
     renderer.success(data, human="\n".join(lines))
 
 
+@port_app.command("stats")
+def port_stats(ctx: typer.Context) -> None:
+    """List cumulative traffic and error counters for every port."""
+
+    cli_context: CliContext = ctx.ensure_object(CliContext)
+    renderer = OutputRenderer(cli_context.configuration.settings.output)
+    try:
+        connected_device = _connect_device(cli_context)
+        statistics = connected_device.get_port_statistics()
+    except ConfigurationError as exc:
+        renderer.error("configuration_error", str(exc))
+        raise typer.Exit(code=2) from exc
+    except SwOSError as exc:
+        renderer.error(_error_code(exc), str(exc))
+        raise typer.Exit(code=1) from exc
+
+    data: dict[str, Any] = {
+        "ports": [port.model_dump(mode="json") for port in statistics],
+    }
+    if connected_device.warnings:
+        data["warnings"] = [
+            warning.model_dump(mode="json") for warning in connected_device.warnings
+        ]
+    lines = ["PORT  RX BYTES      TX BYTES      RX PACKETS  TX PACKETS  RX ERRORS  TX ERRORS"]
+    for port in statistics:
+        lines.append(
+            f"{port.number:<5} {port.rx_bytes:<13} {port.tx_bytes:<13} "
+            f"{port.rx_packets:<11} {port.tx_packets:<11} "
+            f"{port.rx_errors:<10} {port.tx_errors}"
+        )
+    lines.extend(f"Warning: {warning.message}" for warning in connected_device.warnings)
+    renderer.success(data, human="\n".join(lines))
+
+
 def _connect_device(cli_context: CliContext) -> SwOSDevice:
     settings = cli_context.configuration.settings
     if settings.url is None:

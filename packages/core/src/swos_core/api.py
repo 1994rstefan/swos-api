@@ -5,7 +5,13 @@ from __future__ import annotations
 from typing import Protocol
 
 from swos_core.errors import UnsupportedFeatureError
-from swos_core.models import DeviceCapabilities, DeviceIdentity, PortInfo, SystemInfo
+from swos_core.models import (
+    DeviceCapabilities,
+    DeviceIdentity,
+    PortInfo,
+    PortStatistics,
+    SystemInfo,
+)
 from swos_core.safety import FirmwareSafetyPolicy, SafetyWarning, enforce_firmware_policy
 
 
@@ -31,6 +37,11 @@ class DeviceAdapter(Protocol):
 
     def get_ports(self) -> tuple[PortInfo, ...]:
         """Read normalized port state from the device."""
+
+        ...
+
+    def get_port_statistics(self) -> tuple[PortStatistics, ...]:
+        """Read normalized cumulative port counters from the device."""
 
         ...
 
@@ -84,6 +95,14 @@ class SwOSDevice:
         if not self.capabilities.supports("ports"):
             raise UnsupportedFeatureError("ports")
         return self._adapter.get_ports()
+
+    def get_port_statistics(self) -> tuple[PortStatistics, ...]:
+        """Read cumulative counters after enforcing read safety."""
+
+        self._authorize(write=False)
+        if not self.capabilities.supports("port_statistics"):
+            raise UnsupportedFeatureError("port_statistics")
+        return self._adapter.get_port_statistics()
 
     def _authorize(self, *, write: bool) -> tuple[SafetyWarning, ...]:
         return enforce_firmware_policy(

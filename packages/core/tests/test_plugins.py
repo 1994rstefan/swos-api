@@ -15,6 +15,7 @@ from swos_core.models import (
     DeviceConnection,
     DeviceIdentity,
     PortInfo,
+    PortStatistics,
     SystemInfo,
 )
 from swos_core.plugins import PluginRegistry, SupportRecord
@@ -61,7 +62,7 @@ class FakeAdapter:
 
     @property
     def capabilities(self) -> DeviceCapabilities:
-        return DeviceCapabilities(features=frozenset({"ports", "system"}))
+        return DeviceCapabilities(features=frozenset({"port_statistics", "ports", "system"}))
 
     def get_system_info(self) -> SystemInfo:
         return SystemInfo(identity=self.identity, name="test", uptime_seconds=1)
@@ -77,6 +78,19 @@ class FakeAdapter:
                 full_duplex=True,
                 auto_negotiation=True,
                 flow_control=True,
+            ),
+        )
+
+    def get_port_statistics(self) -> tuple[PortStatistics, ...]:
+        return (
+            PortStatistics(
+                number=1,
+                rx_bytes=1,
+                tx_bytes=2,
+                rx_packets=3,
+                tx_packets=4,
+                rx_errors=0,
+                tx_errors=0,
             ),
         )
 
@@ -140,6 +154,7 @@ def test_policy_bound_device_rechecks_read_permission() -> None:
 
     assert device.get_system_info().name == "test"
     assert device.get_ports()[0].name == "Port1"
+    assert device.get_port_statistics()[0].tx_bytes == 2
     assert device.warnings[0].code == "untested_firmware"
     with pytest.raises(UnsupportedFirmwareError):
         device._authorize(write=True)
@@ -171,6 +186,9 @@ def test_policy_bound_device_rejects_unsupported_feature() -> None:
 
     with pytest.raises(UnsupportedFeatureError, match="ports"):
         device.get_ports()
+    with pytest.raises(UnsupportedFeatureError, match="port statistics") as error:
+        device.get_port_statistics()
+    assert error.value.feature == "port_statistics"
 
 
 def test_registry_reports_missing_plugin() -> None:

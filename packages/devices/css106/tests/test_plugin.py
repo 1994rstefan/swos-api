@@ -12,12 +12,14 @@ from swos_device_css106.protocol import (
     UPTIME_TICKS_PER_SECOND,
     identity_from_system,
     parse_payload,
+    port_statistics_from_payload,
     ports_from_link_payload,
     system_info_from_payload,
 )
 
 FIXTURE = Path(__file__).parent / "fixtures" / "sys.b"
 LINK_FIXTURE = Path(__file__).parent / "fixtures" / "link.b"
+STATS_FIXTURE = Path(__file__).parent / "fixtures" / "stats.b"
 
 
 class FakeTransport:
@@ -49,6 +51,10 @@ def fixture_payload() -> bytes:
 
 def link_fixture_payload() -> bytes:
     return LINK_FIXTURE.read_bytes()
+
+
+def stats_fixture_payload() -> bytes:
+    return STATS_FIXTURE.read_bytes()
 
 
 def test_plugin_declares_exact_hardware_validated_support() -> None:
@@ -165,6 +171,41 @@ def test_port_parser_handles_supported_link_variants_and_empty_names() -> None:
     assert not ports[0].flow_control
     assert ports[1].speed_mbps == 100
     assert ports[1].full_duplex is False
+
+
+def test_adapter_normalizes_cumulative_port_statistics() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    transport = FakeTransport(stats_fixture_payload())
+    tested_plugin = CSS106Plugin(transport_factory=lambda connection: transport)  # type: ignore[arg-type]
+    adapter = tested_plugin.create(
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=tested_plugin.support_records()[0],
+    )
+
+    statistics = adapter.get_port_statistics()
+
+    assert len(statistics) == 6
+    assert statistics[0].rx_bytes == 0x10
+    assert statistics[1].rx_bytes == 0x100000020
+    assert statistics[2].tx_bytes == 0x100000300
+    assert statistics[1].rx_errors == 1
+    assert statistics[2].tx_errors == 2
+    assert transport.requests == [("GET", "/!stats.b")]
+
+
+def test_port_statistics_reject_invalid_counter_arrays() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    data = parse_payload(stats_fixture_payload())
+    rx_packets = data["rtp"]
+    assert isinstance(rx_packets, list)
+    rx_packets[0] = -1
+
+    with pytest.raises(ProtocolError, match="unsigned 32-bit"):
+        port_statistics_from_payload(data, identity)
 
 
 def test_parser_handles_nested_values_without_eval() -> None:

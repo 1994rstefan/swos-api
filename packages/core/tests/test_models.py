@@ -1,6 +1,12 @@
 import pytest
 from pydantic import ValidationError
-from swos_core.models import DeviceCapabilities, DeviceConnection, DeviceIdentity, PortInfo
+from swos_core.models import (
+    DeviceCapabilities,
+    DeviceConnection,
+    DeviceIdentity,
+    PortInfo,
+    PortStatistics,
+)
 
 
 def test_device_identity_is_immutable() -> None:
@@ -55,4 +61,17 @@ def test_port_operational_state_is_consistent() -> None:
             full_duplex=True,
             auto_negotiation=True,
             flow_control=True,
+        )
+
+
+def test_port_statistics_reject_negative_counters() -> None:
+    with pytest.raises(ValidationError):
+        PortStatistics(
+            number=1,
+            rx_bytes=-1,
+            tx_bytes=0,
+            rx_packets=0,
+            tx_packets=0,
+            rx_errors=0,
+            tx_errors=0,
         )

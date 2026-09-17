@@ -9,7 +9,7 @@ from unicodedata import category
 
 from pydantic import ValidationError
 from swos_core.errors import ProtocolError
-from swos_core.models import DeviceIdentity, PortInfo, SystemInfo
+from swos_core.models import DeviceIdentity, PortInfo, PortStatistics, SystemInfo
 
 SwOSValue: TypeAlias = int | str | list["SwOSValue"] | dict[str, "SwOSValue"] | None
 
@@ -134,6 +134,36 @@ def ports_from_link_payload(
     return tuple(ports)
 
 
+def port_statistics_from_payload(
+    data: dict[str, SwOSValue], identity: DeviceIdentity
+) -> tuple[PortStatistics, ...]:
+    """Normalize cumulative CSS106 counters without interpreting live-rate fields."""
+
+    try:
+        port_count = PORT_COUNTS[identity.product_code]
+    except KeyError as exc:
+        raise ProtocolError(f"Unknown CSS106 product {identity.product_code!r}") from exc
+
+    rx_bytes = _wide_counter_values(data, "rb", "rbh", port_count)
+    tx_bytes = _wide_counter_values(data, "tb", "tbh", port_count)
+    rx_packets = _uint32_values(data, "rtp", port_count)
+    tx_packets = _uint32_values(data, "ttp", port_count)
+    rx_errors = _uint32_values(data, "rte", port_count)
+    tx_errors = _uint32_values(data, "tte", port_count)
+    return tuple(
+        PortStatistics(
+            number=index + 1,
+            rx_bytes=rx_bytes[index],
+            tx_bytes=tx_bytes[index],
+            rx_packets=rx_packets[index],
+            tx_packets=tx_packets[index],
+            rx_errors=rx_errors[index],
+            tx_errors=tx_errors[index],
+        )
+        for index in range(port_count)
+    )
+
+
 def _integer(data: dict[str, SwOSValue], field: str) -> int:
     value = data.get(field)
     if not isinstance(value, int):
@@ -162,6 +192,26 @@ def _bit_values(data: dict[str, SwOSValue], field: str, count: int) -> tuple[boo
     if value < 0 or value >> count:
         raise ProtocolError(f"CSS106 field {field!r} exceeds the {count}-port bitmask")
     return tuple(bool(value & (1 << index)) for index in range(count))
+
+
+def _uint32_values(data: dict[str, SwOSValue], field: str, count: int) -> tuple[int, ...]:
+    raw_values = _array(data, field, count)
+    values: list[int] = []
+    for index, value in enumerate(raw_values):
+        if not isinstance(value, int) or not 0 <= value <= 0xFFFFFFFF:
+            raise ProtocolError(
+                f"CSS106 field '{field}[{index}]' must be an unsigned 32-bit integer"
+            )
+        values.append(value)
+    return tuple(values)
+
+
+def _wide_counter_values(
+    data: dict[str, SwOSValue], low_field: str, high_field: str, count: int
+) -> tuple[int, ...]:
+    low = _uint32_values(data, low_field, count)
+    high = _uint32_values(data, high_field, count)
+    return tuple(low[index] | (high[index] << 32) for index in range(count))
 
 
 def _unsigned_32(data: dict[str, SwOSValue], field: str) -> int:

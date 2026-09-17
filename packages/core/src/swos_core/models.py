@@ -81,6 +81,20 @@ class PortInfo(BaseModel):
         return self
 
 
+class PortStatistics(BaseModel):
+    """Device-independent cumulative counters for one port."""
+
+    model_config = ConfigDict(frozen=True)
+
+    number: int = Field(ge=1)
+    rx_bytes: int = Field(ge=0)
+    tx_bytes: int = Field(ge=0)
+    rx_packets: int = Field(ge=0)
+    tx_packets: int = Field(ge=0)
+    rx_errors: int = Field(ge=0)
+    tx_errors: int = Field(ge=0)
+
+
 ResultValue = TypeVar("ResultValue")
 
 

@@ -41,6 +41,7 @@ swosctl -o json-pretty --version
 swosctl --device office system show
 swosctl system show --device office
 swosctl port list --device office
+swosctl port stats --device office
 ```
 
 Global options may be placed before, between, or after command names. The two
@@ -82,7 +83,7 @@ Currently supported:
 
 | Device | Product code | Firmware | Build | Operations |
 | --- | --- | --- | --- | --- |
-| RB260GS | `CSS106-5G-1S` | `2.19` | `0x6a181cd5` | Read system and port state |
+| RB260GS | `CSS106-5G-1S` | `2.19` | `0x6a181cd5` | Read system, port state, and counters |
 
 ## License
 

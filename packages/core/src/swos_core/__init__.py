@@ -10,6 +10,7 @@ from swos_core.models import (
     DeviceIdentity,
     OperationResult,
     PortInfo,
+    PortStatistics,
     SystemInfo,
 )
 from swos_core.plugins import DevicePlugin, PluginRegistry, SupportRecord
@@ -31,6 +32,7 @@ __all__ = [
     "OperationResult",
     "PluginRegistry",
     "PortInfo",
+    "PortStatistics",
     "SafetyWarning",
     "SupportRecord",
     "SwOSDevice",

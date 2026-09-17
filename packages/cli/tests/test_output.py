@@ -2,7 +2,7 @@ import json
 from importlib import import_module
 
 from swos_cli import __version__
-from swos_core.models import DeviceIdentity, PortInfo, SystemInfo
+from swos_core.models import DeviceIdentity, PortInfo, PortStatistics, SystemInfo
 from swos_core.safety import SafetyWarning
 from typer.testing import CliRunner
 
@@ -50,6 +50,19 @@ class FakeDevice:
                 link_up=False,
                 auto_negotiation=True,
                 flow_control=False,
+            ),
+        )
+
+    def get_port_statistics(self) -> tuple[PortStatistics, ...]:
+        return (
+            PortStatistics(
+                number=1,
+                rx_bytes=1234,
+                tx_bytes=5678,
+                rx_packets=12,
+                tx_packets=34,
+                rx_errors=0,
+                tx_errors=1,
             ),
         )
 
@@ -340,3 +353,19 @@ def test_port_list_json_output(monkeypatch) -> None:  # type: ignore[no-untyped-
     ports = json.loads(result.stdout)["data"]["ports"]
     assert ports[0]["speed_mbps"] == 1000
     assert ports[1]["speed_mbps"] is None
+
+
+def test_port_stats_human_and_json_output(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    mock_registry(monkeypatch)
+
+    human = runner.invoke(app, ["port", "stats", "--url", "http://192.0.2.1"])
+    machine = runner.invoke(
+        app,
+        ["port", "stats", "--url", "http://192.0.2.1", "-ojson"],
+    )
+
+    assert human.exit_code == 0
+    assert "RX BYTES" in human.stdout
+    assert "1234" in human.stdout
+    assert machine.exit_code == 0
+    assert json.loads(machine.stdout)["data"]["ports"][0]["tx_errors"] == 1

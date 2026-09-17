@@ -23,7 +23,8 @@ class UnsupportedFeatureError(SwOSError):
     """The connected device adapter does not expose a requested feature."""
 
     def __init__(self, feature: str) -> None:
-        super().__init__(f"The connected device does not support {feature!r}")
+        label = feature.replace("_", " ")
+        super().__init__(f"The connected device does not support {label!r}")
         self.feature = feature
 
 
