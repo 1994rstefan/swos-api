@@ -200,6 +200,17 @@ class RstpInfo(BaseModel):
     ports: tuple[RstpPortInfo, ...]
 
 
+class SnmpInfo(BaseModel):
+    """Device-independent SNMP service configuration."""
+
+    model_config = ConfigDict(frozen=True)
+
+    enabled: bool
+    community: str = Field(max_length=64)
+    contact: str = Field(max_length=64)
+    location: str = Field(max_length=64)
+
+
 class VlanMode(StrEnum):
     """Ingress VLAN enforcement for a switch port."""
 

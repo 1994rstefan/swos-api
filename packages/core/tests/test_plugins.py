@@ -20,6 +20,7 @@ from swos_core.models import (
     PortVlanInfo,
     RstpInfo,
     RstpPortInfo,
+    SnmpInfo,
     SystemInfo,
     VlanInfo,
     VlanPortMembership,
@@ -69,7 +70,9 @@ class FakeAdapter:
     @property
     def capabilities(self) -> DeviceCapabilities:
         return DeviceCapabilities(
-            features=frozenset({"hosts", "port_statistics", "ports", "rstp", "system", "vlan"})
+            features=frozenset(
+                {"hosts", "port_statistics", "ports", "rstp", "snmp", "system", "vlan"}
+            )
         )
 
     def get_system_info(self) -> SystemInfo:
@@ -130,6 +133,9 @@ class FakeAdapter:
                 ),
             ),
         )
+
+    def get_snmp(self) -> SnmpInfo:
+        return SnmpInfo(enabled=True, community="public", contact="Ops", location="Office")
 
     def get_port_vlans(self) -> tuple[PortVlanInfo, ...]:
         return (
@@ -216,6 +222,7 @@ def test_policy_bound_device_rechecks_read_permission() -> None:
     assert device.get_port_statistics()[0].tx_bytes == 2
     assert device.get_hosts()[0].port_numbers == (1,)
     assert device.get_rstp().ports[0].role.value == "designated"
+    assert device.get_snmp().community == "public"
     assert device.get_port_vlans()[0].default_vlan_id == 10
     assert device.get_vlans()[0].vlan_id == 10
     assert device.warnings[0].code == "untested_firmware"
@@ -256,6 +263,8 @@ def test_policy_bound_device_rejects_unsupported_feature() -> None:
         device.get_hosts()
     with pytest.raises(UnsupportedFeatureError, match="rstp"):
         device.get_rstp()
+    with pytest.raises(UnsupportedFeatureError, match="snmp"):
+        device.get_snmp()
     with pytest.raises(UnsupportedFeatureError, match="vlan"):
         device.get_port_vlans()
     with pytest.raises(UnsupportedFeatureError, match="vlan"):

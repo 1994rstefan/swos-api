@@ -10,6 +10,7 @@ from swos_core.models import (
     PortVlanInfo,
     RstpInfo,
     RstpPortInfo,
+    SnmpInfo,
     SystemInfo,
     VlanInfo,
     VlanPortMembership,
@@ -112,6 +113,9 @@ class FakeDevice:
                 ),
             ),
         )
+
+    def get_snmp(self) -> SnmpInfo:
+        return SnmpInfo(enabled=True, community="public", contact="Ops", location="Office")
 
     def get_port_vlans(self) -> tuple[PortVlanInfo, ...]:
         return (
@@ -479,6 +483,21 @@ def test_rstp_show_human_and_json_output(monkeypatch) -> None:  # type: ignore[n
     data = json.loads(machine.stdout)["data"]
     assert data["cost_mode"] == "short"
     assert data["ports"][0]["state"] == "forwarding"
+
+
+def test_snmp_show_outputs_community_normally(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    mock_registry(monkeypatch)
+
+    human = runner.invoke(app, ["snmp", "show", "--url", "http://192.0.2.1"])
+    machine = runner.invoke(
+        app,
+        ["snmp", "show", "--url", "http://192.0.2.1", "-ojson"],
+    )
+
+    assert human.exit_code == 0
+    assert "Community: public" in human.stdout
+    assert machine.exit_code == 0
+    assert json.loads(machine.stdout)["data"]["community"] == "public"
 
 
 def test_vlan_ports_human_and_json_output(monkeypatch) -> None:  # type: ignore[no-untyped-def]

@@ -138,6 +138,8 @@ host_app = typer.Typer(help="Read forwarding-database entries.", no_args_is_help
 app.add_typer(host_app, name="host")
 rstp_app = typer.Typer(help="Read spanning-tree state.", no_args_is_help=True)
 app.add_typer(rstp_app, name="rstp")
+snmp_app = typer.Typer(help="Read SNMP configuration.", no_args_is_help=True)
+app.add_typer(snmp_app, name="snmp")
 vlan_app = typer.Typer(help="Read VLAN configuration.", no_args_is_help=True)
 app.add_typer(vlan_app, name="vlan")
 
@@ -424,6 +426,37 @@ def rstp_show(ctx: typer.Context) -> None:
             f"{port.role.value:<11} {port.root_path_cost:<10} "
             f"{port.port_type.value.replace('_', ' '):<15} {port.state.value}"
         )
+    lines.extend(f"Warning: {warning.message}" for warning in connected_device.warnings)
+    renderer.success(data, human="\n".join(lines))
+
+
+@snmp_app.command("show")
+def snmp_show(ctx: typer.Context) -> None:
+    """Show normalized SNMP service configuration."""
+
+    cli_context: CliContext = ctx.ensure_object(CliContext)
+    renderer = OutputRenderer(cli_context.configuration.settings.output)
+    try:
+        connected_device = _connect_device(cli_context)
+        info = connected_device.get_snmp()
+    except ConfigurationError as exc:
+        renderer.error("configuration_error", str(exc))
+        raise typer.Exit(code=2) from exc
+    except SwOSError as exc:
+        renderer.error(_error_code(exc), str(exc))
+        raise typer.Exit(code=1) from exc
+
+    data = info.model_dump(mode="json")
+    if connected_device.warnings:
+        data["warnings"] = [
+            warning.model_dump(mode="json") for warning in connected_device.warnings
+        ]
+    lines = [
+        f"Enabled: {_yes_no(info.enabled)}",
+        f"Community: {info.community}",
+        f"Contact: {info.contact}",
+        f"Location: {info.location}",
+    ]
     lines.extend(f"Warning: {warning.message}" for warning in connected_device.warnings)
     renderer.success(data, human="\n".join(lines))
 

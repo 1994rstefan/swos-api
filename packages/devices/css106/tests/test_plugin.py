@@ -19,6 +19,7 @@ from swos_device_css106.protocol import (
     port_vlans_from_forwarding_payload,
     ports_from_link_payload,
     rstp_from_payloads,
+    snmp_from_payload,
     static_hosts_from_payload,
     system_info_from_payload,
     vlans_from_payload,
@@ -33,6 +34,7 @@ STATIC_HOST_FIXTURE = Path(__file__).parent / "fixtures" / "host.b"
 DYNAMIC_HOST_FIXTURE = Path(__file__).parent / "fixtures" / "dhost.b"
 RSTP_FIXTURE = Path(__file__).parent / "fixtures" / "rstp.b"
 RSTP_SYSTEM_FIXTURE = Path(__file__).parent / "fixtures" / "rstp_sys.b"
+SNMP_FIXTURE = Path(__file__).parent / "fixtures" / "snmp.b"
 
 
 class FakeTransport:
@@ -96,6 +98,10 @@ def rstp_fixture_payload() -> bytes:
 
 def rstp_system_fixture_payload() -> bytes:
     return RSTP_SYSTEM_FIXTURE.read_bytes()
+
+
+def snmp_fixture_payload() -> bytes:
+    return SNMP_FIXTURE.read_bytes()
 
 
 def test_plugin_declares_exact_hardware_validated_support() -> None:
@@ -403,6 +409,39 @@ def test_rstp_adapter_revalidates_identity_before_reading_state() -> None:
     with pytest.raises(ProtocolError, match="identity changed"):
         adapter.get_rstp()
     assert transport.requests == [("GET", "/sys.b")]
+
+
+def test_adapter_normalizes_snmp_configuration() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    transport = FakeTransport(snmp_fixture_payload())
+    tested_plugin = CSS106Plugin(transport_factory=lambda connection: transport)  # type: ignore[arg-type]
+    adapter = tested_plugin.create(
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=tested_plugin.support_records()[0],
+    )
+
+    info = adapter.get_snmp()
+
+    assert info.enabled
+    assert info.community == "public"
+    assert info.contact == "Ops"
+    assert info.location == "Office"
+    assert transport.requests == [("GET", "/snmp.b")]
+
+
+def test_snmp_decoder_rejects_invalid_values() -> None:
+    data = parse_payload(snmp_fixture_payload())
+    data["en"] = 2
+    with pytest.raises(ProtocolError, match="must be 0 or 1"):
+        snmp_from_payload(data)
+
+    data = parse_payload(snmp_fixture_payload())
+    data["com"] = "61" * 65
+    with pytest.raises(ProtocolError, match="invalid values"):
+        snmp_from_payload(data)
 
 
 def test_adapter_normalizes_port_vlan_policy() -> None:

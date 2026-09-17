@@ -13,6 +13,7 @@ from swos_core.models import (
     PortStatistics,
     PortVlanInfo,
     RstpInfo,
+    SnmpInfo,
     SystemInfo,
     VlanInfo,
 )
@@ -56,6 +57,11 @@ class DeviceAdapter(Protocol):
 
     def get_rstp(self) -> RstpInfo:
         """Read normalized bridge and per-port RSTP state."""
+
+        ...
+
+    def get_snmp(self) -> SnmpInfo:
+        """Read normalized SNMP service configuration."""
 
         ...
 
@@ -143,6 +149,14 @@ class SwOSDevice:
         if not self.capabilities.supports("rstp"):
             raise UnsupportedFeatureError("rstp")
         return self._adapter.get_rstp()
+
+    def get_snmp(self) -> SnmpInfo:
+        """Read SNMP configuration after enforcing read safety."""
+
+        self._authorize(write=False)
+        if not self.capabilities.supports("snmp"):
+            raise UnsupportedFeatureError("snmp")
+        return self._adapter.get_snmp()
 
     def get_port_vlans(self) -> tuple[PortVlanInfo, ...]:
         """Read per-port VLAN policy after enforcing read safety."""

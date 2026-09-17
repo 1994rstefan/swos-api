@@ -24,6 +24,7 @@ from swos_core.models import (
     RstpProtocol,
     RstpRole,
     RstpState,
+    SnmpInfo,
     SystemInfo,
     VlanEgressMode,
     VlanInfo,
@@ -316,6 +317,20 @@ def rstp_from_payloads(
         )
     except ValidationError as exc:
         raise ProtocolError("CSS106 RSTP response contains invalid values") from exc
+
+
+def snmp_from_payload(data: dict[str, SwOSValue]) -> SnmpInfo:
+    """Normalize CSS106 SNMP service fields."""
+
+    try:
+        return SnmpInfo(
+            enabled=_boolean(data, "en"),
+            community=_hex_text(data, "com"),
+            contact=_hex_text(data, "ci"),
+            location=_hex_text(data, "loc"),
+        )
+    except ValidationError as exc:
+        raise ProtocolError("CSS106 SNMP response contains invalid values") from exc
 
 
 def port_vlans_from_forwarding_payload(

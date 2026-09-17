@@ -40,8 +40,8 @@ must be tested independently even when multiple products share a firmware
 image.
 
 The current `swos-device-css106` package supports read-only system information,
-port state, cumulative counters, per-port VLAN policy, and configured VLAN
-table entries, plus static and dynamically learned hosts for RB260GS
-and RSTP bridge/port state for RB260GS (`CSS106-5G-1S`) running SwOS `2.19`,
-build `0x6a181cd5`. RB260GSP is recognized as a separate product but remains
+port state, cumulative counters, per-port VLAN policy, configured VLAN table
+entries, static and dynamically learned hosts, RSTP bridge/port state, and SNMP
+configuration for RB260GS (`CSS106-5G-1S`) running SwOS `2.19`, build
+`0x6a181cd5`. RB260GSP is recognized as a separate product but remains
 unsupported.
