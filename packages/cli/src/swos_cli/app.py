@@ -31,12 +31,19 @@ from swos_core import (
     PortErrorStatistics,
     PortInfo,
     PortNameUpdate,
+    PortVlanPolicyUpdate,
     RstpInfo,
     RstpPortEnableUpdate,
     SnmpInfo,
     SnmpMetadataUpdate,
     SwOSDevice,
     SystemInfo,
+    VlanEgressMode,
+    VlanInfo,
+    VlanMembershipMode,
+    VlanMode,
+    VlanPortMembership,
+    VlanReceiveMode,
 )
 from swos_core.errors import SwOSError
 from swos_core.safety import FirmwareSafetyPolicy
@@ -1386,6 +1393,70 @@ def vlan_ports(ctx: typer.Context) -> None:
     renderer.success(data, human="\n".join(lines))
 
 
+@vlan_app.command("configure-port")
+def vlan_configure_port(
+    ctx: typer.Context,
+    number: Annotated[
+        int, typer.Argument(min=1, max=5, help="Ethernet port number to configure (1-5).")
+    ],
+    mode: Annotated[VlanMode | None, typer.Option("--mode")] = None,
+    receive: Annotated[VlanReceiveMode | None, typer.Option("--receive")] = None,
+    default_vlan_id: Annotated[
+        int | None, typer.Option("--default-vlan-id", min=1, max=4095)
+    ] = None,
+    force_vlan_id: Annotated[
+        ToggleOption | None, typer.Option("--force-vlan-id", help="Set forced VLAN ID on or off.")
+    ] = None,
+    egress: Annotated[VlanEgressMode | None, typer.Option("--egress")] = None,
+) -> None:
+    """Set and verify one Ethernet port's VLAN policy without prompting."""
+
+    if all(value is None for value in (mode, receive, default_vlan_id, force_vlan_id, egress)):
+        raise typer.BadParameter("At least one VLAN policy option is required")
+    update = PortVlanPolicyUpdate(
+        number=number,
+        mode=mode,
+        receive=receive,
+        default_vlan_id=default_vlan_id,
+        force_vlan_id=(None if force_vlan_id is None else force_vlan_id is ToggleOption.ON),
+        egress=egress,
+    )
+    cli_context: CliContext = ctx.ensure_object(CliContext)
+    renderer = OutputRenderer(cli_context.configuration.settings.output)
+    try:
+        connected_device = _connect_device(cli_context)
+        current = connected_device.get_port_vlans()
+        result = connected_device.set_port_vlan_policy(update, expected_current=current)
+    except ConfigurationError as exc:
+        renderer.error("configuration_error", str(exc))
+        raise typer.Exit(code=2) from exc
+    except SwOSError as exc:
+        renderer.error(_error_code(exc), str(exc))
+        raise typer.Exit(code=1) from exc
+
+    port = next(port for port in result.value if port.number == number)
+    data: dict[str, Any] = {
+        "changed": result.changed,
+        "ports": [item.model_dump(mode="json") for item in result.value],
+    }
+    if result.warnings:
+        data["warnings"] = [warning.model_dump(mode="json") for warning in result.warnings]
+    action = "changed" if result.changed else "already configured; no change required"
+    human = "\n".join(
+        [
+            f"Port {number} VLAN policy {action}.",
+            f"Mode: {port.mode.value}",
+            f"Receive: {port.receive.value.replace('_', ' ')}",
+            f"Default VLAN: {port.default_vlan_id}",
+            f"Force VLAN ID: {_yes_no(port.force_vlan_id)}",
+            f"Egress: {port.egress.value.replace('_', ' ')}",
+        ]
+    )
+    if result.warnings:
+        human += "\n" + "\n".join(f"Warning: {warning.message}" for warning in result.warnings)
+    renderer.success(data, human=human)
+
+
 @vlan_app.command("list")
 def vlan_list(ctx: typer.Context) -> None:
     """List normalized configured VLAN table entries."""
@@ -1420,6 +1491,100 @@ def vlan_list(ctx: typer.Context) -> None:
         )
     lines.extend(f"Warning: {warning.message}" for warning in connected_device.warnings)
     renderer.success(data, human="\n".join(lines))
+
+
+@vlan_app.command("set")
+def vlan_set(
+    ctx: typer.Context,
+    vlan_id: Annotated[int, typer.Argument(min=1, max=4095)],
+    independent_learning: Annotated[
+        ToggleOption | None, typer.Option("--independent-learning")
+    ] = None,
+    igmp_snooping: Annotated[ToggleOption | None, typer.Option("--igmp-snooping")] = None,
+    port_mode: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--port-mode",
+            help="Ethernet membership as PORT=MODE; repeat for ports 1-5.",
+        ),
+    ] = None,
+) -> None:
+    """Add or replace one VLAN row through a guarded full-table write."""
+
+    parsed_port_modes = _parse_vlan_port_modes(port_mode or [])
+    if independent_learning is None and igmp_snooping is None and not parsed_port_modes:
+        raise typer.BadParameter("At least one VLAN table option is required")
+    cli_context: CliContext = ctx.ensure_object(CliContext)
+    renderer = OutputRenderer(cli_context.configuration.settings.output)
+    try:
+        connected_device = _connect_device(cli_context)
+        current = connected_device.get_vlans()
+        existing = next((vlan for vlan in current if vlan.vlan_id == vlan_id), None)
+        memberships = (
+            {port.port_number: port.mode for port in existing.ports}
+            if existing is not None
+            else {number: VlanMembershipMode.NOT_MEMBER for number in range(1, 7)}
+        )
+        memberships.update(parsed_port_modes)
+        desired_vlan = VlanInfo(
+            vlan_id=vlan_id,
+            independent_learning=(
+                existing.independent_learning
+                if independent_learning is None and existing is not None
+                else independent_learning is ToggleOption.ON
+            ),
+            igmp_snooping=(
+                existing.igmp_snooping
+                if igmp_snooping is None and existing is not None
+                else igmp_snooping is ToggleOption.ON
+            ),
+            ports=tuple(
+                VlanPortMembership(port_number=number, mode=memberships[number])
+                for number in range(1, 7)
+            ),
+        )
+        desired = tuple(
+            sorted(
+                (*tuple(vlan for vlan in current if vlan.vlan_id != vlan_id), desired_vlan),
+                key=lambda vlan: vlan.vlan_id,
+            )
+        )
+        result = connected_device.replace_vlans(desired, expected_current=current)
+    except ValidationError as exc:
+        renderer.error("invalid_vlan", str(exc))
+        raise typer.Exit(code=2) from exc
+    except ConfigurationError as exc:
+        renderer.error("configuration_error", str(exc))
+        raise typer.Exit(code=2) from exc
+    except SwOSError as exc:
+        renderer.error(_error_code(exc), str(exc))
+        raise typer.Exit(code=1) from exc
+
+    _render_vlan_write(renderer, result, f"VLAN {vlan_id} added or updated")
+
+
+@vlan_app.command("remove")
+def vlan_remove(
+    ctx: typer.Context,
+    vlan_id: Annotated[int, typer.Argument(min=1, max=4095)],
+) -> None:
+    """Remove one VLAN row through a guarded full-table write."""
+
+    cli_context: CliContext = ctx.ensure_object(CliContext)
+    renderer = OutputRenderer(cli_context.configuration.settings.output)
+    try:
+        connected_device = _connect_device(cli_context)
+        current = connected_device.get_vlans()
+        desired = tuple(vlan for vlan in current if vlan.vlan_id != vlan_id)
+        result = connected_device.replace_vlans(desired, expected_current=current)
+    except ConfigurationError as exc:
+        renderer.error("configuration_error", str(exc))
+        raise typer.Exit(code=2) from exc
+    except SwOSError as exc:
+        renderer.error(_error_code(exc), str(exc))
+        raise typer.Exit(code=1) from exc
+
+    _render_vlan_write(renderer, result, f"VLAN {vlan_id} removed")
 
 
 def _connect_device(cli_context: CliContext) -> SwOSDevice:
@@ -1491,6 +1656,43 @@ def _render_acl_write(
     if result.warnings:
         message += "\n" + "\n".join(f"Warning: {warning.message}" for warning in result.warnings)
     renderer.success(data, human=message)
+
+
+def _render_vlan_write(
+    renderer: OutputRenderer,
+    result: OperationResult[tuple[VlanInfo, ...]],
+    action: str,
+) -> None:
+    data: dict[str, Any] = {
+        "changed": result.changed,
+        "vlans": [vlan.model_dump(mode="json") for vlan in result.value],
+    }
+    if result.warnings:
+        data["warnings"] = [warning.model_dump(mode="json") for warning in result.warnings]
+    message = f"{action}." if result.changed else "VLAN table unchanged; no change required."
+    if result.warnings:
+        message += "\n" + "\n".join(f"Warning: {warning.message}" for warning in result.warnings)
+    renderer.success(data, human=message)
+
+
+def _parse_vlan_port_modes(values: list[str]) -> dict[int, VlanMembershipMode]:
+    parsed: dict[int, VlanMembershipMode] = {}
+    choices = ", ".join(mode.value for mode in VlanMembershipMode)
+    for value in values:
+        number_text, separator, mode_text = value.partition("=")
+        try:
+            number = int(number_text)
+            mode = VlanMembershipMode(mode_text)
+        except ValueError as exc:
+            raise typer.BadParameter(
+                f"--port-mode must be PORT=MODE with MODE one of: {choices}"
+            ) from exc
+        if not separator or number not in range(1, 6):
+            raise typer.BadParameter("--port-mode port must be between 1 and 5")
+        if number in parsed:
+            raise typer.BadParameter(f"--port-mode repeats port {number}")
+        parsed[number] = mode
+    return parsed
 
 
 def _network(address: str | None, prefix_length: int) -> str:

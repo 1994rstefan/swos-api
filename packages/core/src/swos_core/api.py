@@ -22,6 +22,7 @@ from swos_core.models import (
     PortNameUpdate,
     PortStatistics,
     PortVlanInfo,
+    PortVlanPolicyUpdate,
     RstpBridgeUpdate,
     RstpInfo,
     RstpPortEnableUpdate,
@@ -197,6 +198,26 @@ class DeviceAdapter(Protocol):
         expected_current: tuple[AclRule, ...],
     ) -> OperationResult[tuple[AclRule, ...]]:
         """Replace the ACL table if its fresh state matches the expected baseline."""
+
+        ...
+
+    def set_port_vlan_policy(
+        self,
+        update: PortVlanPolicyUpdate,
+        *,
+        expected_current: tuple[PortVlanInfo, ...],
+    ) -> OperationResult[tuple[PortVlanInfo, ...]]:
+        """Set one port's VLAN policy if fresh state matches the baseline."""
+
+        ...
+
+    def replace_vlans(
+        self,
+        vlans: tuple[VlanInfo, ...],
+        *,
+        expected_current: tuple[VlanInfo, ...],
+    ) -> OperationResult[tuple[VlanInfo, ...]]:
+        """Replace the VLAN table while preserving management-port membership."""
 
         ...
 
@@ -504,6 +525,42 @@ class SwOSDevice:
             raise UnsupportedFeatureError("acl_write")
         result = self._adapter.replace_acl_rules(rules, expected_current=expected_current)
         return OperationResult[tuple[AclRule, ...]](
+            changed=result.changed,
+            value=result.value,
+            warnings=warnings,
+        )
+
+    def set_port_vlan_policy(
+        self,
+        update: PortVlanPolicyUpdate,
+        *,
+        expected_current: tuple[PortVlanInfo, ...],
+    ) -> OperationResult[tuple[PortVlanInfo, ...]]:
+        """Set per-port VLAN policy after write safety and capability checks."""
+
+        warnings = self._authorize(write=True)
+        if not self.capabilities.supports("vlan_port_policy_write"):
+            raise UnsupportedFeatureError("vlan_port_policy_write")
+        result = self._adapter.set_port_vlan_policy(update, expected_current=expected_current)
+        return OperationResult[tuple[PortVlanInfo, ...]](
+            changed=result.changed,
+            value=result.value,
+            warnings=warnings,
+        )
+
+    def replace_vlans(
+        self,
+        vlans: tuple[VlanInfo, ...],
+        *,
+        expected_current: tuple[VlanInfo, ...],
+    ) -> OperationResult[tuple[VlanInfo, ...]]:
+        """Replace VLANs after write safety and capability checks."""
+
+        warnings = self._authorize(write=True)
+        if not self.capabilities.supports("vlan_table_write"):
+            raise UnsupportedFeatureError("vlan_table_write")
+        result = self._adapter.replace_vlans(vlans, expected_current=expected_current)
+        return OperationResult[tuple[VlanInfo, ...]](
             changed=result.changed,
             value=result.value,
             warnings=warnings,

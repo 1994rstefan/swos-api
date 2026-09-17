@@ -45,11 +45,11 @@ read-only web-UI surface for RB260GS (`CSS106-5G-1S`) running SwOS `2.19`, build
 statistics, SFP diagnostics, forwarding, port lock, mirroring, bandwidth
 limits, VLANs, hosts, RSTP, SNMP, learned IGMP groups, and ACL rules.
 Guarded, idempotent device-name, port-name, SNMP contact/location, per-port RSTP
-enable, and per-port forwarding lock/lock-on-first/egress-rate writes are also
-supported for this exact hardware, firmware, and build combination. Distinct
-capabilities are independently advertised only for RB260GS. Bridge-global,
-forwarding-matrix, mirroring, and ACL write capabilities remain disabled pending
-their own hardware validation.
+enable, per-port forwarding lock/lock-on-first/egress-rate, and per-port VLAN
+policy writes are also supported for this exact hardware, firmware, and build
+combination. Distinct capabilities are independently advertised only for
+RB260GS. Bridge-global, forwarding-matrix, mirroring, whole VLAN table, and ACL
+write capabilities remain disabled pending their own hardware validation.
 
 The exact field-level matrix, endpoint inventory, scaling rules, fixture status,
 and hardware-validation limits are documented in

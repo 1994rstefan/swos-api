@@ -23,6 +23,7 @@ from swos_core.models import (
     PortNameUpdate,
     PortStatistics,
     PortVlanInfo,
+    PortVlanPolicyUpdate,
     RstpBridgeUpdate,
     RstpInfo,
     RstpPortEnableUpdate,
@@ -47,10 +48,12 @@ from swos_device_css106.protocol import (
     encode_forwarding_port_policy_update,
     encode_port_configuration_update,
     encode_port_name_update,
+    encode_port_vlan_policy_update,
     encode_rstp_bridge_update,
     encode_rstp_port_enable_update,
     encode_snmp_metadata_update,
     encode_static_hosts,
+    encode_vlans,
     forwarding_from_payload,
     forwarding_write_state_from_payload,
     identity_from_system,
@@ -59,6 +62,7 @@ from swos_device_css106.protocol import (
     parse_payload,
     parse_table_payload,
     port_statistics_from_payload,
+    port_vlan_write_state_from_payload,
     port_vlans_from_forwarding_payload,
     ports_from_link_payload,
     rstp_bridge_write_state_from_payload,
@@ -73,6 +77,7 @@ from swos_device_css106.protocol import (
     validate_device_name,
     validate_port_name,
     validate_snmp_metadata,
+    vlan_table_write_state_from_payload,
     vlans_from_payload,
 )
 
@@ -115,6 +120,7 @@ class CSS106Adapter:
                     "device_name_write",
                     "port_configuration_write",
                     "port_name_write",
+                    "vlan_port_policy_write",
                     "forwarding_port_policy_write",
                     "rstp_port_enable_write",
                     "snmp_metadata_write",
@@ -593,6 +599,89 @@ class CSS106Adapter:
         if after != rules:
             raise ProtocolError("CSS106 ACL write failed full-table read-back verification")
         return OperationResult[tuple[AclRule, ...]](changed=True, value=after)
+
+    def set_port_vlan_policy(
+        self,
+        update: PortVlanPolicyUpdate,
+        *,
+        expected_current: tuple[PortVlanInfo, ...],
+    ) -> OperationResult[tuple[PortVlanInfo, ...]]:
+        """Set one Ethernet port's complete VLAN policy with baseline guards."""
+
+        with self._transport_factory(self._connection) as transport:
+            self._verify_identity(transport)
+            before_data = parse_payload(
+                transport.request("GET", "/fwd.b", max_response_bytes=MAX_PAYLOAD_BYTES)
+            )
+            before = port_vlans_from_forwarding_payload(before_data, self._identity)
+            if before != expected_current:
+                raise InvalidOperationError(
+                    "CSS106 port VLAN policy changed since the expected baseline"
+                )
+            before_state = port_vlan_write_state_from_payload(before_data, self._identity)
+            content, desired = encode_port_vlan_policy_update(before_data, self._identity, update)
+            if desired == before_state:
+                return OperationResult[tuple[PortVlanInfo, ...]](changed=False, value=before)
+
+            transport.request(
+                "POST",
+                "/fwd.b",
+                content=content,
+                headers={"Content-Type": "text/plain"},
+                max_response_bytes=MAX_PAYLOAD_BYTES,
+            )
+            after_data = parse_payload(
+                transport.request("GET", "/fwd.b", max_response_bytes=MAX_PAYLOAD_BYTES)
+            )
+
+        if port_vlan_write_state_from_payload(after_data, self._identity) != desired:
+            raise ProtocolError(
+                "CSS106 port VLAN write failed complete-group read-back verification"
+            )
+        return OperationResult[tuple[PortVlanInfo, ...]](
+            changed=True,
+            value=port_vlans_from_forwarding_payload(after_data, self._identity),
+        )
+
+    def replace_vlans(
+        self,
+        vlans: tuple[VlanInfo, ...],
+        *,
+        expected_current: tuple[VlanInfo, ...],
+    ) -> OperationResult[tuple[VlanInfo, ...]]:
+        """Replace the full VLAN table with baseline and port-6 membership guards."""
+
+        content = encode_vlans(vlans, expected_current, self._identity)
+        desired_state = vlan_table_write_state_from_payload(
+            parse_table_payload(content), self._identity
+        )
+        with self._transport_factory(self._connection) as transport:
+            self._verify_identity(transport)
+            before_payload = transport.request(
+                "GET", "/vlan.b", max_response_bytes=MAX_PAYLOAD_BYTES
+            )
+            before = vlans_from_payload(parse_table_payload(before_payload), self._identity)
+            if before != expected_current:
+                raise InvalidOperationError("CSS106 VLAN table changed since the expected baseline")
+            if before == vlans:
+                return OperationResult[tuple[VlanInfo, ...]](changed=False, value=before)
+
+            transport.request(
+                "POST",
+                "/vlan.b",
+                content=content,
+                headers={"Content-Type": "text/plain"},
+                max_response_bytes=MAX_PAYLOAD_BYTES,
+            )
+            after_payload = transport.request(
+                "GET", "/vlan.b", max_response_bytes=MAX_PAYLOAD_BYTES
+            )
+
+        after_rows = parse_table_payload(after_payload)
+        after = vlans_from_payload(after_rows, self._identity)
+        if vlan_table_write_state_from_payload(after_rows, self._identity) != desired_state:
+            raise ProtocolError("CSS106 VLAN write failed full-table read-back verification")
+        return OperationResult[tuple[VlanInfo, ...]](changed=True, value=after)
 
     def _verify_identity(self, transport: HttpTransport) -> None:
         system_payload = transport.request("GET", "/sys.b", max_response_bytes=MAX_PAYLOAD_BYTES)

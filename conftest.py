@@ -29,7 +29,9 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     )
 
     for item in items:
-        if "destructive" in item.keywords and not (run_integration and run_destructive):
+        destructive = item.get_closest_marker("destructive") is not None
+        integration = item.get_closest_marker("integration") is not None
+        if destructive and not (run_integration and run_destructive):
             item.add_marker(skip_destructive)
-        elif "integration" in item.keywords and not run_integration:
+        elif integration and not run_integration:
             item.add_marker(skip_integration)

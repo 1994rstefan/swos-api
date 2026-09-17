@@ -727,6 +727,31 @@ class PortVlanInfo(BaseModel):
     egress: VlanEgressMode
 
 
+class PortVlanPolicyUpdate(BaseModel):
+    """Desired VLAN policy changes for one non-management Ethernet port."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    number: int = Field(ge=1)
+    mode: VlanMode | None = None
+    receive: VlanReceiveMode | None = None
+    default_vlan_id: int | None = Field(default=None, ge=1, le=4095)
+    force_vlan_id: bool | None = None
+    egress: VlanEgressMode | None = None
+
+    @model_validator(mode="after")
+    def validate_non_empty_update(self) -> Self:
+        if (
+            self.mode is None
+            and self.receive is None
+            and self.default_vlan_id is None
+            and self.force_vlan_id is None
+            and self.egress is None
+        ):
+            raise ValueError("at least one port VLAN policy change is required")
+        return self
+
+
 class VlanPortMembership(BaseModel):
     """Port membership and egress behavior in one VLAN table entry."""
 

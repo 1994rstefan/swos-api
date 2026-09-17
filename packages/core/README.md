@@ -15,8 +15,9 @@ operation-specific firmware warning. `SwOSDevice` enforces write authorization
 and a distinct write capability before dispatching to a plugin.
 
 Desired state covers device names, port names, per-port RSTP enable, bridge
-settings, forwarding matrix/mirroring/port policy, SNMP contact/location
-metadata, complete static-host tables, and complete ordered ACL tables.
+settings, forwarding matrix/mirroring/port policy, per-port VLAN policy, SNMP
+contact/location metadata, complete VLAN/static-host tables, and complete
+ordered ACL tables.
 Static-host writes reuse `HostEntry` but reject dynamic entries. `None` preserves
 an omitted field where supported; explicit `"unlimited"` clears an egress rate.
 

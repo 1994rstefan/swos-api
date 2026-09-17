@@ -24,6 +24,7 @@ from swos_core.models import (
     PortStatistics,
     PortTrafficStatistics,
     PortVlanInfo,
+    PortVlanPolicyUpdate,
     RstpInfo,
     RstpPortEnableUpdate,
     RstpPortInfo,
@@ -317,6 +318,10 @@ class FakeDevice:
                 ports=(
                     VlanPortMembership(port_number=1, mode="strip"),
                     VlanPortMembership(port_number=2, mode="not_member"),
+                    VlanPortMembership(port_number=3, mode="not_member"),
+                    VlanPortMembership(port_number=4, mode="not_member"),
+                    VlanPortMembership(port_number=5, mode="not_member"),
+                    VlanPortMembership(port_number=6, mode="not_member"),
                 ),
             ),
         )
@@ -412,6 +417,31 @@ class FakeDevice:
         return OperationResult[tuple[AclRule, ...]](
             changed=rules != self.get_acl_rules(), value=rules
         )
+
+    def set_port_vlan_policy(
+        self,
+        update: PortVlanPolicyUpdate,
+        *,
+        expected_current: tuple[PortVlanInfo, ...],
+    ) -> OperationResult[tuple[PortVlanInfo, ...]]:
+        assert expected_current == self.get_port_vlans()
+        changes = update.model_dump(exclude={"number"}, exclude_none=True)
+        value = tuple(
+            port.model_copy(update=changes) if port.number == update.number else port
+            for port in expected_current
+        )
+        return OperationResult[tuple[PortVlanInfo, ...]](
+            changed=value != expected_current, value=value
+        )
+
+    def replace_vlans(
+        self,
+        vlans: tuple[VlanInfo, ...],
+        *,
+        expected_current: tuple[VlanInfo, ...],
+    ) -> OperationResult[tuple[VlanInfo, ...]]:
+        assert expected_current == self.get_vlans()
+        return OperationResult[tuple[VlanInfo, ...]](changed=vlans != expected_current, value=vlans)
 
 
 class FakeRegistry:
@@ -1361,3 +1391,91 @@ def test_vlan_list_human_and_json_output(monkeypatch) -> None:  # type: ignore[n
     vlan = json.loads(machine.stdout)["data"]["vlans"][0]
     assert vlan["vlan_id"] == 10
     assert vlan["ports"][1]["mode"] == "not_member"
+
+
+def test_vlan_port_configure_is_direct_and_returns_verified_state(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    mock_registry(monkeypatch)
+
+    result = runner.invoke(
+        app,
+        [
+            "vlan",
+            "configure-port",
+            "1",
+            "--receive",
+            "untagged_only",
+            "--force-vlan-id",
+            "off",
+            "--egress",
+            "strip",
+            "--url",
+            "http://192.0.2.1",
+            "-ojson",
+        ],
+    )
+
+    assert result.exit_code == 0
+    data = json.loads(result.stdout)["data"]
+    assert data["changed"] is True
+    assert data["ports"][0]["receive"] == "untagged_only"
+    assert data["ports"][0]["force_vlan_id"] is False
+    assert data["ports"][0]["egress"] == "strip"
+
+
+def test_vlan_table_set_and_remove_are_direct_full_table_plans(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    mock_registry(monkeypatch)
+
+    changed = runner.invoke(
+        app,
+        [
+            "vlan",
+            "set",
+            "10",
+            "--igmp-snooping",
+            "on",
+            "--port-mode",
+            "5=strip",
+            "--url",
+            "http://192.0.2.1",
+            "-ojson",
+        ],
+    )
+    removed = runner.invoke(
+        app,
+        [
+            "vlan",
+            "remove",
+            "10",
+            "--url",
+            "http://192.0.2.1",
+            "-ojson",
+        ],
+    )
+
+    assert changed.exit_code == 0
+    changed_vlan = json.loads(changed.stdout)["data"]["vlans"][0]
+    assert changed_vlan["igmp_snooping"] is True
+    assert changed_vlan["ports"][4]["mode"] == "strip"
+    assert changed_vlan["ports"][5]["mode"] == "not_member"
+    assert removed.exit_code == 0
+    assert json.loads(removed.stdout)["data"]["vlans"] == []
+
+
+def test_vlan_table_cli_rejects_port_6_without_prompting(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    mock_registry(monkeypatch)
+
+    result = runner.invoke(
+        app,
+        [
+            "vlan",
+            "set",
+            "10",
+            "--port-mode",
+            "6=strip",
+            "--url",
+            "http://192.0.2.1",
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "between 1 and 5" in result.output

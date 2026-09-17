@@ -34,6 +34,7 @@ from swos_core.models import (
     PortStatistics,
     PortTrafficStatistics,
     PortVlanInfo,
+    PortVlanPolicyUpdate,
     RstpBridgeUpdate,
     RstpInfo,
     RstpPortEnableUpdate,
@@ -114,6 +115,8 @@ class FakeAdapter:
                     "static_hosts_write",
                     "system",
                     "vlan",
+                    "vlan_port_policy_write",
+                    "vlan_table_write",
                 }
             )
         )
@@ -380,6 +383,30 @@ class FakeAdapter:
         del expected_current
         return OperationResult[tuple[AclRule, ...]](changed=True, value=rules)
 
+    def set_port_vlan_policy(
+        self,
+        update: PortVlanPolicyUpdate,
+        *,
+        expected_current: tuple[PortVlanInfo, ...],
+    ) -> OperationResult[tuple[PortVlanInfo, ...]]:
+        before = self.get_port_vlans()
+        assert expected_current == before
+        changes = update.model_dump(exclude={"number"}, exclude_none=True)
+        value = tuple(
+            port.model_copy(update=changes) if port.number == update.number else port
+            for port in before
+        )
+        return OperationResult[tuple[PortVlanInfo, ...]](changed=value != before, value=value)
+
+    def replace_vlans(
+        self,
+        vlans: tuple[VlanInfo, ...],
+        *,
+        expected_current: tuple[VlanInfo, ...],
+    ) -> OperationResult[tuple[VlanInfo, ...]]:
+        assert expected_current == self.get_vlans()
+        return OperationResult[tuple[VlanInfo, ...]](changed=vlans != expected_current, value=vlans)
+
 
 def identity(version: str = "2.19") -> DeviceIdentity:
     return DeviceIdentity(
@@ -548,6 +575,15 @@ def test_policy_bound_device_rejects_unsupported_feature() -> None:
         device.replace_static_hosts((), expected_current=())
     with pytest.raises(UnsupportedFeatureError, match="acl write"):
         device.replace_acl_rules((), expected_current=())
+    port_vlans = FakeAdapter(identity()).get_port_vlans()
+    with pytest.raises(UnsupportedFeatureError, match="vlan port policy write"):
+        device.set_port_vlan_policy(
+            PortVlanPolicyUpdate(number=1, force_vlan_id=False),
+            expected_current=port_vlans,
+        )
+    vlans = FakeAdapter(identity()).get_vlans()
+    with pytest.raises(UnsupportedFeatureError, match="vlan table write"):
+        device.replace_vlans(vlans, expected_current=vlans)
     rstp = FakeAdapter(identity()).get_rstp()
     with pytest.raises(UnsupportedFeatureError, match="rstp port enable write"):
         device.set_rstp_port_enabled(
@@ -585,6 +621,13 @@ def test_policy_bound_device_authorizes_and_returns_write_result() -> None:
         ForwardingPortPolicyUpdate(number=1, lock=True),
         expected_current=forwarding_before,
     )
+    port_vlans_before = device.get_port_vlans()
+    port_vlans = device.set_port_vlan_policy(
+        PortVlanPolicyUpdate(number=1, force_vlan_id=False),
+        expected_current=port_vlans_before,
+    )
+    vlans_before = device.get_vlans()
+    vlans = device.replace_vlans((), expected_current=vlans_before)
 
     assert result.changed
     assert result.value.name == "Uplink"
@@ -597,6 +640,8 @@ def test_policy_bound_device_authorizes_and_returns_write_result() -> None:
     assert rules.value == ()
     assert not rstp.value.ports[0].enabled
     assert forwarding.value.ports[0].lock
+    assert not port_vlans.value[0].force_vlan_id
+    assert vlans.value == ()
     assert configured.warnings == ()
 
     device_name = device.set_device_name(DeviceNameUpdate(name="Core Switch"))

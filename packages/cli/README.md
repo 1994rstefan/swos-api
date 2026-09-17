@@ -29,6 +29,9 @@ swosctl rstp configure 5 --state disabled --device office
 swosctl forwarding configure 5 --lock on --device office
 swosctl forwarding configure 5 --lock-on-first off --egress-rate-bps 1000000 --device office
 swosctl forwarding configure 5 --egress-unlimited --device office
+swosctl vlan configure-port 5 --egress strip --device office
+swosctl vlan set 10 --igmp-snooping on --port-mode 5=strip --device office
+swosctl vlan remove 10 --device office
 swosctl -o json port rename 1 Uplink --device office
 ```
 
@@ -41,6 +44,12 @@ read/plan/write operations. They pass the initial read as a precondition, so an
 intervening configuration change aborts before POST. Only ports 1-5 are accepted.
 The CSS106 profile advertises RSTP enable plus lock, lock-on-first, and egress
 rate; bridge-global, matrix, and mirroring mutation remains unavailable.
+
+`vlan configure-port` accepts only ports 1-5 and passes the complete initial
+per-port policy as its write precondition. `vlan set` and `vlan remove` plan a
+full-table replacement without exposing port 6 as an option. CSS106 keeps the
+`vlan_table_write` capability disabled pending hardware validation, so those
+table commands currently fail closed before adapter dispatch on that profile.
 
 Static-host add updates the exact MAC/VLAN key in place and accepts repeatable
 `--port` options restricted to ports 1-5. CLI table mutations pass their read

@@ -8,11 +8,16 @@ from swos_core import (
     ForwardingPortPolicyUpdate,
     HostEntry,
     HostEntryType,
+    OperationResult,
     PluginRegistry,
     PortConfigurationUpdate,
     PortNameUpdate,
+    PortVlanInfo,
+    PortVlanPolicyUpdate,
     RstpPortEnableUpdate,
     SnmpMetadataUpdate,
+    SwOSDevice,
+    VlanEgressMode,
 )
 from swos_core.safety import FirmwareSafetyPolicy
 
@@ -332,3 +337,167 @@ def test_rb260gs_219_port_5_egress_rate_write_and_restore() -> None:
                 expected_current=changed.value,
             )
             assert restored.value.ports[port_number - 1].egress_rate_limit_bps == original_rate
+
+
+@pytest.mark.integration
+@pytest.mark.destructive
+def test_rb260gs_219_port_5_vlan_egress_write_and_restore() -> None:
+    connection = DeviceConnection(
+        url=os.environ.get("SWOS_INTEGRATION_URL", "http://192.168.88.1"),
+        username=os.environ.get("SWOS_INTEGRATION_USERNAME", "admin"),
+        password=os.environ.get("SWOS_INTEGRATION_PASSWORD", ""),
+    )
+    registry = PluginRegistry.discover()
+    identity = registry.probe(connection)
+    device = registry.connect(identity, connection, FirmwareSafetyPolicy())
+    port_number = 5
+    if device.get_ports()[port_number - 1].link_up:
+        pytest.skip("port 5 is link-up; refusing destructive VLAN policy test")
+    original = device.get_port_vlans()
+    original_egress = original[port_number - 1].egress
+    temporary_egress = (
+        VlanEgressMode.STRIP
+        if original_egress is not VlanEgressMode.STRIP
+        else VlanEgressMode.PRESERVE
+    )
+    expected_temporary = tuple(
+        port.model_copy(update={"egress": temporary_egress}) if port.number == port_number else port
+        for port in original
+    )
+
+    try:
+        changed = device.set_port_vlan_policy(
+            PortVlanPolicyUpdate(number=port_number, egress=temporary_egress),
+            expected_current=original,
+        )
+        assert changed.changed
+        assert changed.value == expected_temporary
+    finally:
+        _restore_port_vlan_policy(
+            device,
+            original=original,
+            expected_temporary=expected_temporary,
+            port_number=port_number,
+        )
+
+
+def _restore_port_vlan_policy(
+    device: SwOSDevice,
+    *,
+    original: tuple[PortVlanInfo, ...],
+    expected_temporary: tuple[PortVlanInfo, ...],
+    port_number: int,
+) -> None:
+    current = device.get_port_vlans()
+    if current == original:
+        return
+    if current != expected_temporary:
+        raise AssertionError(
+            "Port VLAN policy is neither the original nor expected temporary state; "
+            "refusing cleanup"
+        )
+
+    restored = device.set_port_vlan_policy(
+        PortVlanPolicyUpdate(
+            number=port_number,
+            egress=original[port_number - 1].egress,
+        ),
+        expected_current=expected_temporary,
+    )
+    assert restored.value == original
+    assert device.get_port_vlans() == original
+
+
+class _CleanupDevice:
+    def __init__(
+        self,
+        current: tuple[PortVlanInfo, ...],
+        original: tuple[PortVlanInfo, ...],
+    ) -> None:
+        self.current = current
+        self.original = original
+        self.writes: list[tuple[PortVlanPolicyUpdate, tuple[PortVlanInfo, ...]]] = []
+
+    def get_port_vlans(self) -> tuple[PortVlanInfo, ...]:
+        return self.current
+
+    def set_port_vlan_policy(
+        self,
+        update: PortVlanPolicyUpdate,
+        *,
+        expected_current: tuple[PortVlanInfo, ...],
+    ) -> OperationResult[tuple[PortVlanInfo, ...]]:
+        assert self.current == expected_current
+        self.writes.append((update, expected_current))
+        self.current = self.original
+        return OperationResult(changed=True, value=self.original)
+
+
+def _cleanup_states() -> tuple[tuple[PortVlanInfo, ...], tuple[PortVlanInfo, ...]]:
+    original = tuple(
+        PortVlanInfo(
+            number=number,
+            mode="optional",
+            receive="any",
+            default_vlan_id=1,
+            force_vlan_id=False,
+            egress="preserve",
+        )
+        for number in range(1, 7)
+    )
+    temporary = tuple(
+        port.model_copy(update={"egress": VlanEgressMode.STRIP}) if port.number == 5 else port
+        for port in original
+    )
+    return original, temporary
+
+
+def test_vlan_cleanup_restores_only_exact_temporary_state() -> None:
+    original, temporary = _cleanup_states()
+    device = _CleanupDevice(temporary, original)
+
+    _restore_port_vlan_policy(  # type: ignore[arg-type]
+        device,
+        original=original,
+        expected_temporary=temporary,
+        port_number=5,
+    )
+
+    assert device.current == original
+    assert device.writes == [
+        (
+            PortVlanPolicyUpdate(number=5, egress=VlanEgressMode.PRESERVE),
+            temporary,
+        )
+    ]
+
+
+def test_vlan_cleanup_accepts_already_restored_state_without_write() -> None:
+    original, temporary = _cleanup_states()
+    device = _CleanupDevice(original, original)
+
+    _restore_port_vlan_policy(  # type: ignore[arg-type]
+        device,
+        original=original,
+        expected_temporary=temporary,
+        port_number=5,
+    )
+
+    assert device.writes == []
+
+
+def test_vlan_cleanup_refuses_unknown_state_without_write() -> None:
+    original, temporary = _cleanup_states()
+    unknown = list(temporary)
+    unknown[0] = unknown[0].model_copy(update={"default_vlan_id": 2})
+    device = _CleanupDevice(tuple(unknown), original)
+
+    with pytest.raises(AssertionError, match="refusing cleanup"):
+        _restore_port_vlan_policy(  # type: ignore[arg-type]
+            device,
+            original=original,
+            expected_temporary=temporary,
+            port_number=5,
+        )
+
+    assert device.writes == []

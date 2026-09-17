@@ -19,6 +19,7 @@ from swos_core.models import (
     PortNameUpdate,
     PortStatistics,
     PortVlanInfo,
+    PortVlanPolicyUpdate,
     RstpBridgeUpdate,
     RstpPortEnableUpdate,
     SafetyWarning,
@@ -347,6 +348,11 @@ def test_vlan_models_validate_values_and_unique_ports() -> None:
     )
 
     assert port.mode.value == "strict"
+    update = PortVlanPolicyUpdate(number=5, receive="untagged_only", force_vlan_id=False)
+    assert update.receive.value == "untagged_only"
+    assert update.force_vlan_id is False
+    with pytest.raises(ValidationError, match="at least one"):
+        PortVlanPolicyUpdate(number=5)
     with pytest.raises(ValidationError):
         PortVlanInfo(
             number=1,

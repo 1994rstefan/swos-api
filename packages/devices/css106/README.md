@@ -50,6 +50,20 @@ group after the write. Port 6's RSTP bit, `fp6`, and every destination
 relationship involving port 6 cannot change. Port 6 is rejected as a mirror
 source or target.
 
+Guarded per-port VLAN policy writes are advertised for ports 1-5. They post the
+complete ordered `/fwd.b` VLAN group `vlan`, `vlni`, `dvid`, `fvid`, `vlnh`
+after exact identity and expected-baseline checks, preserve every port-6 value,
+skip no-ops, and verify the complete group through readback.
+
+Complete `/vlan.b` replacement validates and posts ordered `vid`, `ivl`, `igmp`,
+`prt` rows. Every desired table must preserve management port 6's effective
+membership for every VLAN ID versus the mandatory expected baseline. The
+adapter rejects stale plans and verifies the complete table after POST. The
+`vlan_table_write` capability is deliberately not advertised pending hardware
+validation. Internal write-state parsing preserves wire row order, so readback
+with reordered rows is rejected even though public `get_vlans()` output remains
+sorted by VLAN ID.
+
 Bridge-global (`prio`, `cost`, `frmc`), forwarding-matrix, and mirroring
 serialization use the same identity, baseline, no-op, complete-group, and
 readback guards, but their independent capabilities remain disabled pending

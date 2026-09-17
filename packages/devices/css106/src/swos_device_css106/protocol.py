@@ -39,6 +39,7 @@ from swos_core.models import (
     PortStatistics,
     PortTrafficStatistics,
     PortVlanInfo,
+    PortVlanPolicyUpdate,
     RstpBridgeUpdate,
     RstpCostMode,
     RstpInfo,
@@ -144,6 +145,34 @@ class ForwardingWriteState:
     mirror_egress_mask: int
     mirror_target_mask: int
     egress_rates: tuple[int, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class PortVlanWriteState:
+    """Validated complete writable CSS106 per-port VLAN group."""
+
+    modes: tuple[int, ...]
+    receive_modes: tuple[int, ...]
+    default_vlan_ids: tuple[int, ...]
+    force_vlan_id_mask: int
+    egress_modes: tuple[int, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class VlanTableRowWriteState:
+    """Validated writable values for one VLAN row in wire order."""
+
+    vlan_id: int
+    independent_learning: int
+    igmp_snooping: int
+    port_modes: tuple[int, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class VlanTableWriteState:
+    """Validated complete VLAN table preserving device row order."""
+
+    rows: tuple[VlanTableRowWriteState, ...]
 
 
 def parse_payload(payload: bytes) -> dict[str, SwOSValue]:
@@ -1191,17 +1220,104 @@ def port_vlans_from_forwarding_payload(
         raise ProtocolError("CSS106 port VLAN response contains invalid values") from exc
 
 
+def port_vlan_write_state_from_payload(
+    data: dict[str, SwOSValue], identity: DeviceIdentity
+) -> PortVlanWriteState:
+    """Extract and validate the complete writable per-port VLAN group."""
+
+    port_count = _port_count(identity)
+    _bit_values(data, "fvid", port_count)
+    return PortVlanWriteState(
+        modes=_bounded_integer_values(
+            data, "vlan", port_count, minimum=0, maximum=len(VlanMode) - 1
+        ),
+        receive_modes=_bounded_integer_values(
+            data, "vlni", port_count, minimum=0, maximum=len(VlanReceiveMode) - 1
+        ),
+        default_vlan_ids=_bounded_integer_values(data, "dvid", port_count, minimum=1, maximum=4095),
+        force_vlan_id_mask=_integer(data, "fvid"),
+        egress_modes=_bounded_integer_values(
+            data, "vlnh", port_count, minimum=0, maximum=len(VlanEgressMode) - 1
+        ),
+    )
+
+
+def encode_port_vlan_policy_update(
+    data: dict[str, SwOSValue],
+    identity: DeviceIdentity,
+    update: PortVlanPolicyUpdate,
+) -> tuple[bytes, PortVlanWriteState]:
+    """Encode a complete VLAN group while changing only one Ethernet port."""
+
+    state = port_vlan_write_state_from_payload(data, identity)
+    _validate_writable_port(update.number, identity)
+    index = update.number - 1
+    desired = state
+    if update.mode is not None:
+        values = list(state.modes)
+        values[index] = tuple(VlanMode).index(update.mode)
+        desired = replace(desired, modes=tuple(values))
+    if update.receive is not None:
+        values = list(state.receive_modes)
+        values[index] = tuple(VlanReceiveMode).index(update.receive)
+        desired = replace(desired, receive_modes=tuple(values))
+    if update.default_vlan_id is not None:
+        values = list(state.default_vlan_ids)
+        values[index] = update.default_vlan_id
+        desired = replace(desired, default_vlan_ids=tuple(values))
+    if update.force_vlan_id is not None:
+        bit = 1 << index
+        mask = (
+            state.force_vlan_id_mask | bit
+            if update.force_vlan_id
+            else state.force_vlan_id_mask & ~bit
+        )
+        desired = replace(desired, force_vlan_id_mask=mask)
+    if update.egress is not None:
+        values = list(state.egress_modes)
+        values[index] = tuple(VlanEgressMode).index(update.egress)
+        desired = replace(desired, egress_modes=tuple(values))
+    if _port_vlan_state_at(desired, 6) != _port_vlan_state_at(state, 6):
+        raise InvalidOperationError("CSS106 VLAN policy writes cannot change management port 6")
+    return _serialize_port_vlan_write_state(desired), desired
+
+
 def vlans_from_payload(rows: list[SwOSValue], identity: DeviceIdentity) -> tuple[VlanInfo, ...]:
     """Normalize the configured CSS106 VLAN table."""
 
+    state = vlan_table_write_state_from_payload(rows, identity)
+    membership_modes = tuple(VlanMembershipMode)
     try:
-        port_count = PORT_COUNTS[identity.product_code]
-    except KeyError as exc:
-        raise ProtocolError(f"Unknown CSS106 product {identity.product_code!r}") from exc
+        vlans = tuple(
+            VlanInfo(
+                vlan_id=row.vlan_id,
+                independent_learning=bool(row.independent_learning),
+                igmp_snooping=bool(row.igmp_snooping),
+                ports=tuple(
+                    VlanPortMembership(
+                        port_number=index + 1,
+                        mode=membership_modes[mode],
+                    )
+                    for index, mode in enumerate(row.port_modes)
+                ),
+            )
+            for row in state.rows
+        )
+    except ValidationError as exc:
+        raise ProtocolError("CSS106 VLAN table contains invalid values") from exc
+    return tuple(sorted(vlans, key=lambda vlan: vlan.vlan_id))
+
+
+def vlan_table_write_state_from_payload(
+    rows: list[SwOSValue], identity: DeviceIdentity
+) -> VlanTableWriteState:
+    """Parse complete VLAN writable state without normalizing row order."""
+
+    port_count = _port_count(identity)
     if len(rows) > MAX_VLAN_ENTRIES:
         raise ProtocolError(f"CSS106 VLAN table exceeds {MAX_VLAN_ENTRIES} entries")
 
-    vlans: list[VlanInfo] = []
+    state_rows: list[VlanTableRowWriteState] = []
     seen_vlan_ids: set[int] = set()
     for row_index, row in enumerate(rows):
         if not isinstance(row, dict):
@@ -1210,22 +1326,55 @@ def vlans_from_payload(rows: list[SwOSValue], identity: DeviceIdentity) -> tuple
         if vlan_id in seen_vlan_ids:
             raise ProtocolError(f"CSS106 VLAN table contains duplicate VLAN ID {vlan_id}")
         seen_vlan_ids.add(vlan_id)
-        port_modes = _enum_values(row, "prt", port_count, VlanMembershipMode)
-        try:
-            vlans.append(
-                VlanInfo(
-                    vlan_id=vlan_id,
-                    independent_learning=_boolean(row, "ivl"),
-                    igmp_snooping=_boolean(row, "igmp"),
-                    ports=tuple(
-                        VlanPortMembership(port_number=index + 1, mode=port_modes[index])
-                        for index in range(port_count)
-                    ),
-                )
+        state_rows.append(
+            VlanTableRowWriteState(
+                vlan_id=vlan_id,
+                independent_learning=int(_boolean(row, "ivl")),
+                igmp_snooping=int(_boolean(row, "igmp")),
+                port_modes=_bounded_integer_values(
+                    row,
+                    "prt",
+                    port_count,
+                    minimum=0,
+                    maximum=len(VlanMembershipMode) - 1,
+                ),
             )
-        except ValidationError as exc:
-            raise ProtocolError(f"CSS106 VLAN row {row_index} contains invalid values") from exc
-    return tuple(sorted(vlans, key=lambda vlan: vlan.vlan_id))
+        )
+    return VlanTableWriteState(rows=tuple(state_rows))
+
+
+def encode_vlans(
+    vlans: tuple[VlanInfo, ...],
+    expected_current: tuple[VlanInfo, ...],
+    identity: DeviceIdentity,
+) -> bytes:
+    """Validate and encode the complete VLAN table without changing port 6 membership."""
+
+    port_count = _port_count(identity)
+    if len(vlans) > MAX_VLAN_ENTRIES:
+        raise InvalidOperationError(f"CSS106 VLAN table cannot exceed {MAX_VLAN_ENTRIES} entries")
+    _validate_vlan_table(expected_current, port_count, "expected VLAN baseline")
+    _validate_vlan_table(vlans, port_count, "VLAN replacement")
+
+    not_member = VlanMembershipMode.NOT_MEMBER
+    expected_port_6 = {vlan.vlan_id: vlan.ports[5].mode for vlan in expected_current}
+    desired_port_6 = {vlan.vlan_id: vlan.ports[5].mode for vlan in vlans}
+    for vlan_id in expected_port_6.keys() | desired_port_6.keys():
+        if expected_port_6.get(vlan_id, not_member) != desired_port_6.get(vlan_id, not_member):
+            raise InvalidOperationError(
+                f"CSS106 VLAN replacement cannot change management port 6 membership "
+                f"for VLAN {vlan_id}"
+            )
+
+    membership_modes = tuple(VlanMembershipMode)
+    rows = []
+    for vlan in vlans:
+        port_modes = ",".join(f"0x{membership_modes.index(port.mode):02x}" for port in vlan.ports)
+        rows.append(
+            f"{{vid:0x{vlan.vlan_id:04x},ivl:0x{int(vlan.independent_learning):02x},"
+            f"igmp:0x{int(vlan.igmp_snooping):02x},prt:[{port_modes}]}}"
+        )
+    return f"[{','.join(rows)}]".encode("ascii")
 
 
 def _parse_value(payload: bytes) -> SwOSValue:
@@ -1316,6 +1465,46 @@ def _serialize_forwarding_write_state(state: ForwardingWriteState) -> bytes:
         f"omr:0x{state.mirror_egress_mask:02x},mrto:0x{state.mirror_target_mask:02x},"
         f"or:[{rates}]}}"
     ).encode("ascii")
+
+
+def _serialize_port_vlan_write_state(state: PortVlanWriteState) -> bytes:
+    modes = ",".join(f"0x{value:02x}" for value in state.modes)
+    receive = ",".join(f"0x{value:02x}" for value in state.receive_modes)
+    default_ids = ",".join(f"0x{value:04x}" for value in state.default_vlan_ids)
+    egress = ",".join(f"0x{value:02x}" for value in state.egress_modes)
+    return (
+        f"{{vlan:[{modes}],vlni:[{receive}],dvid:[{default_ids}],"
+        f"fvid:0x{state.force_vlan_id_mask:02x},vlnh:[{egress}]}}"
+    ).encode("ascii")
+
+
+def _port_vlan_state_at(state: PortVlanWriteState, number: int) -> tuple[int, ...]:
+    index = number - 1
+    return (
+        state.modes[index],
+        state.receive_modes[index],
+        state.default_vlan_ids[index],
+        int(bool(state.force_vlan_id_mask & (1 << index))),
+        state.egress_modes[index],
+    )
+
+
+def _validate_vlan_table(vlans: tuple[VlanInfo, ...], port_count: int, label: str) -> None:
+    vlan_ids = tuple(vlan.vlan_id for vlan in vlans)
+    if vlan_ids != tuple(sorted(set(vlan_ids))):
+        raise InvalidOperationError(f"{label} VLAN IDs must be unique and in ascending order")
+    expected_ports = tuple(range(1, port_count + 1))
+    for index, vlan in enumerate(vlans):
+        try:
+            validated = VlanInfo.model_validate(vlan.model_dump(mode="python"))
+        except ValidationError as exc:
+            raise InvalidOperationError(f"{label} row {index + 1} is invalid: {exc}") from exc
+        if validated != vlan:
+            raise InvalidOperationError(f"{label} row {index + 1} is not normalized")
+        if tuple(port.port_number for port in vlan.ports) != expected_ports:
+            raise InvalidOperationError(
+                f"{label} VLAN {vlan.vlan_id} must declare ports 1-{port_count} in order"
+            )
 
 
 def _validate_forwarding_write_safety(state: ForwardingWriteState) -> None:

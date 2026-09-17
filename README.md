@@ -112,7 +112,7 @@ Currently supported:
 
 | Device | Product code | Firmware | Build | Operations |
 | --- | --- | --- | --- | --- |
-| RB260GS | `CSS106-5G-1S` | `2.19` | `0x6a181cd5` | Complete local reads; guarded port, RSTP enable, forwarding policy, name, SNMP metadata, and static-host writes |
+| RB260GS | `CSS106-5G-1S` | `2.19` | `0x6a181cd5` | Complete local reads; guarded port, per-port VLAN, RSTP enable, forwarding policy, name, SNMP metadata, and static-host writes |
 
 The supported read surface includes system, management, health, port
 configuration/state, complete statistics, SFP diagnostics, forwarding, port
@@ -133,6 +133,14 @@ verify complete-group readback. Port 6's RSTP bit, forwarding row, and every
 destination relationship involving port 6 are immutable. Port 6 cannot be a
 mirror source or target. Bridge-global, forwarding-matrix, and mirroring writes
 remain capability-disabled pending dedicated hardware validation.
+
+Per-port VLAN policy writes cover `vlan`, `vlni`, `dvid`, `fvid`, and `vlnh`
+for Ethernet ports 1-5. They require an exact expected baseline, preserve all
+five policy values for management port 6, skip no-ops, and verify complete-group
+readback. Guarded whole-table `/vlan.b` replacement is implemented with the same
+identity, baseline, no-op, and full readback checks. Every desired table must
+preserve port 6 membership for every VLAN ID. The `vlan_table_write` capability
+remains disabled pending dedicated hardware validation.
 
 Guarded ACL replacement and typed CLI mutation commands are implemented, but
 the exact CSS106 profile does not advertise `acl_write`. ACL writes remain

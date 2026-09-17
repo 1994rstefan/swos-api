@@ -22,13 +22,19 @@ pytest --run-integration --run-destructive -m destructive
 
 The CSS106 write tests change and restore the device name, SNMP metadata, port
 name, flow-control state, RSTP enable, lock, lock-on-first, and egress rate in
-`finally`. Port tests run only after confirming that their target is link-down.
+`finally`. The per-port VLAN test changes only port 5's egress-header policy and
+precomputes its exact temporary state before POST. Cleanup fresh-reads the full
+policy: it restores only from that temporary state, does nothing if already at
+the original state, and refuses to overwrite any third state. Port tests run
+only after confirming that their target is link-down.
 Each test changes one setting at a time. The name test uses Ethernet port 5 by default;
 select another Ethernet port (1-5 only) with `SWOS_INTEGRATION_WRITE_PORT`.
 The configuration, RSTP, and forwarding tests always target down port 5. Port 6
 is the SFP management path and is always rejected. The hardware tests never
 disable an Ethernet port, change negotiation, alter forwarding destinations, or
 configure mirroring.
+The VLAN table is never changed by hardware tests, and every VLAN policy test
+asserts that the SFP port-6 policy remains identical.
 
 Static-host, RSTP, and forwarding cleanup passes the verified post-mutation
 state as the restore precondition. A concurrent configuration change therefore

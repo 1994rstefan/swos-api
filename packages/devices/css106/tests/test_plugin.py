@@ -12,9 +12,13 @@ from swos_core.models import (
     HostEntry,
     PortConfigurationUpdate,
     PortNameUpdate,
+    PortVlanPolicyUpdate,
     RstpBridgeUpdate,
     RstpPortEnableUpdate,
     SnmpMetadataUpdate,
+    VlanInfo,
+    VlanMembershipMode,
+    VlanPortMembership,
 )
 from swos_core.plugins import PluginRegistry
 from swos_core.safety import FirmwareSafetyPolicy
@@ -38,16 +42,19 @@ from swos_device_css106.protocol import (
     encode_forwarding_port_policy_update,
     encode_port_configuration_update,
     encode_port_name_update,
+    encode_port_vlan_policy_update,
     encode_rstp_bridge_update,
     encode_rstp_port_enable_update,
     encode_snmp_metadata_update,
     encode_static_hosts,
+    encode_vlans,
     forwarding_from_payload,
     identity_from_system,
     igmp_groups_from_payload,
     parse_payload,
     parse_table_payload,
     port_statistics_from_payload,
+    port_vlan_write_state_from_payload,
     port_vlans_from_forwarding_payload,
     ports_from_link_payload,
     rstp_from_payloads,
@@ -55,6 +62,7 @@ from swos_device_css106.protocol import (
     snmp_from_payload,
     static_hosts_from_payload,
     system_info_from_payload,
+    vlan_table_write_state_from_payload,
     vlans_from_payload,
 )
 
@@ -828,6 +836,8 @@ def test_shared_decoder_model_gates_rb260gsp_health_and_poe_fields() -> None:
     assert not adapter.capabilities.supports("device_name_write")
     assert not adapter.capabilities.supports("rstp_port_enable_write")
     assert not adapter.capabilities.supports("forwarding_port_policy_write")
+    assert not adapter.capabilities.supports("vlan_port_policy_write")
+    assert not adapter.capabilities.supports("vlan_table_write")
     assert not adapter.capabilities.supports("snmp_metadata_write")
     assert not adapter.capabilities.supports("static_hosts_write")
     assert not adapter.capabilities.supports("acl_write")
@@ -2021,6 +2031,143 @@ def test_port_vlan_parser_handles_all_supported_modes() -> None:
     assert [port.force_vlan_id for port in ports] == [True, False, True, False, False, True]
 
 
+def test_port_vlan_encoder_posts_complete_group_and_preserves_port_6() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    before_data = parse_payload(forwarding_fixture_payload())
+    before_state = port_vlan_write_state_from_payload(before_data, identity)
+
+    content, desired = encode_port_vlan_policy_update(
+        before_data,
+        identity,
+        PortVlanPolicyUpdate(
+            number=5,
+            mode="strict",
+            receive="untagged_only",
+            default_vlan_id=4094,
+            force_vlan_id=True,
+            egress="strip",
+        ),
+    )
+
+    assert content == (
+        b"{vlan:[0x01,0x01,0x01,0x01,0x03,0x01],"
+        b"vlni:[0x00,0x00,0x00,0x00,0x02,0x00],"
+        b"dvid:[0x0001,0x0001,0x0001,0x0001,0x0ffe,0x0001],"
+        b"fvid:0x10,vlnh:[0x00,0x00,0x00,0x00,0x01,0x00]}"
+    )
+    assert desired.modes[4] == 3
+    assert desired.receive_modes[4] == 2
+    assert desired.default_vlan_ids[4] == 4094
+    assert desired.egress_modes[4] == 1
+    assert desired.force_vlan_id_mask == 0x10
+    assert desired.modes[5] == before_state.modes[5]
+    assert desired.receive_modes[5] == before_state.receive_modes[5]
+    assert desired.default_vlan_ids[5] == before_state.default_vlan_ids[5]
+    assert desired.egress_modes[5] == before_state.egress_modes[5]
+
+
+def test_port_vlan_encoder_rejects_management_port_even_for_constructed_model() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+
+    with pytest.raises(InvalidOperationError, match="SFP management port"):
+        encode_port_vlan_policy_update(
+            parse_payload(forwarding_fixture_payload()),
+            identity,
+            PortVlanPolicyUpdate.model_construct(number=6, force_vlan_id=True),
+        )
+
+
+def test_adapter_sets_port_vlan_policy_with_stale_noop_and_readback_guards() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    before_data = parse_payload(forwarding_fixture_payload())
+    before = port_vlans_from_forwarding_payload(before_data, identity)
+    changed_payload = forwarding_fixture_payload().replace(
+        b"vlnh:[0x00,0x00,0x00,0x00,0x00,0x00]",
+        b"vlnh:[0x00,0x00,0x00,0x00,0x01,0x00]",
+    )
+    transport = FakeTransport(
+        (fixture_payload(), forwarding_fixture_payload(), b"", changed_payload)
+    )
+    adapter = CSS106Plugin(transport_factory=lambda connection: transport).create(  # type: ignore[arg-type]
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+
+    result = adapter.set_port_vlan_policy(
+        PortVlanPolicyUpdate(number=5, egress="strip"), expected_current=before
+    )
+
+    assert result.changed
+    assert result.value[4].egress.value == "strip"
+    assert result.value[5] == before[5]
+    assert transport.requests == [
+        ("GET", "/sys.b"),
+        ("GET", "/fwd.b"),
+        ("POST", "/fwd.b"),
+        ("GET", "/fwd.b"),
+    ]
+    assert transport.request_details[2][2] == (
+        b"{vlan:[0x01,0x01,0x01,0x01,0x01,0x01],"
+        b"vlni:[0x00,0x00,0x00,0x00,0x00,0x00],"
+        b"dvid:[0x0001,0x0001,0x0001,0x0001,0x0001,0x0001],"
+        b"fvid:0x00,vlnh:[0x00,0x00,0x00,0x00,0x01,0x00]}"
+    )
+
+    no_op_transport = FakeTransport((fixture_payload(), forwarding_fixture_payload()))
+    no_op_adapter = CSS106Plugin(
+        transport_factory=lambda connection: no_op_transport  # type: ignore[arg-type]
+    ).create(
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+    no_op = no_op_adapter.set_port_vlan_policy(
+        PortVlanPolicyUpdate(number=5, egress="preserve"), expected_current=before
+    )
+    assert not no_op.changed
+    assert no_op_transport.requests == [("GET", "/sys.b"), ("GET", "/fwd.b")]
+
+    stale_transport = FakeTransport((fixture_payload(), forwarding_fixture_payload()))
+    stale_adapter = CSS106Plugin(
+        transport_factory=lambda connection: stale_transport  # type: ignore[arg-type]
+    ).create(
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+    stale = list(before)
+    stale[0] = stale[0].model_copy(update={"default_vlan_id": 2})
+    with pytest.raises(InvalidOperationError, match="changed since the expected baseline"):
+        stale_adapter.set_port_vlan_policy(
+            PortVlanPolicyUpdate(number=5, egress="strip"),
+            expected_current=tuple(stale),
+        )
+    assert stale_transport.requests == [("GET", "/sys.b"), ("GET", "/fwd.b")]
+
+    mismatch_transport = FakeTransport(
+        (fixture_payload(), forwarding_fixture_payload(), b"", forwarding_fixture_payload())
+    )
+    mismatch_adapter = CSS106Plugin(
+        transport_factory=lambda connection: mismatch_transport  # type: ignore[arg-type]
+    ).create(
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+    with pytest.raises(ProtocolError, match="complete-group read-back"):
+        mismatch_adapter.set_port_vlan_policy(
+            PortVlanPolicyUpdate(number=5, egress="strip"), expected_current=before
+        )
+
+
 def test_adapter_normalizes_vlan_table() -> None:
     identity = identity_from_system(parse_payload(fixture_payload()))
     assert identity is not None
@@ -2049,6 +2196,18 @@ def test_adapter_normalizes_vlan_table() -> None:
     assert transport.requests == [("GET", "/vlan.b")]
 
 
+def test_vlan_write_state_preserves_wire_order_while_public_read_stays_sorted() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    rows = parse_table_payload(vlan_fixture_payload())
+
+    state = vlan_table_write_state_from_payload(rows, identity)
+    public = vlans_from_payload(rows, identity)
+
+    assert [row.vlan_id for row in state.rows] == [20, 10]
+    assert [vlan.vlan_id for vlan in public] == [10, 20]
+
+
 def test_vlan_decoders_reject_invalid_values() -> None:
     identity = identity_from_system(parse_payload(fixture_payload()))
     assert identity is not None
@@ -2066,6 +2225,158 @@ def test_vlan_decoders_reject_invalid_values() -> None:
 
     with pytest.raises(ProtocolError, match=f"exceeds {MAX_VLAN_ENTRIES}"):
         vlans_from_payload([{}] * (MAX_VLAN_ENTRIES + 1), identity)
+
+
+def test_vlan_table_encoder_posts_complete_rows_and_preserves_port_6() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    before = vlans_from_payload(parse_table_payload(vlan_fixture_payload()), identity)
+    desired = (
+        before[0].model_copy(
+            update={
+                "independent_learning": True,
+                "ports": (
+                    before[0].ports[0].model_copy(update={"mode": VlanMembershipMode.PRESERVE}),
+                    *before[0].ports[1:],
+                ),
+            }
+        ),
+        before[1],
+    )
+
+    content = encode_vlans(desired, before, identity)
+
+    assert content == (
+        b"[{vid:0x000a,ivl:0x01,igmp:0x01,"
+        b"prt:[0x00,0x01,0x03,0x03,0x03,0x02]},"
+        b"{vid:0x0014,ivl:0x01,igmp:0x00,"
+        b"prt:[0x00,0x03,0x01,0x01,0x03,0x02]}]"
+    )
+
+    changed_port_6 = list(desired[0].ports)
+    changed_port_6[5] = changed_port_6[5].model_copy(update={"mode": VlanMembershipMode.NOT_MEMBER})
+    unsafe = (desired[0].model_copy(update={"ports": tuple(changed_port_6)}), desired[1])
+    with pytest.raises(InvalidOperationError, match="management port 6 membership"):
+        encode_vlans(unsafe, before, identity)
+
+    added = VlanInfo(
+        vlan_id=30,
+        independent_learning=False,
+        igmp_snooping=False,
+        ports=tuple(
+            VlanPortMembership(
+                port_number=number,
+                mode="strip" if number == 6 else "not_member",
+            )
+            for number in range(1, 7)
+        ),
+    )
+    with pytest.raises(InvalidOperationError, match="management port 6 membership"):
+        encode_vlans((*desired, added), before, identity)
+    with pytest.raises(InvalidOperationError, match="management port 6 membership"):
+        encode_vlans((before[1],), before, identity)
+
+
+def test_adapter_replaces_vlan_table_with_identity_stale_noop_and_readback_guards() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    before = vlans_from_payload(parse_table_payload(vlan_fixture_payload()), identity)
+    desired = (
+        before[0].model_copy(update={"igmp_snooping": False}),
+        before[1],
+    )
+    desired_payload = encode_vlans(desired, before, identity)
+    transport = FakeTransport((fixture_payload(), vlan_fixture_payload(), b"", desired_payload))
+    adapter = CSS106Plugin(transport_factory=lambda connection: transport).create(  # type: ignore[arg-type]
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+
+    result = adapter.replace_vlans(desired, expected_current=before)
+
+    assert result.changed
+    assert result.value == desired
+    assert transport.requests == [
+        ("GET", "/sys.b"),
+        ("GET", "/vlan.b"),
+        ("POST", "/vlan.b"),
+        ("GET", "/vlan.b"),
+    ]
+    assert transport.request_details[2][2] == desired_payload
+
+    no_op_transport = FakeTransport((fixture_payload(), vlan_fixture_payload()))
+    no_op_adapter = CSS106Plugin(
+        transport_factory=lambda connection: no_op_transport  # type: ignore[arg-type]
+    ).create(
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+    no_op = no_op_adapter.replace_vlans(before, expected_current=before)
+    assert not no_op.changed
+    assert no_op_transport.requests == [("GET", "/sys.b"), ("GET", "/vlan.b")]
+
+    stale_transport = FakeTransport((fixture_payload(), vlan_fixture_payload()))
+    stale_adapter = CSS106Plugin(
+        transport_factory=lambda connection: stale_transport  # type: ignore[arg-type]
+    ).create(
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+    stale = (before[0].model_copy(update={"igmp_snooping": False}), before[1])
+    with pytest.raises(InvalidOperationError, match="changed since the expected baseline"):
+        stale_adapter.replace_vlans(desired, expected_current=stale)
+    assert stale_transport.requests == [("GET", "/sys.b"), ("GET", "/vlan.b")]
+
+    mismatch_transport = FakeTransport(
+        (fixture_payload(), vlan_fixture_payload(), b"", vlan_fixture_payload())
+    )
+    mismatch_adapter = CSS106Plugin(
+        transport_factory=lambda connection: mismatch_transport  # type: ignore[arg-type]
+    ).create(
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+    with pytest.raises(ProtocolError, match="full-table read-back"):
+        mismatch_adapter.replace_vlans(desired, expected_current=before)
+
+    first_row, second_row = desired_payload[1:-1].split(b"},{", maxsplit=1)
+    reordered_payload = b"[{" + second_row + b"," + first_row + b"}]"
+    reordered_transport = FakeTransport(
+        (fixture_payload(), vlan_fixture_payload(), b"", reordered_payload)
+    )
+    reordered_adapter = CSS106Plugin(
+        transport_factory=lambda connection: reordered_transport  # type: ignore[arg-type]
+    ).create(
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+    assert vlans_from_payload(parse_table_payload(reordered_payload), identity) == desired
+    with pytest.raises(ProtocolError, match="full-table read-back"):
+        reordered_adapter.replace_vlans(desired, expected_current=before)
+
+    changed_identity = fixture_payload().replace(b"322e3139", b"322e3230")
+    identity_transport = FakeTransport(changed_identity)
+    identity_adapter = CSS106Plugin(
+        transport_factory=lambda connection: identity_transport  # type: ignore[arg-type]
+    ).create(
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+    with pytest.raises(ProtocolError, match="identity changed"):
+        identity_adapter.replace_vlans(desired, expected_current=before)
+    assert identity_transport.requests == [("GET", "/sys.b")]
 
 
 def test_parser_handles_nested_values_without_eval() -> None:
