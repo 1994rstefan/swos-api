@@ -27,6 +27,7 @@ from swos_core.models import (
     PacketSizeStatistics,
     PoeMode,
     PoeStatus,
+    PortConfigurationUpdate,
     PortErrorStatistics,
     PortForwardingInfo,
     PortInfo,
@@ -329,14 +330,61 @@ def encode_port_name_update(
 
     encoded_name = validate_port_name(update.name)
     state = link_write_state_from_payload(data, identity)
-    if update.number > len(state.raw_names):
-        raise InvalidOperationError(
-            f"Port {update.number} does not exist on {identity.product_code}"
-        )
+    _validate_writable_port(update.number, identity)
 
     names = list(state.raw_names)
     names[update.number - 1] = encoded_name.hex()
     desired = replace(state, raw_names=tuple(names))
+    return _serialize_link_write_state(desired), desired
+
+
+def encode_port_configuration_update(
+    data: dict[str, SwOSValue],
+    identity: DeviceIdentity,
+    update: PortConfigurationUpdate,
+) -> tuple[bytes, LinkWriteState]:
+    """Encode a complete link write while changing only one Ethernet port."""
+
+    state = link_write_state_from_payload(data, identity)
+    _validate_writable_port(update.number, identity)
+    bit = 1 << (update.number - 1)
+    desired = state
+
+    if update.enabled is not None:
+        enabled_mask = state.enabled_mask | bit if update.enabled else state.enabled_mask & ~bit
+        desired = replace(desired, enabled_mask=enabled_mask)
+
+    if update.negotiation == "auto":
+        desired = replace(desired, auto_negotiation_mask=state.auto_negotiation_mask | bit)
+    elif update.negotiation is not None:
+        try:
+            speed_code = {speed: code for code, speed in FORCED_LINK_SPEEDS_BPS.items()}[
+                update.negotiation.speed_bps
+            ]
+        except KeyError as exc:
+            raise InvalidOperationError(
+                "CSS106 forced speed must be 10000000 or 100000000 bps"
+            ) from exc
+        speeds = list(state.configured_speeds)
+        speeds[update.number - 1] = speed_code
+        duplex_mask = (
+            state.configured_duplex_mask | bit
+            if update.negotiation.duplex == "full"
+            else state.configured_duplex_mask & ~bit
+        )
+        desired = replace(
+            desired,
+            auto_negotiation_mask=state.auto_negotiation_mask & ~bit,
+            configured_speeds=tuple(speeds),
+            configured_duplex_mask=duplex_mask,
+        )
+
+    if update.flow_control is not None:
+        flow_control_mask = (
+            state.flow_control_mask | bit if update.flow_control else state.flow_control_mask & ~bit
+        )
+        desired = replace(desired, flow_control_mask=flow_control_mask)
+
     return _serialize_link_write_state(desired), desired
 
 
@@ -849,6 +897,14 @@ def _port_count(identity: DeviceIdentity) -> int:
         return PORT_COUNTS[identity.product_code]
     except KeyError as exc:
         raise ProtocolError(f"Unknown CSS106 product {identity.product_code!r}") from exc
+
+
+def _validate_writable_port(number: int, identity: DeviceIdentity) -> None:
+    port_count = _port_count(identity)
+    if number == 6 and port_count >= 6:
+        raise InvalidOperationError("Port 6 is the SFP management port and cannot be modified")
+    if number < 1 or number > min(5, port_count):
+        raise InvalidOperationError(f"Port {number} does not exist on {identity.product_code}")
 
 
 def _serialize_link_write_state(state: LinkWriteState) -> bytes:

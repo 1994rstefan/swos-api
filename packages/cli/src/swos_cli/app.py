@@ -6,8 +6,9 @@ import os
 import sys
 import tomllib
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal, cast
 
 import typer
 import typer._click as click
@@ -15,9 +16,11 @@ from dotenv import dotenv_values
 from swos_core import (
     DeviceConnection,
     DeviceNameUpdate,
+    ForcedPortNegotiation,
     OperationResult,
     PacketSizeStatistics,
     PluginRegistry,
+    PortConfigurationUpdate,
     PortErrorStatistics,
     PortInfo,
     PortNameUpdate,
@@ -46,6 +49,26 @@ class CliContext:
 
     configuration: ResolvedConfiguration
     firmware_policy: FirmwareSafetyPolicy
+
+
+class NegotiationOption(StrEnum):
+    AUTO = "auto"
+    FORCED = "forced"
+
+
+class DuplexOption(StrEnum):
+    FULL = "full"
+    HALF = "half"
+
+
+class PortStateOption(StrEnum):
+    ENABLED = "enabled"
+    DISABLED = "disabled"
+
+
+class ToggleOption(StrEnum):
+    ON = "on"
+    OFF = "off"
 
 
 class OutputAwareGroup(TyperGroup):
@@ -469,6 +492,92 @@ def port_rename(
         human = (
             f"Port {result.value.number} name is already {result.value.name!r}; no change required."
         )
+    if result.warnings:
+        human += "\n" + "\n".join(f"Warning: {warning.message}" for warning in result.warnings)
+    renderer.success(data, human=human)
+
+
+@port_app.command("configure")
+def port_configure(
+    ctx: typer.Context,
+    number: Annotated[
+        int, typer.Argument(min=1, max=5, help="Ethernet port number to configure (1-5).")
+    ],
+    state: Annotated[
+        PortStateOption | None,
+        typer.Option("--state", help="Set the port state: enabled or disabled."),
+    ] = None,
+    negotiation: Annotated[
+        NegotiationOption | None,
+        typer.Option("--negotiation", help="Select auto or forced negotiation."),
+    ] = None,
+    speed_bps: Annotated[
+        int | None,
+        typer.Option("--speed-bps", help="Forced speed: 10000000 or 100000000 bps."),
+    ] = None,
+    duplex: Annotated[
+        DuplexOption | None,
+        typer.Option("--duplex", help="Forced duplex: full or half."),
+    ] = None,
+    flow_control: Annotated[
+        ToggleOption | None,
+        typer.Option("--flow-control", help="Set flow control: on or off."),
+    ] = None,
+) -> None:
+    """Set and verify Ethernet port configuration without prompting."""
+
+    if state is None and negotiation is None and flow_control is None:
+        raise typer.BadParameter("At least one configuration option is required")
+    if negotiation is NegotiationOption.FORCED:
+        if speed_bps is None or duplex is None:
+            raise typer.BadParameter("--negotiation forced requires both --speed-bps and --duplex")
+        if speed_bps not in (10_000_000, 100_000_000):
+            raise typer.BadParameter("--speed-bps must be 10000000 or 100000000")
+    elif speed_bps is not None or duplex is not None:
+        raise typer.BadParameter(
+            "--speed-bps and --duplex are valid only with --negotiation forced"
+        )
+
+    desired_negotiation: Literal["auto"] | ForcedPortNegotiation | None = None
+    if negotiation is NegotiationOption.AUTO:
+        desired_negotiation = "auto"
+    elif negotiation is NegotiationOption.FORCED:
+        assert speed_bps is not None and duplex is not None
+        desired_negotiation = ForcedPortNegotiation(
+            speed_bps=cast(Literal[10_000_000, 100_000_000], speed_bps),
+            duplex=duplex.value,
+        )
+    update = PortConfigurationUpdate(
+        number=number,
+        enabled=None if state is None else state is PortStateOption.ENABLED,
+        negotiation=desired_negotiation,
+        flow_control=None if flow_control is None else flow_control is ToggleOption.ON,
+    )
+
+    cli_context: CliContext = ctx.ensure_object(CliContext)
+    renderer = OutputRenderer(cli_context.configuration.settings.output)
+    try:
+        connected_device = _connect_device(cli_context)
+        result: OperationResult[PortInfo] = connected_device.set_port_configuration(update)
+    except ConfigurationError as exc:
+        renderer.error("configuration_error", str(exc))
+        raise typer.Exit(code=2) from exc
+    except SwOSError as exc:
+        renderer.error(_error_code(exc), str(exc))
+        raise typer.Exit(code=1) from exc
+
+    data: dict[str, Any] = {
+        "changed": result.changed,
+        "port": _serialize_port(result.value),
+    }
+    if result.warnings:
+        data["warnings"] = [warning.model_dump(mode="json") for warning in result.warnings]
+    human = (
+        f"Port {result.value.number} configuration changed."
+        if result.changed
+        else f"Port {result.value.number} already has the requested configuration; "
+        "no change required."
+    )
     if result.warnings:
         human += "\n" + "\n".join(f"Warning: {warning.message}" for warning in result.warnings)
     renderer.success(data, human=human)

@@ -5,6 +5,7 @@ from swos_core import (
     DeviceConnection,
     DeviceNameUpdate,
     PluginRegistry,
+    PortConfigurationUpdate,
     PortNameUpdate,
     SnmpMetadataUpdate,
 )
@@ -22,8 +23,12 @@ def test_rb260gs_219_port_name_write_and_restore() -> None:
     registry = PluginRegistry.discover()
     identity = registry.probe(connection)
     device = registry.connect(identity, connection, FirmwareSafetyPolicy())
-    port_number = int(os.environ.get("SWOS_INTEGRATION_WRITE_PORT", "1"))
-    original_name = device.get_ports()[port_number - 1].name
+    port_number = int(os.environ.get("SWOS_INTEGRATION_WRITE_PORT", "5"))
+    assert 1 <= port_number <= 5, "SWOS_INTEGRATION_WRITE_PORT must be an Ethernet port (1-5)"
+    original_port = device.get_ports()[port_number - 1]
+    if original_port.link_up:
+        pytest.skip(f"port {port_number} is link-up; refusing destructive port test")
+    original_name = original_port.name
     temporary_name = "SWOS-CLI-TEST" if original_name != "SWOS-CLI-TEST" else "SWOS-CLI-TEMP"
     restorable = device.set_port_name(PortNameUpdate(number=port_number, name=original_name))
     assert not restorable.changed
@@ -37,6 +42,42 @@ def test_rb260gs_219_port_name_write_and_restore() -> None:
         restored = device.set_port_name(PortNameUpdate(number=port_number, name=original_name))
         assert restored.value.name == original_name
         assert device.get_ports()[port_number - 1].name == original_name
+
+
+@pytest.mark.integration
+@pytest.mark.destructive
+def test_rb260gs_219_port_flow_control_write_and_restore() -> None:
+    connection = DeviceConnection(
+        url=os.environ.get("SWOS_INTEGRATION_URL", "http://192.168.88.1"),
+        username=os.environ.get("SWOS_INTEGRATION_USERNAME", "admin"),
+        password=os.environ.get("SWOS_INTEGRATION_PASSWORD", ""),
+    )
+    registry = PluginRegistry.discover()
+    identity = registry.probe(connection)
+    device = registry.connect(identity, connection, FirmwareSafetyPolicy())
+    port_number = 5
+    original = device.get_ports()[port_number - 1]
+    if original.link_up:
+        pytest.skip(f"port {port_number} is link-up; refusing destructive port test")
+
+    restorable = device.set_port_configuration(
+        PortConfigurationUpdate(number=port_number, flow_control=original.flow_control)
+    )
+    assert not restorable.changed
+
+    try:
+        changed = device.set_port_configuration(
+            PortConfigurationUpdate(number=port_number, flow_control=not original.flow_control)
+        )
+        assert changed.changed
+        assert changed.value.flow_control is not original.flow_control
+        assert device.get_ports()[port_number - 1].flow_control is not original.flow_control
+    finally:
+        restored = device.set_port_configuration(
+            PortConfigurationUpdate(number=port_number, flow_control=original.flow_control)
+        )
+        assert restored.value.flow_control is original.flow_control
+        assert device.get_ports()[port_number - 1].flow_control is original.flow_control
 
 
 @pytest.mark.integration

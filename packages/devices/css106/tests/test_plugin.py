@@ -5,6 +5,8 @@ from swos_core.errors import InvalidOperationError, ProtocolError, UnsupportedFi
 from swos_core.models import (
     DeviceConnection,
     DeviceNameUpdate,
+    ForcedPortNegotiation,
+    PortConfigurationUpdate,
     PortNameUpdate,
     SnmpMetadataUpdate,
 )
@@ -23,6 +25,7 @@ from swos_device_css106.protocol import (
     acl_rules_from_payload,
     dynamic_hosts_from_payload,
     encode_device_name_update,
+    encode_port_configuration_update,
     encode_port_name_update,
     encode_snmp_metadata_update,
     forwarding_from_payload,
@@ -305,6 +308,76 @@ def test_port_name_encoder_emits_exact_complete_link_write() -> None:
     )
 
 
+def test_port_configuration_encoder_emits_exact_complete_link_write() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+
+    content, desired = encode_port_configuration_update(
+        parse_payload(link_fixture_payload()),
+        identity,
+        PortConfigurationUpdate(
+            number=5,
+            enabled=False,
+            negotiation=ForcedPortNegotiation(speed_bps=10_000_000, duplex="half"),
+            flow_control=False,
+        ),
+    )
+
+    assert content == (
+        b"{en:0x2f,nm:['506f727431','506f727432','506f727433','506f727434',"
+        b"'506f727435','534650'],an:0x2f,spdc:[0x01,0x01,0x01,0x01,0x00,0x00],"
+        b"dpxc:0x2f,fct:0x2f}"
+    )
+    assert desired.raw_names[-1] == "534650"
+    assert desired.configured_speeds[-1] == 0
+    assert b"lnk" not in content
+    assert b"spd:" not in content
+    assert b"dpx:" not in content
+
+
+def test_auto_negotiation_preserves_dormant_speed_and_duplex() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    data = parse_payload(link_fixture_payload())
+    data["an"] = 0x2F
+    data["dpxc"] = 0x2F
+    speeds = data["spdc"]
+    assert isinstance(speeds, list)
+    speeds[4] = 0
+
+    content, desired = encode_port_configuration_update(
+        data,
+        identity,
+        PortConfigurationUpdate(number=5, negotiation="auto"),
+    )
+
+    assert desired.auto_negotiation_mask == 0x3F
+    assert desired.configured_speeds[4] == 0
+    assert desired.configured_duplex_mask == 0x2F
+    assert b"an:0x3f" in content
+    assert b"spdc:[0x01,0x01,0x01,0x01,0x00,0x00]" in content
+    assert b"dpxc:0x2f" in content
+
+
+def test_link_encoders_reject_management_sfp_port_even_for_constructed_models() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    data = parse_payload(link_fixture_payload())
+
+    with pytest.raises(InvalidOperationError, match="SFP management port"):
+        encode_port_name_update(
+            data,
+            identity,
+            PortNameUpdate.model_construct(number=6, name="Management"),
+        )
+    with pytest.raises(InvalidOperationError, match="SFP management port"):
+        encode_port_configuration_update(
+            data,
+            identity,
+            PortConfigurationUpdate.model_construct(number=6, flow_control=False),
+        )
+
+
 def test_device_name_encoder_emits_exact_sparse_system_write() -> None:
     content, desired = encode_device_name_update(
         parse_payload(fixture_payload()),
@@ -383,6 +456,139 @@ def test_adapter_sets_and_verifies_port_name() -> None:
     assert post[3] == {"Content-Type": "text/plain"}
 
 
+def test_adapter_sets_and_verifies_port_configuration() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    changed_link = link_fixture_payload().replace(b"fct:0x3f", b"fct:0x2f")
+    transport = FakeTransport((fixture_payload(), link_fixture_payload(), b"", changed_link))
+    adapter = CSS106Plugin(transport_factory=lambda connection: transport).create(  # type: ignore[arg-type]
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+
+    result = adapter.set_port_configuration(PortConfigurationUpdate(number=5, flow_control=False))
+
+    assert result.changed
+    assert not result.value.flow_control
+    assert result.value.number == 5
+    assert transport.requests == [
+        ("GET", "/sys.b"),
+        ("GET", "/link.b"),
+        ("POST", "/link.b"),
+        ("GET", "/link.b"),
+    ]
+    assert transport.request_details[2][2] == (
+        b"{en:0x3f,nm:['506f727431','506f727432','506f727433','506f727434',"
+        b"'506f727435','534650'],an:0x3f,spdc:[0x01,0x01,0x01,0x01,0x01,0x00],"
+        b"dpxc:0x3f,fct:0x2f}"
+    )
+
+
+def test_adapter_skips_post_for_port_configuration_no_op() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    transport = FakeTransport((fixture_payload(), link_fixture_payload()))
+    adapter = CSS106Plugin(transport_factory=lambda connection: transport).create(  # type: ignore[arg-type]
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+
+    result = adapter.set_port_configuration(
+        PortConfigurationUpdate(number=5, enabled=True, negotiation="auto", flow_control=True)
+    )
+
+    assert not result.changed
+    assert result.value.number == 5
+    assert transport.requests == [("GET", "/sys.b"), ("GET", "/link.b")]
+
+
+@pytest.mark.parametrize(
+    "update",
+    [
+        PortConfigurationUpdate(number=1, enabled=False),
+        PortConfigurationUpdate(
+            number=1,
+            negotiation=ForcedPortNegotiation(speed_bps=100_000_000, duplex="full"),
+        ),
+    ],
+)
+def test_adapter_rejects_connectivity_changes_on_active_port(
+    update: PortConfigurationUpdate,
+) -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    transport = FakeTransport((fixture_payload(), link_fixture_payload()))
+    adapter = CSS106Plugin(transport_factory=lambda connection: transport).create(  # type: ignore[arg-type]
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+
+    with pytest.raises(InvalidOperationError, match="link-up"):
+        adapter.set_port_configuration(update)
+
+    assert transport.requests == [("GET", "/sys.b"), ("GET", "/link.b")]
+
+
+def test_adapter_rejects_management_sfp_port_before_post() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    transport = FakeTransport((fixture_payload(), link_fixture_payload()))
+    adapter = CSS106Plugin(transport_factory=lambda connection: transport).create(  # type: ignore[arg-type]
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+
+    with pytest.raises(InvalidOperationError, match="SFP management port"):
+        adapter.set_port_configuration(
+            PortConfigurationUpdate.model_construct(number=6, flow_control=False)
+        )
+
+    assert transport.requests == [("GET", "/sys.b"), ("GET", "/link.b")]
+
+
+def test_adapter_rejects_identity_change_before_port_configuration_post() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    changed_system = fixture_payload().replace(b"322e3139", b"322e3230")
+    transport = FakeTransport(changed_system)
+    adapter = CSS106Plugin(transport_factory=lambda connection: transport).create(  # type: ignore[arg-type]
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+
+    with pytest.raises(ProtocolError, match="identity changed"):
+        adapter.set_port_configuration(PortConfigurationUpdate(number=5, flow_control=False))
+
+    assert transport.requests == [("GET", "/sys.b")]
+
+
+def test_adapter_rejects_port_configuration_read_back_mismatch() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    transport = FakeTransport(
+        (fixture_payload(), link_fixture_payload(), b"", link_fixture_payload())
+    )
+    adapter = CSS106Plugin(transport_factory=lambda connection: transport).create(  # type: ignore[arg-type]
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+
+    with pytest.raises(ProtocolError, match="read-back verification"):
+        adapter.set_port_configuration(PortConfigurationUpdate(number=5, flow_control=False))
+
+
 def test_adapter_skips_post_when_port_name_is_already_configured() -> None:
     identity = identity_from_system(parse_payload(fixture_payload()))
     assert identity is not None
@@ -398,6 +604,23 @@ def test_adapter_skips_post_when_port_name_is_already_configured() -> None:
 
     assert not result.changed
     assert result.value.name == "Port1"
+    assert transport.requests == [("GET", "/sys.b"), ("GET", "/link.b")]
+
+
+def test_adapter_rejects_management_sfp_name_even_when_it_would_be_a_no_op() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    transport = FakeTransport((fixture_payload(), link_fixture_payload()))
+    adapter = CSS106Plugin(transport_factory=lambda connection: transport).create(  # type: ignore[arg-type]
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+
+    with pytest.raises(InvalidOperationError, match="SFP management port"):
+        adapter.set_port_name(PortNameUpdate.model_construct(number=6, name="SFP"))
+
     assert transport.requests == [("GET", "/sys.b"), ("GET", "/link.b")]
 
 
@@ -563,6 +786,7 @@ def test_shared_decoder_model_gates_rb260gsp_health_and_poe_fields() -> None:
         support=None,
     )
     assert not adapter.capabilities.supports("port_name_write")
+    assert not adapter.capabilities.supports("port_configuration_write")
     assert not adapter.capabilities.supports("device_name_write")
     assert not adapter.capabilities.supports("snmp_metadata_write")
 

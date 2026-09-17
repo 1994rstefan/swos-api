@@ -7,12 +7,14 @@ from swos_core.models import (
     AclRule,
     DeviceIdentity,
     DeviceNameUpdate,
+    ForcedPortNegotiation,
     ForwardingInfo,
     HostEntry,
     IgmpGroup,
     IgmpInfo,
     OperationResult,
     PacketSizeStatistics,
+    PortConfigurationUpdate,
     PortErrorStatistics,
     PortForwardingInfo,
     PortInfo,
@@ -318,6 +320,24 @@ class FakeDevice:
     def set_port_name(self, update: PortNameUpdate) -> OperationResult[PortInfo]:
         port = self.get_ports()[0].model_copy(update={"number": update.number, "name": update.name})
         return OperationResult[PortInfo](changed=update.name != "LongPortName1234", value=port)
+
+    def set_port_configuration(self, update: PortConfigurationUpdate) -> OperationResult[PortInfo]:
+        port = self.get_ports()[update.number - 1]
+        changes: dict[str, object] = {}
+        if update.enabled is not None:
+            changes["enabled"] = update.enabled
+        if update.flow_control is not None:
+            changes["flow_control"] = update.flow_control
+        if update.negotiation == "auto":
+            changes["auto_negotiation"] = True
+        elif isinstance(update.negotiation, ForcedPortNegotiation):
+            changes.update(
+                auto_negotiation=False,
+                configured_speed_bps=update.negotiation.speed_bps,
+                configured_full_duplex=update.negotiation.duplex == "full",
+            )
+        changed = any(getattr(port, field) != value for field, value in changes.items())
+        return OperationResult[PortInfo](changed=changed, value=port.model_copy(update=changes))
 
     def set_device_name(self, update: DeviceNameUpdate) -> OperationResult[SystemInfo]:
         info = self.get_system_info().model_copy(update={"name": update.name})
@@ -728,6 +748,105 @@ def test_port_rename_json_success(monkeypatch) -> None:  # type: ignore[no-untyp
     assert data["port"]["name"] == "Uplink"
     assert data["port"]["speed_bps"] == 1_000_000_000
     assert data["port"]["negotiation"] == "auto"
+
+
+def test_port_configure_forced_json_uses_bps(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    mock_registry(monkeypatch)
+
+    result = runner.invoke(
+        app,
+        [
+            "port",
+            "configure",
+            "2",
+            "--negotiation",
+            "forced",
+            "--speed-bps",
+            "100000000",
+            "--duplex",
+            "full",
+            "--flow-control",
+            "on",
+            "--url",
+            "http://192.0.2.1",
+            "-o",
+            "json",
+        ],
+    )
+
+    assert result.exit_code == 0
+    data = json.loads(result.stdout)["data"]
+    assert data["changed"] is True
+    assert data["port"]["number"] == 2
+    assert data["port"]["negotiation"] == {
+        "speed_bps": 100_000_000,
+        "duplex": "full",
+    }
+    assert data["port"]["flow_control"] is True
+
+
+def test_port_configure_auto_and_no_change_human(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    mock_registry(monkeypatch)
+
+    changed = runner.invoke(
+        app,
+        ["port", "configure", "2", "--negotiation", "auto", "--url", "http://192.0.2.1"],
+    )
+    unchanged = runner.invoke(
+        app,
+        ["port", "configure", "2", "--flow-control", "off", "--url", "http://192.0.2.1"],
+    )
+
+    assert changed.exit_code == 0
+    assert "configuration changed" in changed.stdout
+    assert unchanged.exit_code == 0
+    assert "no change required" in unchanged.stdout
+
+
+@pytest.mark.parametrize(
+    "arguments, message",
+    [
+        (["port", "configure", "1"], "At least one configuration option"),
+        (
+            ["port", "configure", "1", "--negotiation", "forced"],
+            "requires both --speed-bps and --duplex",
+        ),
+        (
+            [
+                "port",
+                "configure",
+                "1",
+                "--negotiation",
+                "auto",
+                "--speed-bps",
+                "100000000",
+            ],
+            "valid only with --negotiation forced",
+        ),
+        (
+            [
+                "port",
+                "configure",
+                "1",
+                "--negotiation",
+                "forced",
+                "--speed-bps",
+                "1000000000",
+                "--duplex",
+                "full",
+            ],
+            "must be 10000000 or 100000000",
+        ),
+        (["port", "configure", "6", "--flow-control", "on"], "not in the range 1<=x<=5"),
+    ],
+)
+def test_port_configure_rejects_invalid_option_combinations(
+    arguments: list[str], message: str
+) -> None:
+    result = runner.invoke(app, [*arguments, "--url", "http://192.0.2.1"])
+
+    assert result.exit_code == 2
+    assert message in result.stderr
 
 
 def test_port_stats_human_and_json_output(monkeypatch) -> None:  # type: ignore[no-untyped-def]

@@ -20,6 +20,10 @@ Destructive tests require both explicit gates:
 pytest --run-integration --run-destructive -m destructive
 ```
 
-The CSS106 write tests change and restore the device name, SNMP metadata, and a
-port name in `finally`. The port test uses port 1 by default; select another
-port with `SWOS_INTEGRATION_WRITE_PORT`.
+The CSS106 write tests change and restore the device name, SNMP metadata, port
+name, and flow-control state in `finally`. Port tests run only after confirming
+that their target is link-down. The name test uses Ethernet port 5 by default;
+select another Ethernet port (1-5 only) with `SWOS_INTEGRATION_WRITE_PORT`.
+The configuration test always targets down port 5 and toggles only flow control.
+Port 6 is the SFP management path and is always rejected. The hardware test
+never disables a port or changes negotiation.

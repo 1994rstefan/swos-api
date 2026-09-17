@@ -14,6 +14,7 @@ from swos_core.models import (
     HostEntry,
     IgmpGroup,
     OperationResult,
+    PortConfigurationUpdate,
     PortInfo,
     PortNameUpdate,
     PortStatistics,
@@ -106,6 +107,11 @@ class DeviceAdapter(Protocol):
 
     def set_port_name(self, update: PortNameUpdate) -> OperationResult[PortInfo]:
         """Set and verify the configured name of one port."""
+
+        ...
+
+    def set_port_configuration(self, update: PortConfigurationUpdate) -> OperationResult[PortInfo]:
+        """Set and verify the configuration of one Ethernet port."""
 
         ...
 
@@ -257,6 +263,19 @@ class SwOSDevice:
         if not self.capabilities.supports("port_name_write"):
             raise UnsupportedFeatureError("port_name_write")
         result = self._adapter.set_port_name(update)
+        return OperationResult[PortInfo](
+            changed=result.changed,
+            value=result.value,
+            warnings=warnings,
+        )
+
+    def set_port_configuration(self, update: PortConfigurationUpdate) -> OperationResult[PortInfo]:
+        """Configure one port after enforcing write safety and capability checks."""
+
+        warnings = self._authorize(write=True)
+        if not self.capabilities.supports("port_configuration_write"):
+            raise UnsupportedFeatureError("port_configuration_write")
+        result = self._adapter.set_port_configuration(update)
         return OperationResult[PortInfo](
             changed=result.changed,
             value=result.value,

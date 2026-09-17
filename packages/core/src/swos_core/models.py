@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from enum import StrEnum
 from ipaddress import IPv4Address
-from typing import Annotated, Generic, Self, TypeVar
+from typing import Annotated, Generic, Literal, Self, TypeAlias, TypeVar
 
 from pydantic import (
     AfterValidator,
@@ -214,6 +214,35 @@ class PortNameUpdate(BaseModel):
 
     number: int = Field(ge=1)
     name: str
+
+
+class ForcedPortNegotiation(BaseModel):
+    """Desired forced speed and duplex for one Ethernet port."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    speed_bps: int = Field(ge=1)
+    duplex: Literal["full", "half"]
+
+
+PortNegotiation: TypeAlias = Literal["auto"] | ForcedPortNegotiation
+
+
+class PortConfigurationUpdate(BaseModel):
+    """Desired configuration changes for one non-management Ethernet port."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    number: int = Field(ge=1)
+    enabled: bool | None = None
+    negotiation: PortNegotiation | None = None
+    flow_control: bool | None = None
+
+    @model_validator(mode="after")
+    def validate_non_empty_update(self) -> Self:
+        if self.enabled is None and self.negotiation is None and self.flow_control is None:
+            raise ValueError("at least one port configuration change is required")
+        return self
 
 
 class PortRateStatistics(BaseModel):

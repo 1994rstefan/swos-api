@@ -16,11 +16,13 @@ from swos_core.models import (
     DeviceConnection,
     DeviceIdentity,
     DeviceNameUpdate,
+    ForcedPortNegotiation,
     ForwardingInfo,
     HostEntry,
     IgmpGroup,
     OperationResult,
     PacketSizeStatistics,
+    PortConfigurationUpdate,
     PortErrorStatistics,
     PortForwardingInfo,
     PortInfo,
@@ -92,6 +94,7 @@ class FakeAdapter:
                     "igmp_groups",
                     "port_statistics",
                     "ports",
+                    "port_configuration_write",
                     "port_name_write",
                     "rstp",
                     "sfp",
@@ -233,6 +236,23 @@ class FakeAdapter:
     def set_port_name(self, update: PortNameUpdate) -> OperationResult[PortInfo]:
         port = self.get_ports()[0].model_copy(update={"number": update.number, "name": update.name})
         return OperationResult[PortInfo](changed=True, value=port)
+
+    def set_port_configuration(self, update: PortConfigurationUpdate) -> OperationResult[PortInfo]:
+        port = self.get_ports()[0]
+        changes: dict[str, object] = {}
+        if update.enabled is not None:
+            changes["enabled"] = update.enabled
+        if update.flow_control is not None:
+            changes["flow_control"] = update.flow_control
+        if update.negotiation == "auto":
+            changes["auto_negotiation"] = True
+        elif update.negotiation is not None:
+            changes.update(
+                auto_negotiation=False,
+                configured_speed_bps=update.negotiation.speed_bps,
+                configured_full_duplex=update.negotiation.duplex == "full",
+            )
+        return OperationResult[PortInfo](changed=True, value=port.model_copy(update=changes))
 
     def set_device_name(self, update: DeviceNameUpdate) -> OperationResult[SystemInfo]:
         return OperationResult[SystemInfo](
@@ -410,6 +430,8 @@ def test_policy_bound_device_rejects_unsupported_feature() -> None:
         device.get_vlans()
     with pytest.raises(UnsupportedFeatureError, match="port name write"):
         device.set_port_name(PortNameUpdate(number=1, name="Uplink"))
+    with pytest.raises(UnsupportedFeatureError, match="port configuration write"):
+        device.set_port_configuration(PortConfigurationUpdate(number=1, flow_control=False))
     with pytest.raises(UnsupportedFeatureError, match="device name write"):
         device.set_device_name(DeviceNameUpdate(name="Core Switch"))
     with pytest.raises(UnsupportedFeatureError, match="snmp metadata write"):
@@ -424,10 +446,19 @@ def test_policy_bound_device_authorizes_and_returns_write_result() -> None:
     )
 
     result = device.set_port_name(PortNameUpdate(number=1, name="Uplink"))
+    configured = device.set_port_configuration(
+        PortConfigurationUpdate(
+            number=1,
+            negotiation=ForcedPortNegotiation(speed_bps=10_000_000, duplex="half"),
+        )
+    )
 
     assert result.changed
     assert result.value.name == "Uplink"
     assert result.warnings == ()
+    assert configured.value.configured_speed_bps == 10_000_000
+    assert not configured.value.configured_full_duplex
+    assert configured.warnings == ()
 
     device_name = device.set_device_name(DeviceNameUpdate(name="Core Switch"))
     metadata = device.set_snmp_metadata(SnmpMetadataUpdate(contact="NOC", location="Rack 1"))
@@ -460,6 +491,12 @@ def test_policy_bound_device_requires_explicit_untested_write_permission() -> No
     result = writable.set_port_name(PortNameUpdate(number=1, name="Uplink"))
 
     assert result.warnings[0].code == "untested_firmware_write"
+    assert (
+        writable.set_port_configuration(PortConfigurationUpdate(number=1, flow_control=False))
+        .warnings[0]
+        .code
+        == "untested_firmware_write"
+    )
     assert (
         writable.set_device_name(DeviceNameUpdate(name="Core Switch")).warnings[0].code
         == "untested_firmware_write"

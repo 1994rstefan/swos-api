@@ -43,6 +43,8 @@ swosctl system show --device office
 swosctl system rename "Office Switch" --device office
 swosctl port list --device office
 swosctl port rename 1 Uplink --device office
+swosctl port configure 5 --flow-control on --device office
+swosctl port configure 5 --negotiation forced --speed-bps 100000000 --duplex full --device office
 swosctl port stats --device office
 swosctl port stats --full --device office
 swosctl sfp show --device office
@@ -105,16 +107,18 @@ Currently supported:
 
 | Device | Product code | Firmware | Build | Operations |
 | --- | --- | --- | --- | --- |
-| RB260GS | `CSS106-5G-1S` | `2.19` | `0x6a181cd5` | Complete local reads; guarded name and SNMP metadata writes |
+| RB260GS | `CSS106-5G-1S` | `2.19` | `0x6a181cd5` | Complete local reads; guarded port, name, and SNMP metadata writes |
 
 The supported read surface includes system, management, health, port
 configuration/state, complete statistics, SFP diagnostics, forwarding, port
 lock, mirroring, bandwidth limits, VLANs, hosts, RSTP, SNMP, learned IGMP
 groups, and ACL rules. See the
 [CSS106 2.19 read-coverage matrix](docs/css106-2.19-read-coverage.md).
-Device/port-name and SNMP contact/location writes use read-before-write, skip
-no-op POSTs, and verify the complete relevant writable state after the change.
-SNMP writes preserve the raw enabled and community fields read from the device.
+Device/port-name, port-configuration, and SNMP contact/location writes use
+read-before-write, skip no-op POSTs, and verify the complete relevant writable
+state after the change. Port writes are limited to Ethernet ports 1-5; port 6
+is reserved for SFP management and is never modified. SNMP writes preserve the
+raw enabled and community fields read from the device.
 
 ## License
 

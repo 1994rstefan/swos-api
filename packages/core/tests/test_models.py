@@ -5,10 +5,12 @@ from swos_core.models import (
     DeviceConnection,
     DeviceIdentity,
     DeviceNameUpdate,
+    ForcedPortNegotiation,
     ForwardingInfo,
     HostEntry,
     IgmpGroup,
     OperationResult,
+    PortConfigurationUpdate,
     PortForwardingInfo,
     PortInfo,
     PortNameUpdate,
@@ -96,8 +98,34 @@ def test_port_name_update_and_operation_result_are_typed_and_immutable() -> None
     }
     with pytest.raises(ValidationError):
         PortNameUpdate(number=0, name="Uplink")
+    assert PortNameUpdate(number=6, name="Management").number == 6
     with pytest.raises(ValidationError):
         result.changed = False  # type: ignore[misc]
+
+
+def test_port_configuration_update_is_strict_non_empty_and_uses_bps() -> None:
+    update = PortConfigurationUpdate(
+        number=5,
+        enabled=False,
+        negotiation=ForcedPortNegotiation(speed_bps=100_000_000, duplex="full"),
+        flow_control=True,
+    )
+
+    assert update.model_dump(mode="json") == {
+        "number": 5,
+        "enabled": False,
+        "negotiation": {"speed_bps": 100_000_000, "duplex": "full"},
+        "flow_control": True,
+    }
+    assert PortConfigurationUpdate(number=1, negotiation="auto").negotiation == "auto"
+    with pytest.raises(ValidationError, match="at least one"):
+        PortConfigurationUpdate(number=1)
+    assert PortConfigurationUpdate(number=6, flow_control=True).number == 6
+    assert ForcedPortNegotiation(speed_bps=1_000_000_000, duplex="full").speed_bps == 1_000_000_000
+    with pytest.raises(ValidationError):
+        ForcedPortNegotiation.model_validate(
+            {"speed_bps": 10_000_000, "duplex": "half", "mode": "forced"}
+        )
 
 
 def test_device_name_and_snmp_metadata_updates_are_typed_and_immutable() -> None:

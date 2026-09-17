@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from swos_core.errors import ProtocolError
+from swos_core.errors import InvalidOperationError, ProtocolError
 from swos_core.models import (
     AclRule,
     DeviceCapabilities,
@@ -15,6 +15,7 @@ from swos_core.models import (
     HostEntry,
     IgmpGroup,
     OperationResult,
+    PortConfigurationUpdate,
     PortInfo,
     PortNameUpdate,
     PortStatistics,
@@ -33,6 +34,7 @@ from swos_device_css106.protocol import (
     acl_rules_from_payload,
     dynamic_hosts_from_payload,
     encode_device_name_update,
+    encode_port_configuration_update,
     encode_port_name_update,
     encode_snmp_metadata_update,
     forwarding_from_payload,
@@ -94,6 +96,7 @@ class CSS106Adapter:
             features.update(
                 {
                     "device_name_write",
+                    "port_configuration_write",
                     "port_name_write",
                     "snmp_metadata_write",
                 }
@@ -221,6 +224,11 @@ class CSS106Adapter:
             )
             before_data = parse_payload(before_payload)
             before_ports = ports_from_link_payload(before_data, self._identity)
+            content, expected_state = encode_port_name_update(
+                before_data,
+                self._identity,
+                update,
+            )
             if (
                 update.number <= len(before_ports)
                 and before_ports[update.number - 1].name == update.name
@@ -230,11 +238,6 @@ class CSS106Adapter:
                     value=before_ports[update.number - 1],
                 )
 
-            content, expected_state = encode_port_name_update(
-                before_data,
-                self._identity,
-                update,
-            )
             transport.request(
                 "POST",
                 "/link.b",
@@ -249,6 +252,56 @@ class CSS106Adapter:
         after_data = parse_payload(after_payload)
         if link_write_state_from_payload(after_data, self._identity) != expected_state:
             raise ProtocolError("CSS106 port-name write failed read-back verification")
+        after_ports = ports_from_link_payload(after_data, self._identity)
+        return OperationResult[PortInfo](
+            changed=True,
+            value=after_ports[update.number - 1],
+        )
+
+    def set_port_configuration(self, update: PortConfigurationUpdate) -> OperationResult[PortInfo]:
+        """Configure one Ethernet port with identity and complete-state guards."""
+
+        with self._transport_factory(self._connection) as transport:
+            system_payload = transport.request(
+                "GET", "/sys.b", max_response_bytes=MAX_PAYLOAD_BYTES
+            )
+            if identity_from_system(parse_payload(system_payload)) != self._identity:
+                raise ProtocolError("CSS106 identity changed after device probing")
+
+            before_payload = transport.request(
+                "GET", "/link.b", max_response_bytes=MAX_PAYLOAD_BYTES
+            )
+            before_data = parse_payload(before_payload)
+            before_state = link_write_state_from_payload(before_data, self._identity)
+            before_ports = ports_from_link_payload(before_data, self._identity)
+            content, expected_state = encode_port_configuration_update(
+                before_data,
+                self._identity,
+                update,
+            )
+            before_port = before_ports[update.number - 1]
+            if expected_state == before_state:
+                return OperationResult[PortInfo](changed=False, value=before_port)
+            if before_port.link_up and _changes_active_port_connectivity(update, before_port):
+                raise InvalidOperationError(
+                    f"Port {update.number} is link-up; active ports cannot be disabled or "
+                    "have negotiation changed"
+                )
+
+            transport.request(
+                "POST",
+                "/link.b",
+                content=content,
+                headers={"Content-Type": "text/plain"},
+                max_response_bytes=MAX_PAYLOAD_BYTES,
+            )
+            after_payload = transport.request(
+                "GET", "/link.b", max_response_bytes=MAX_PAYLOAD_BYTES
+            )
+
+        after_data = parse_payload(after_payload)
+        if link_write_state_from_payload(after_data, self._identity) != expected_state:
+            raise ProtocolError("CSS106 port-configuration write failed read-back verification")
         after_ports = ports_from_link_payload(after_data, self._identity)
         return OperationResult[PortInfo](
             changed=True,
@@ -354,4 +407,18 @@ def _system_configuration(info: SystemInfo) -> tuple[object, ...]:
         info.independent_vlan_lookup,
         info.igmp,
         info.discovery_protocol_port_numbers,
+    )
+
+
+def _changes_active_port_connectivity(update: PortConfigurationUpdate, before: PortInfo) -> bool:
+    if update.enabled is False and before.enabled:
+        return True
+    if update.negotiation == "auto":
+        return not before.auto_negotiation
+    if update.negotiation is None:
+        return False
+    return (
+        before.auto_negotiation
+        or before.configured_speed_bps != update.negotiation.speed_bps
+        or before.configured_full_duplex != (update.negotiation.duplex == "full")
     )

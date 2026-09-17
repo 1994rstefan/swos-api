@@ -26,14 +26,19 @@ are hardware-validated; populated decoding is covered by UI-derived sanitized
 fixtures. See the repository's `docs/css106-2.19-read-coverage.md` for the exact
 field-level matrix and remaining validation limits.
 
-Guarded device-name, port-name, and SNMP contact/location writes are supported
-on the exact RB260GS firmware/build listed above. The adapter revalidates device
-identity, reads current state, skips no-op changes, sends one `text/plain` POST,
-and verifies the full relevant writable state through a fresh read. Device and
-port names are limited to 16 printable ASCII characters; SNMP contact and
-location are limited to 64. The sparse device-name body contains only `id`.
-The complete SNMP body is ordered `en`, `com`, `ci`, `loc` and preserves the raw
-enabled and community fields.
+Guarded device-name, port-name, Ethernet port-configuration, and SNMP
+contact/location writes are supported on the exact RB260GS firmware/build listed
+above. The adapter revalidates device identity, reads current state, skips no-op
+changes, sends one `text/plain` POST, and verifies the full relevant writable
+state through a fresh read. Device and port names are limited to 16 printable
+ASCII characters; SNMP contact and location are limited to 64. Port writes are
+restricted to ports 1-5 and never modify the port-6 SFP management path. Active
+ports cannot be disabled or have negotiation changed. Auto negotiation preserves
+the dormant forced speed/duplex fields; forced mode supports 10/100 Mbps and
+full/half duplex. The complete `/link.b` body contains only `en`, `nm`, `an`,
+`spdc`, `dpxc`, and `fct`, preserving every unrelated value. The sparse
+device-name body contains only `id`. The complete SNMP body is ordered `en`,
+`com`, `ci`, `loc` and preserves the raw enabled and community fields.
 
 SwOS does not expose a revision token or compare-and-swap operation. Avoid
 concurrent web-UI or API edits while a write is running. `/link.b` and
