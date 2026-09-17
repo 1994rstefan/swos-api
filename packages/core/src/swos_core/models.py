@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from enum import StrEnum
 from typing import Generic, Self, TypeVar
 
 from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, SecretStr, model_validator
@@ -93,6 +94,80 @@ class PortStatistics(BaseModel):
     tx_packets: int = Field(ge=0)
     rx_errors: int = Field(ge=0)
     tx_errors: int = Field(ge=0)
+
+
+class VlanMode(StrEnum):
+    """Ingress VLAN enforcement for a switch port."""
+
+    DISABLED = "disabled"
+    OPTIONAL = "optional"
+    ENABLED = "enabled"
+    STRICT = "strict"
+
+
+class VlanReceiveMode(StrEnum):
+    """Accepted VLAN frame types for a switch port."""
+
+    ANY = "any"
+    TAGGED_ONLY = "tagged_only"
+    UNTAGGED_ONLY = "untagged_only"
+
+
+class VlanEgressMode(StrEnum):
+    """VLAN header handling applied when a frame leaves a port."""
+
+    PRESERVE = "preserve"
+    STRIP = "strip"
+    ADD_IF_MISSING = "add_if_missing"
+
+
+class VlanMembershipMode(StrEnum):
+    """Per-port egress behavior in a VLAN table entry."""
+
+    PRESERVE = "preserve"
+    STRIP = "strip"
+    ADD_IF_MISSING = "add_if_missing"
+    NOT_MEMBER = "not_member"
+
+
+class PortVlanInfo(BaseModel):
+    """Device-independent VLAN policy for one switch port."""
+
+    model_config = ConfigDict(frozen=True)
+
+    number: int = Field(ge=1)
+    mode: VlanMode
+    receive: VlanReceiveMode
+    default_vlan_id: int = Field(ge=1, le=4095)
+    force_vlan_id: bool
+    egress: VlanEgressMode
+
+
+class VlanPortMembership(BaseModel):
+    """Port membership and egress behavior in one VLAN table entry."""
+
+    model_config = ConfigDict(frozen=True)
+
+    port_number: int = Field(ge=1)
+    mode: VlanMembershipMode
+
+
+class VlanInfo(BaseModel):
+    """Device-independent configured VLAN table entry."""
+
+    model_config = ConfigDict(frozen=True)
+
+    vlan_id: int = Field(ge=1, le=4095)
+    independent_learning: bool
+    igmp_snooping: bool
+    ports: tuple[VlanPortMembership, ...]
+
+    @model_validator(mode="after")
+    def validate_unique_ports(self) -> Self:
+        port_numbers = [port.port_number for port in self.ports]
+        if len(port_numbers) != len(set(port_numbers)):
+            raise ValueError("VLAN entries cannot contain duplicate ports")
+        return self
 
 
 ResultValue = TypeVar("ResultValue")

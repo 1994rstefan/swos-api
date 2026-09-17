@@ -10,7 +10,9 @@ from swos_core.models import (
     DeviceIdentity,
     PortInfo,
     PortStatistics,
+    PortVlanInfo,
     SystemInfo,
+    VlanInfo,
 )
 from swos_core.safety import FirmwareSafetyPolicy, SafetyWarning, enforce_firmware_policy
 
@@ -42,6 +44,16 @@ class DeviceAdapter(Protocol):
 
     def get_port_statistics(self) -> tuple[PortStatistics, ...]:
         """Read normalized cumulative port counters from the device."""
+
+        ...
+
+    def get_port_vlans(self) -> tuple[PortVlanInfo, ...]:
+        """Read normalized VLAN policy for every port."""
+
+        ...
+
+    def get_vlans(self) -> tuple[VlanInfo, ...]:
+        """Read normalized configured VLAN table entries."""
 
         ...
 
@@ -103,6 +115,22 @@ class SwOSDevice:
         if not self.capabilities.supports("port_statistics"):
             raise UnsupportedFeatureError("port_statistics")
         return self._adapter.get_port_statistics()
+
+    def get_port_vlans(self) -> tuple[PortVlanInfo, ...]:
+        """Read per-port VLAN policy after enforcing read safety."""
+
+        self._authorize(write=False)
+        if not self.capabilities.supports("vlan"):
+            raise UnsupportedFeatureError("vlan")
+        return self._adapter.get_port_vlans()
+
+    def get_vlans(self) -> tuple[VlanInfo, ...]:
+        """Read VLAN table entries after enforcing read safety."""
+
+        self._authorize(write=False)
+        if not self.capabilities.supports("vlan"):
+            raise UnsupportedFeatureError("vlan")
+        return self._adapter.get_vlans()
 
     def _authorize(self, *, write: bool) -> tuple[SafetyWarning, ...]:
         return enforce_firmware_policy(

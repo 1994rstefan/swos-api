@@ -6,6 +6,9 @@ from swos_core.models import (
     DeviceIdentity,
     PortInfo,
     PortStatistics,
+    PortVlanInfo,
+    VlanInfo,
+    VlanPortMembership,
 )
 
 
@@ -74,4 +77,37 @@ def test_port_statistics_reject_negative_counters() -> None:
             tx_packets=0,
             rx_errors=0,
             tx_errors=0,
+        )
+
+
+def test_vlan_models_validate_values_and_unique_ports() -> None:
+    port = PortVlanInfo(
+        number=1,
+        mode="strict",
+        receive="tagged_only",
+        default_vlan_id=10,
+        force_vlan_id=True,
+        egress="preserve",
+    )
+
+    assert port.mode.value == "strict"
+    with pytest.raises(ValidationError):
+        PortVlanInfo(
+            number=1,
+            mode="strict",
+            receive="tagged_only",
+            default_vlan_id=4096,
+            force_vlan_id=True,
+            egress="preserve",
+        )
+
+    with pytest.raises(ValidationError, match="duplicate ports"):
+        VlanInfo(
+            vlan_id=10,
+            independent_learning=True,
+            igmp_snooping=False,
+            ports=(
+                VlanPortMembership(port_number=1, mode="strip"),
+                VlanPortMembership(port_number=1, mode="not_member"),
+            ),
         )

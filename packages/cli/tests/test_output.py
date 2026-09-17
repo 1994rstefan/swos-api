@@ -2,7 +2,15 @@ import json
 from importlib import import_module
 
 from swos_cli import __version__
-from swos_core.models import DeviceIdentity, PortInfo, PortStatistics, SystemInfo
+from swos_core.models import (
+    DeviceIdentity,
+    PortInfo,
+    PortStatistics,
+    PortVlanInfo,
+    SystemInfo,
+    VlanInfo,
+    VlanPortMembership,
+)
 from swos_core.safety import SafetyWarning
 from typer.testing import CliRunner
 
@@ -63,6 +71,31 @@ class FakeDevice:
                 tx_packets=34,
                 rx_errors=0,
                 tx_errors=1,
+            ),
+        )
+
+    def get_port_vlans(self) -> tuple[PortVlanInfo, ...]:
+        return (
+            PortVlanInfo(
+                number=1,
+                mode="strict",
+                receive="tagged_only",
+                default_vlan_id=10,
+                force_vlan_id=True,
+                egress="preserve",
+            ),
+        )
+
+    def get_vlans(self) -> tuple[VlanInfo, ...]:
+        return (
+            VlanInfo(
+                vlan_id=10,
+                independent_learning=True,
+                igmp_snooping=False,
+                ports=(
+                    VlanPortMembership(port_number=1, mode="strip"),
+                    VlanPortMembership(port_number=2, mode="not_member"),
+                ),
             ),
         )
 
@@ -369,3 +402,39 @@ def test_port_stats_human_and_json_output(monkeypatch) -> None:  # type: ignore[
     assert "1234" in human.stdout
     assert machine.exit_code == 0
     assert json.loads(machine.stdout)["data"]["ports"][0]["tx_errors"] == 1
+
+
+def test_vlan_ports_human_and_json_output(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    mock_registry(monkeypatch)
+
+    human = runner.invoke(app, ["vlan", "ports", "--url", "http://192.0.2.1"])
+    machine = runner.invoke(
+        app,
+        ["vlan", "ports", "--url", "http://192.0.2.1", "-ojson"],
+    )
+
+    assert human.exit_code == 0
+    assert "DEFAULT VLAN" in human.stdout
+    assert "tagged only" in human.stdout
+    assert machine.exit_code == 0
+    port = json.loads(machine.stdout)["data"]["ports"][0]
+    assert port["mode"] == "strict"
+    assert port["force_vlan_id"] is True
+
+
+def test_vlan_list_human_and_json_output(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    mock_registry(monkeypatch)
+
+    human = runner.invoke(app, ["vlan", "list", "--url", "http://192.0.2.1"])
+    machine = runner.invoke(
+        app,
+        ["vlan", "list", "--url", "http://192.0.2.1", "-ojson"],
+    )
+
+    assert human.exit_code == 0
+    assert "IGMP SNOOPING" in human.stdout
+    assert "1=strip" in human.stdout
+    assert machine.exit_code == 0
+    vlan = json.loads(machine.stdout)["data"]["vlans"][0]
+    assert vlan["vlan_id"] == 10
+    assert vlan["ports"][1]["mode"] == "not_member"

@@ -2,14 +2,27 @@
 
 from __future__ import annotations
 
+from enum import StrEnum
 from ipaddress import IPv4Address
 from string import hexdigits
-from typing import NoReturn, TypeAlias
+from typing import NoReturn, TypeAlias, TypeVar
 from unicodedata import category
 
 from pydantic import ValidationError
 from swos_core.errors import ProtocolError
-from swos_core.models import DeviceIdentity, PortInfo, PortStatistics, SystemInfo
+from swos_core.models import (
+    DeviceIdentity,
+    PortInfo,
+    PortStatistics,
+    PortVlanInfo,
+    SystemInfo,
+    VlanEgressMode,
+    VlanInfo,
+    VlanMembershipMode,
+    VlanMode,
+    VlanPortMembership,
+    VlanReceiveMode,
+)
 
 SwOSValue: TypeAlias = int | str | list["SwOSValue"] | dict[str, "SwOSValue"] | None
 
@@ -26,20 +39,26 @@ MAX_PAYLOAD_BYTES = 1024 * 1024
 MAX_NESTING_DEPTH = 64
 MAX_NUMBER_DIGITS = 32
 UPTIME_TICKS_PER_SECOND = 100
+MAX_VLAN_ENTRIES = 250
+
+EnumValue = TypeVar("EnumValue", bound=StrEnum)
 
 
 def parse_payload(payload: bytes) -> dict[str, SwOSValue]:
     """Parse a CSS106 response without executing device-provided text."""
 
-    if len(payload) > MAX_PAYLOAD_BYTES:
-        raise ProtocolError("CSS106 response exceeds the 1 MiB safety limit")
-    try:
-        text = payload.decode("ascii")
-    except UnicodeDecodeError as exc:
-        raise ProtocolError("CSS106 response is not ASCII") from exc
-    value = _Parser(text).parse()
+    value = _parse_value(payload)
     if not isinstance(value, dict):
         raise ProtocolError("CSS106 response must contain an object")
+    return value
+
+
+def parse_table_payload(payload: bytes) -> list[SwOSValue]:
+    """Parse a CSS106 table response without executing device-provided text."""
+
+    value = _parse_value(payload)
+    if not isinstance(value, list):
+        raise ProtocolError("CSS106 table response must contain an array")
     return value
 
 
@@ -164,6 +183,85 @@ def port_statistics_from_payload(
     )
 
 
+def port_vlans_from_forwarding_payload(
+    data: dict[str, SwOSValue], identity: DeviceIdentity
+) -> tuple[PortVlanInfo, ...]:
+    """Normalize per-port VLAN policy from the CSS106 forwarding endpoint."""
+
+    try:
+        port_count = PORT_COUNTS[identity.product_code]
+    except KeyError as exc:
+        raise ProtocolError(f"Unknown CSS106 product {identity.product_code!r}") from exc
+
+    modes = _enum_values(data, "vlan", port_count, VlanMode)
+    receive_modes = _enum_values(data, "vlni", port_count, VlanReceiveMode)
+    default_vlan_ids = _bounded_integer_values(data, "dvid", port_count, minimum=1, maximum=4095)
+    force_vlan_ids = _bit_values(data, "fvid", port_count)
+    egress_modes = _enum_values(data, "vlnh", port_count, VlanEgressMode)
+
+    try:
+        return tuple(
+            PortVlanInfo(
+                number=index + 1,
+                mode=modes[index],
+                receive=receive_modes[index],
+                default_vlan_id=default_vlan_ids[index],
+                force_vlan_id=force_vlan_ids[index],
+                egress=egress_modes[index],
+            )
+            for index in range(port_count)
+        )
+    except ValidationError as exc:
+        raise ProtocolError("CSS106 port VLAN response contains invalid values") from exc
+
+
+def vlans_from_payload(rows: list[SwOSValue], identity: DeviceIdentity) -> tuple[VlanInfo, ...]:
+    """Normalize the configured CSS106 VLAN table."""
+
+    try:
+        port_count = PORT_COUNTS[identity.product_code]
+    except KeyError as exc:
+        raise ProtocolError(f"Unknown CSS106 product {identity.product_code!r}") from exc
+    if len(rows) > MAX_VLAN_ENTRIES:
+        raise ProtocolError(f"CSS106 VLAN table exceeds {MAX_VLAN_ENTRIES} entries")
+
+    vlans: list[VlanInfo] = []
+    seen_vlan_ids: set[int] = set()
+    for row_index, row in enumerate(rows):
+        if not isinstance(row, dict):
+            raise ProtocolError(f"CSS106 VLAN row {row_index} must be an object")
+        vlan_id = _bounded_integer(row, "vid", minimum=1, maximum=4095)
+        if vlan_id in seen_vlan_ids:
+            raise ProtocolError(f"CSS106 VLAN table contains duplicate VLAN ID {vlan_id}")
+        seen_vlan_ids.add(vlan_id)
+        port_modes = _enum_values(row, "prt", port_count, VlanMembershipMode)
+        try:
+            vlans.append(
+                VlanInfo(
+                    vlan_id=vlan_id,
+                    independent_learning=_boolean(row, "ivl"),
+                    igmp_snooping=_boolean(row, "igmp"),
+                    ports=tuple(
+                        VlanPortMembership(port_number=index + 1, mode=port_modes[index])
+                        for index in range(port_count)
+                    ),
+                )
+            )
+        except ValidationError as exc:
+            raise ProtocolError(f"CSS106 VLAN row {row_index} contains invalid values") from exc
+    return tuple(sorted(vlans, key=lambda vlan: vlan.vlan_id))
+
+
+def _parse_value(payload: bytes) -> SwOSValue:
+    if len(payload) > MAX_PAYLOAD_BYTES:
+        raise ProtocolError("CSS106 response exceeds the 1 MiB safety limit")
+    try:
+        text = payload.decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise ProtocolError("CSS106 response is not ASCII") from exc
+    return _Parser(text).parse()
+
+
 def _integer(data: dict[str, SwOSValue], field: str) -> int:
     value = data.get(field)
     if not isinstance(value, int):
@@ -192,6 +290,55 @@ def _bit_values(data: dict[str, SwOSValue], field: str, count: int) -> tuple[boo
     if value < 0 or value >> count:
         raise ProtocolError(f"CSS106 field {field!r} exceeds the {count}-port bitmask")
     return tuple(bool(value & (1 << index)) for index in range(count))
+
+
+def _bounded_integer(data: dict[str, SwOSValue], field: str, *, minimum: int, maximum: int) -> int:
+    value = _integer(data, field)
+    if not minimum <= value <= maximum:
+        raise ProtocolError(f"CSS106 field {field!r} must be between {minimum} and {maximum}")
+    return value
+
+
+def _bounded_integer_values(
+    data: dict[str, SwOSValue],
+    field: str,
+    count: int,
+    *,
+    minimum: int,
+    maximum: int,
+) -> tuple[int, ...]:
+    raw_values = _array(data, field, count)
+    values: list[int] = []
+    for index, value in enumerate(raw_values):
+        if not isinstance(value, int) or not minimum <= value <= maximum:
+            raise ProtocolError(
+                f"CSS106 field '{field}[{index}]' must be between {minimum} and {maximum}"
+            )
+        values.append(value)
+    return tuple(values)
+
+
+def _enum_values(
+    data: dict[str, SwOSValue],
+    field: str,
+    count: int,
+    enum_type: type[EnumValue],
+) -> tuple[EnumValue, ...]:
+    raw_values = _array(data, field, count)
+    choices = tuple(enum_type)
+    values: list[EnumValue] = []
+    for index, value in enumerate(raw_values):
+        if not isinstance(value, int) or not 0 <= value < len(choices):
+            raise ProtocolError(f"CSS106 field '{field}[{index}]' has unknown value {value!r}")
+        values.append(choices[value])
+    return tuple(values)
+
+
+def _boolean(data: dict[str, SwOSValue], field: str) -> bool:
+    value = _integer(data, field)
+    if value not in (0, 1):
+        raise ProtocolError(f"CSS106 field {field!r} must be 0 or 1")
+    return bool(value)
 
 
 def _uint32_values(data: dict[str, SwOSValue], field: str, count: int) -> tuple[int, ...]:

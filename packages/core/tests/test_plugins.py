@@ -16,7 +16,10 @@ from swos_core.models import (
     DeviceIdentity,
     PortInfo,
     PortStatistics,
+    PortVlanInfo,
     SystemInfo,
+    VlanInfo,
+    VlanPortMembership,
 )
 from swos_core.plugins import PluginRegistry, SupportRecord
 from swos_core.safety import FirmwareSafetyPolicy
@@ -62,7 +65,9 @@ class FakeAdapter:
 
     @property
     def capabilities(self) -> DeviceCapabilities:
-        return DeviceCapabilities(features=frozenset({"port_statistics", "ports", "system"}))
+        return DeviceCapabilities(
+            features=frozenset({"port_statistics", "ports", "system", "vlan"})
+        )
 
     def get_system_info(self) -> SystemInfo:
         return SystemInfo(identity=self.identity, name="test", uptime_seconds=1)
@@ -91,6 +96,28 @@ class FakeAdapter:
                 tx_packets=4,
                 rx_errors=0,
                 tx_errors=0,
+            ),
+        )
+
+    def get_port_vlans(self) -> tuple[PortVlanInfo, ...]:
+        return (
+            PortVlanInfo(
+                number=1,
+                mode="strict",
+                receive="tagged_only",
+                default_vlan_id=10,
+                force_vlan_id=True,
+                egress="preserve",
+            ),
+        )
+
+    def get_vlans(self) -> tuple[VlanInfo, ...]:
+        return (
+            VlanInfo(
+                vlan_id=10,
+                independent_learning=True,
+                igmp_snooping=False,
+                ports=(VlanPortMembership(port_number=1, mode="strip"),),
             ),
         )
 
@@ -155,6 +182,8 @@ def test_policy_bound_device_rechecks_read_permission() -> None:
     assert device.get_system_info().name == "test"
     assert device.get_ports()[0].name == "Port1"
     assert device.get_port_statistics()[0].tx_bytes == 2
+    assert device.get_port_vlans()[0].default_vlan_id == 10
+    assert device.get_vlans()[0].vlan_id == 10
     assert device.warnings[0].code == "untested_firmware"
     with pytest.raises(UnsupportedFirmwareError):
         device._authorize(write=True)
@@ -189,6 +218,10 @@ def test_policy_bound_device_rejects_unsupported_feature() -> None:
     with pytest.raises(UnsupportedFeatureError, match="port statistics") as error:
         device.get_port_statistics()
     assert error.value.feature == "port_statistics"
+    with pytest.raises(UnsupportedFeatureError, match="vlan"):
+        device.get_port_vlans()
+    with pytest.raises(UnsupportedFeatureError, match="vlan"):
+        device.get_vlans()
 
 
 def test_registry_reports_missing_plugin() -> None:

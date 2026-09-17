@@ -9,17 +9,23 @@ from swos_device_css106 import CSS106Plugin, plugin
 from swos_device_css106.protocol import (
     MAX_NESTING_DEPTH,
     MAX_PAYLOAD_BYTES,
+    MAX_VLAN_ENTRIES,
     UPTIME_TICKS_PER_SECOND,
     identity_from_system,
     parse_payload,
+    parse_table_payload,
     port_statistics_from_payload,
+    port_vlans_from_forwarding_payload,
     ports_from_link_payload,
     system_info_from_payload,
+    vlans_from_payload,
 )
 
 FIXTURE = Path(__file__).parent / "fixtures" / "sys.b"
 LINK_FIXTURE = Path(__file__).parent / "fixtures" / "link.b"
 STATS_FIXTURE = Path(__file__).parent / "fixtures" / "stats.b"
+FORWARDING_FIXTURE = Path(__file__).parent / "fixtures" / "fwd.b"
+VLAN_FIXTURE = Path(__file__).parent / "fixtures" / "vlan.b"
 
 
 class FakeTransport:
@@ -55,6 +61,14 @@ def link_fixture_payload() -> bytes:
 
 def stats_fixture_payload() -> bytes:
     return STATS_FIXTURE.read_bytes()
+
+
+def forwarding_fixture_payload() -> bytes:
+    return FORWARDING_FIXTURE.read_bytes()
+
+
+def vlan_fixture_payload() -> bytes:
+    return VLAN_FIXTURE.read_bytes()
 
 
 def test_plugin_declares_exact_hardware_validated_support() -> None:
@@ -208,6 +222,114 @@ def test_port_statistics_reject_invalid_counter_arrays() -> None:
         port_statistics_from_payload(data, identity)
 
 
+def test_adapter_normalizes_port_vlan_policy() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    transport = FakeTransport(forwarding_fixture_payload())
+    tested_plugin = CSS106Plugin(transport_factory=lambda connection: transport)  # type: ignore[arg-type]
+    adapter = tested_plugin.create(
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=tested_plugin.support_records()[0],
+    )
+
+    ports = adapter.get_port_vlans()
+
+    assert len(ports) == 6
+    assert ports[0].mode.value == "optional"
+    assert ports[0].receive.value == "any"
+    assert ports[0].default_vlan_id == 1
+    assert not ports[0].force_vlan_id
+    assert ports[0].egress.value == "preserve"
+    assert transport.requests == [("GET", "/fwd.b")]
+
+
+def test_port_vlan_parser_handles_all_supported_modes() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    data = parse_payload(forwarding_fixture_payload())
+    data["vlan"] = [0, 1, 2, 3, 0, 1]
+    data["vlni"] = [0, 1, 2, 0, 1, 2]
+    data["vlnh"] = [0, 1, 2, 0, 1, 2]
+    data["fvid"] = 0x25
+
+    ports = port_vlans_from_forwarding_payload(data, identity)
+
+    assert [port.mode.value for port in ports] == [
+        "disabled",
+        "optional",
+        "enabled",
+        "strict",
+        "disabled",
+        "optional",
+    ]
+    assert [port.receive.value for port in ports] == [
+        "any",
+        "tagged_only",
+        "untagged_only",
+        "any",
+        "tagged_only",
+        "untagged_only",
+    ]
+    assert [port.egress.value for port in ports] == [
+        "preserve",
+        "strip",
+        "add_if_missing",
+        "preserve",
+        "strip",
+        "add_if_missing",
+    ]
+    assert [port.force_vlan_id for port in ports] == [True, False, True, False, False, True]
+
+
+def test_adapter_normalizes_vlan_table() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    transport = FakeTransport(vlan_fixture_payload())
+    tested_plugin = CSS106Plugin(transport_factory=lambda connection: transport)  # type: ignore[arg-type]
+    adapter = tested_plugin.create(
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=tested_plugin.support_records()[0],
+    )
+
+    vlans = adapter.get_vlans()
+
+    assert [vlan.vlan_id for vlan in vlans] == [10, 20]
+    assert vlans[0].igmp_snooping
+    assert vlans[0].ports[0].mode.value == "strip"
+    assert vlans[0].ports[5].mode.value == "add_if_missing"
+    assert vlans[1].independent_learning
+    assert {port.mode.value for port in vlans[1].ports} == {
+        "preserve",
+        "strip",
+        "add_if_missing",
+        "not_member",
+    }
+    assert transport.requests == [("GET", "/vlan.b")]
+
+
+def test_vlan_decoders_reject_invalid_values() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+
+    forwarding = parse_payload(forwarding_fixture_payload())
+    forwarding["vlan"] = [0, 1, 2, 3, 4, 0]
+    with pytest.raises(ProtocolError, match="unknown value 4"):
+        port_vlans_from_forwarding_payload(forwarding, identity)
+
+    rows = parse_table_payload(vlan_fixture_payload())
+    assert isinstance(rows[0], dict)
+    rows.append(rows[0].copy())
+    with pytest.raises(ProtocolError, match="duplicate VLAN ID"):
+        vlans_from_payload(rows, identity)
+
+    with pytest.raises(ProtocolError, match=f"exceeds {MAX_VLAN_ENTRIES}"):
+        vlans_from_payload([{}] * (MAX_VLAN_ENTRIES + 1), identity)
+
+
 def test_parser_handles_nested_values_without_eval() -> None:
     parsed = parse_payload(b"{rows:[{value:0x2a,missing:x}],label:'safe'}")
 
@@ -224,6 +346,12 @@ def test_parser_handles_empty_containers_negative_numbers_and_escapes() -> None:
         "hex": -10,
         "label": "line\nquoted'",
     }
+
+
+def test_table_parser_accepts_array_root_and_rejects_object_root() -> None:
+    assert parse_table_payload(b"[]") == []
+    with pytest.raises(ProtocolError, match="must contain an array"):
+        parse_table_payload(b"{}")
 
 
 @pytest.mark.parametrize(

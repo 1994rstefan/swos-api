@@ -11,7 +11,14 @@ from swos_core.models import (
     OperationResult,
     PortInfo,
     PortStatistics,
+    PortVlanInfo,
     SystemInfo,
+    VlanEgressMode,
+    VlanInfo,
+    VlanMembershipMode,
+    VlanMode,
+    VlanPortMembership,
+    VlanReceiveMode,
 )
 from swos_core.plugins import DevicePlugin, PluginRegistry, SupportRecord
 from swos_core.safety import FirmwareSafetyPolicy, SafetyWarning
@@ -33,10 +40,17 @@ __all__ = [
     "PluginRegistry",
     "PortInfo",
     "PortStatistics",
+    "PortVlanInfo",
     "SafetyWarning",
     "SupportRecord",
     "SwOSDevice",
     "SystemInfo",
     "UnsupportedFeatureError",
+    "VlanEgressMode",
+    "VlanInfo",
+    "VlanMembershipMode",
+    "VlanMode",
+    "VlanPortMembership",
+    "VlanReceiveMode",
     "__version__",
 ]
