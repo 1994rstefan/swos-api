@@ -12,7 +12,13 @@ from typing import Annotated, Any
 import typer
 import typer._click as click
 from dotenv import dotenv_values
-from swos_core import DeviceConnection, PluginRegistry, SwOSDevice
+from swos_core import (
+    DeviceConnection,
+    PacketSizeStatistics,
+    PluginRegistry,
+    PortErrorStatistics,
+    SwOSDevice,
+)
 from swos_core.errors import SwOSError
 from swos_core.safety import FirmwareSafetyPolicy
 from typer.core import TyperGroup, TyperOption
@@ -142,6 +148,14 @@ snmp_app = typer.Typer(help="Read SNMP configuration.", no_args_is_help=True)
 app.add_typer(snmp_app, name="snmp")
 vlan_app = typer.Typer(help="Read VLAN configuration.", no_args_is_help=True)
 app.add_typer(vlan_app, name="vlan")
+sfp_app = typer.Typer(help="Read SFP identity and diagnostics.", no_args_is_help=True)
+app.add_typer(sfp_app, name="sfp")
+forwarding_app = typer.Typer(help="Read forwarding policy.", no_args_is_help=True)
+app.add_typer(forwarding_app, name="forwarding")
+igmp_app = typer.Typer(help="Read dynamic IGMP groups.", no_args_is_help=True)
+app.add_typer(igmp_app, name="igmp")
+acl_app = typer.Typer(help="Read access-control rules.", no_args_is_help=True)
+app.add_typer(acl_app, name="acl")
 
 
 @app.callback(invoke_without_command=True)
@@ -282,6 +296,46 @@ def system_show(ctx: typer.Context) -> None:
         details.append(f"Current IP: {info.current_ip}")
     if info.static_ip is not None:
         details.append(f"Static IP: {info.static_ip}")
+    if info.management is not None:
+        management = info.management
+        details.extend(
+            [
+                f"Address Mode: {management.address_mode.value.replace('_', ' ')}",
+                f"Admin MAC: {management.admin_mac_address or '-'}",
+                f"Allow From: {_network(management.allow_from, management.allow_prefix_length)}",
+                f"Allowed Ports: {_ports(management.allowed_port_numbers)}",
+                f"Allowed VLAN: {management.allowed_vlan_id or '-'}",
+                f"Watchdog: {_yes_no(management.watchdog_enabled)}",
+            ]
+        )
+    if info.independent_vlan_lookup is not None:
+        details.append(f"Independent VLAN Lookup: {_yes_no(info.independent_vlan_lookup)}")
+    if info.igmp is not None:
+        details.extend(
+            [
+                f"IGMP Snooping: {_yes_no(info.igmp.enabled)}",
+                f"IGMP Querier Configured: {_yes_no(info.igmp.querier_configured)}",
+                f"IGMP Querier Effective: {_yes_no(info.igmp.querier_effective)}",
+                f"IGMP Version: {info.igmp.version.value}",
+                f"IGMP Fast Leave Ports: {_ports(info.igmp.fast_leave_port_numbers)}",
+            ]
+        )
+    details.append(f"Discovery Protocol Ports: {_ports(info.discovery_protocol_port_numbers)}")
+    if info.health is not None:
+        voltage = info.health.input_voltage_volts
+        temperature = info.health.temperature_celsius
+        details.extend(
+            [
+                f"Input Voltage: {f'{voltage:g} V' if voltage is not None else '-'}",
+                f"Temperature: {f'{temperature} C' if temperature is not None else '-'}",
+                "PoE-in Long Cable: "
+                + (
+                    _yes_no(info.health.poe_in_long_cable)
+                    if info.health.poe_in_long_cable is not None
+                    else "-"
+                ),
+            ]
+        )
     details.extend(f"Warning: {warning.message}" for warning in connected_device.warnings)
     renderer.success(data, human="\n".join(details))
 
@@ -309,22 +363,35 @@ def port_list(ctx: typer.Context) -> None:
         data["warnings"] = [
             warning.model_dump(mode="json") for warning in connected_device.warnings
         ]
-    lines = ["PORT  NAME   ENABLED  LINK  SPEED      DUPLEX  AUTONEG  FLOW-CONTROL"]
+    lines = ["PORT  NAME   ENABLED  LINK  SPEED      DUPLEX  AUTONEG  CONFIG       FLOW-CONTROL"]
     for port in ports:
         speed = f"{port.speed_mbps} Mbps" if port.speed_mbps is not None else "-"
         duplex = "full" if port.full_duplex else "half" if port.full_duplex is not None else "-"
+        configured = (
+            f"{port.configured_speed_mbps}/{'full' if port.configured_full_duplex else 'half'}"
+        )
         lines.append(
             f"{port.number:<5} {port.name:<6} {_yes_no(port.enabled):<8} "
             f"{'up' if port.link_up else 'down':<5} {speed:<10} {duplex:<7} "
-            f"{_yes_no(port.auto_negotiation):<8} {_yes_no(port.flow_control)}"
+            f"{_yes_no(port.auto_negotiation):<8} {configured:<12} "
+            f"{_yes_no(port.flow_control)}"
         )
     lines.extend(f"Warning: {warning.message}" for warning in connected_device.warnings)
     renderer.success(data, human="\n".join(lines))
 
 
 @port_app.command("stats")
-def port_stats(ctx: typer.Context) -> None:
-    """List cumulative traffic and error counters for every port."""
+def port_stats(
+    ctx: typer.Context,
+    errors: Annotated[bool, typer.Option("--errors", help="Include detailed errors.")] = False,
+    rates: Annotated[bool, typer.Option("--rates", help="Include current rates.")] = False,
+    traffic: Annotated[
+        bool, typer.Option("--traffic", help="Include unicast/broadcast/multicast counters.")
+    ] = False,
+    sizes: Annotated[bool, typer.Option("--sizes", help="Include packet-size counters.")] = False,
+    full: Annotated[bool, typer.Option("--full", help="Include all statistic groups.")] = False,
+) -> None:
+    """List traffic, rate, size, and error counters for every port."""
 
     cli_context: CliContext = ctx.ensure_object(CliContext)
     renderer = OutputRenderer(cli_context.configuration.settings.output)
@@ -338,9 +405,24 @@ def port_stats(ctx: typer.Context) -> None:
         renderer.error(_error_code(exc), str(exc))
         raise typer.Exit(code=1) from exc
 
-    data: dict[str, Any] = {
-        "ports": [port.model_dump(mode="json") for port in statistics],
-    }
+    errors = errors or full
+    rates = rates or full
+    traffic = traffic or full
+    sizes = sizes or full
+    serialized_ports: list[dict[str, Any]] = []
+    for port in statistics:
+        serialized = port.model_dump(mode="json")
+        if not errors:
+            serialized.pop("detailed_errors")
+        if not rates:
+            serialized.pop("rates")
+        if not traffic:
+            serialized.pop("traffic")
+        if not sizes:
+            serialized.pop("rx_sizes")
+            serialized.pop("tx_sizes")
+        serialized_ports.append(serialized)
+    data: dict[str, Any] = {"ports": serialized_ports}
     if connected_device.warnings:
         data["warnings"] = [
             warning.model_dump(mode="json") for warning in connected_device.warnings
@@ -352,8 +434,201 @@ def port_stats(ctx: typer.Context) -> None:
             f"{port.rx_packets:<11} {port.tx_packets:<11} "
             f"{port.rx_errors:<10} {port.tx_errors}"
         )
+    if errors or rates or traffic or sizes:
+        for port in statistics:
+            lines.extend(["", f"Port {port.number}"])
+            if rates:
+                lines.append(
+                    "  Rates: "
+                    f"RX {port.rates.rx_bits_per_second:g} bps / "
+                    f"{port.rates.rx_packets_per_second:g} pps, "
+                    f"TX {port.rates.tx_bits_per_second:g} bps / "
+                    f"{port.rates.tx_packets_per_second:g} pps"
+                )
+            if traffic:
+                value = port.traffic
+                lines.append(
+                    "  Traffic: "
+                    f"RX unicast={value.rx_unicast_packets}, "
+                    f"broadcast={value.rx_broadcast_packets}, "
+                    f"multicast={value.rx_multicast_packets}; "
+                    f"TX unicast={value.tx_unicast_packets}, "
+                    f"broadcast={value.tx_broadcast_packets}, "
+                    f"multicast={value.tx_multicast_packets}"
+                )
+            if sizes:
+                lines.append(f"  RX sizes: {_packet_sizes(port.rx_sizes)}")
+                lines.append(f"  TX sizes: {_packet_sizes(port.tx_sizes)}")
+            if errors:
+                lines.extend(_error_counter_lines(port.detailed_errors))
     lines.extend(f"Warning: {warning.message}" for warning in connected_device.warnings)
     renderer.success(data, human="\n".join(lines))
+
+
+@sfp_app.command("show")
+def sfp_show(ctx: typer.Context) -> None:
+    """Show SFP module identity and diagnostics."""
+
+    cli_context: CliContext = ctx.ensure_object(CliContext)
+    renderer = OutputRenderer(cli_context.configuration.settings.output)
+    try:
+        connected_device = _connect_device(cli_context)
+        info = connected_device.get_sfp()
+    except ConfigurationError as exc:
+        renderer.error("configuration_error", str(exc))
+        raise typer.Exit(code=2) from exc
+    except SwOSError as exc:
+        renderer.error(_error_code(exc), str(exc))
+        raise typer.Exit(code=1) from exc
+
+    data = info.model_dump(mode="json")
+    if connected_device.warnings:
+        data["warnings"] = [
+            warning.model_dump(mode="json") for warning in connected_device.warnings
+        ]
+    lines = [
+        f"Vendor: {info.vendor or '-'}",
+        f"Part Number: {info.part_number or '-'}",
+        f"Revision: {info.revision or '-'}",
+        f"Serial Number: {info.serial_number or '-'}",
+        f"Manufacturing Date: {info.manufacturing_date or '-'}",
+        f"Media Type: {info.media_type or '-'}",
+        f"Temperature: {_measurement(info.temperature_celsius, 'C')}",
+        f"Supply Voltage: {_measurement(info.supply_voltage_volts, 'V')}",
+        f"TX Bias: {_measurement(info.tx_bias_ma, 'mA')}",
+        f"TX Power: {_measurement(info.tx_power_dbm, 'dBm')}",
+        f"RX Power: {_measurement(info.rx_power_dbm, 'dBm')}",
+    ]
+    lines.extend(f"Warning: {warning.message}" for warning in connected_device.warnings)
+    renderer.success(data, human="\n".join(lines))
+
+
+@forwarding_app.command("show")
+def forwarding_show(ctx: typer.Context) -> None:
+    """Show forwarding, port-lock, mirror, and egress-rate policy."""
+
+    cli_context: CliContext = ctx.ensure_object(CliContext)
+    renderer = OutputRenderer(cli_context.configuration.settings.output)
+    try:
+        connected_device = _connect_device(cli_context)
+        info = connected_device.get_forwarding()
+    except ConfigurationError as exc:
+        renderer.error("configuration_error", str(exc))
+        raise typer.Exit(code=2) from exc
+    except SwOSError as exc:
+        renderer.error(_error_code(exc), str(exc))
+        raise typer.Exit(code=1) from exc
+
+    data = info.model_dump(mode="json")
+    if connected_device.warnings:
+        data["warnings"] = [
+            warning.model_dump(mode="json") for warning in connected_device.warnings
+        ]
+    lines = [
+        f"Mirror Target: {info.mirror_target_port or '-'}",
+        "",
+        "PORT  FORWARD TO   LOCK  LOCK FIRST  MIRROR RX  MIRROR TX  EGRESS LIMIT",
+    ]
+    for port in info.ports:
+        limit = f"{port.egress_rate_limit_bps} bps" if port.egress_rate_limit_bps else "unlimited"
+        lines.append(
+            f"{port.number:<5} {_ports(port.destination_port_numbers):<12} "
+            f"{_yes_no(port.lock):<5} {_yes_no(port.lock_on_first):<11} "
+            f"{_yes_no(port.mirror_ingress):<10} {_yes_no(port.mirror_egress):<10} {limit}"
+        )
+    lines.extend(f"Warning: {warning.message}" for warning in connected_device.warnings)
+    renderer.success(data, human="\n".join(lines))
+
+
+@igmp_app.command("list")
+def igmp_list(ctx: typer.Context) -> None:
+    """List dynamically learned multicast groups."""
+
+    cli_context: CliContext = ctx.ensure_object(CliContext)
+    renderer = OutputRenderer(cli_context.configuration.settings.output)
+    try:
+        connected_device = _connect_device(cli_context)
+        groups = connected_device.get_igmp_groups()
+    except ConfigurationError as exc:
+        renderer.error("configuration_error", str(exc))
+        raise typer.Exit(code=2) from exc
+    except SwOSError as exc:
+        renderer.error(_error_code(exc), str(exc))
+        raise typer.Exit(code=1) from exc
+
+    data: dict[str, Any] = {"groups": [group.model_dump(mode="json") for group in groups]}
+    if connected_device.warnings:
+        data["warnings"] = [
+            warning.model_dump(mode="json") for warning in connected_device.warnings
+        ]
+    lines = ["GROUP ADDRESS    VLAN  PORTS"]
+    lines.extend(
+        f"{group.address:<16} {group.vlan_id:<5} {_ports(group.port_numbers)}" for group in groups
+    )
+    lines.extend(f"Warning: {warning.message}" for warning in connected_device.warnings)
+    renderer.success(data, human="\n".join(lines))
+
+
+@acl_app.command("list")
+def acl_list(ctx: typer.Context) -> None:
+    """List ordered access-control rules."""
+
+    cli_context: CliContext = ctx.ensure_object(CliContext)
+    renderer = OutputRenderer(cli_context.configuration.settings.output)
+    try:
+        connected_device = _connect_device(cli_context)
+        rules = connected_device.get_acl_rules()
+    except ConfigurationError as exc:
+        renderer.error("configuration_error", str(exc))
+        raise typer.Exit(code=2) from exc
+    except SwOSError as exc:
+        renderer.error(_error_code(exc), str(exc))
+        raise typer.Exit(code=1) from exc
+
+    data: dict[str, Any] = {"rules": [rule.model_dump(mode="json") for rule in rules]}
+    if connected_device.warnings:
+        data["warnings"] = [
+            warning.model_dump(mode="json") for warning in connected_device.warnings
+        ]
+    lines: list[str] = []
+    for rule in rules:
+        actions = []
+        if rule.drop:
+            actions.append("drop")
+        elif rule.redirect_enabled:
+            actions.append(f"redirect={_ports(rule.redirect_port_numbers)}")
+        if rule.mirror:
+            actions.append("mirror")
+        if rule.ingress_rate_limit_bps is not None:
+            actions.append(f"rate={rule.ingress_rate_limit_bps} bps")
+        if rule.set_vlan_id is not None:
+            actions.append(f"set-vlan={rule.set_vlan_id}")
+        if rule.set_vlan_priority is not None:
+            actions.append(f"set-priority={rule.set_vlan_priority}")
+        lines.extend(
+            [
+                f"Rule {rule.number}",
+                f"  Ingress Ports: {_ports(rule.ingress_port_numbers)}",
+                f"  Source MAC: {rule.source_mac or '*'} / {rule.source_mac_mask}",
+                f"  Destination MAC: {rule.destination_mac or '*'} / {rule.destination_mac_mask}",
+                f"  EtherType: 0x{rule.ether_type:04x}",
+                f"  VLAN: {rule.vlan_tag.value.replace('_', ' ')}, "
+                f"IDs {rule.vlan_id_min}-{rule.vlan_id_max}, "
+                f"priority {rule.vlan_priority if rule.vlan_priority is not None else '*'}",
+                f"  Source: {_network(rule.source_ip, rule.source_prefix_length)} "
+                f"ports {rule.source_port_min}-{rule.source_port_max}",
+                f"  Destination: {_network(rule.destination_ip, rule.destination_prefix_length)} "
+                f"ports {rule.destination_port_min}-{rule.destination_port_max}",
+                f"  Protocol: {rule.protocol_number}, DSCP: "
+                f"{rule.dscp if rule.dscp is not None else '*'}",
+                f"  Actions: {', '.join(actions) or 'none'}",
+                "",
+            ]
+        )
+    if not rules:
+        lines.append("No ACL rules configured.")
+    lines.extend(f"Warning: {warning.message}" for warning in connected_device.warnings)
+    renderer.success(data, human="\n".join(lines).rstrip())
 
 
 @host_app.command("list")
@@ -418,12 +693,13 @@ def rstp_show(ctx: typer.Context) -> None:
         f"Forward Reserved Multicast: {_yes_no(info.forward_reserved_multicast)}",
         f"Root Bridge: 0x{info.root_bridge_priority:04x}.{info.root_bridge_mac}",
         "",
-        "PORT  ENABLED  PROTOCOL  ROLE        ROOT COST  TYPE            STATE",
+        "PORT  ENABLED  PROTOCOL  ROLE        CONFIG COST  ROOT COST  TYPE            STATE",
     ]
     for port in info.ports:
         lines.append(
             f"{port.number:<5} {_yes_no(port.enabled):<8} {port.protocol.value:<9} "
-            f"{port.role.value:<11} {port.root_path_cost:<10} "
+            f"{port.role.value:<11} {port.configured_path_cost:<12} "
+            f"{port.root_path_cost:<10} "
             f"{port.port_type.value.replace('_', ' '):<15} {port.state.value}"
         )
     lines.extend(f"Warning: {warning.message}" for warning in connected_device.warnings)
@@ -562,6 +838,47 @@ def _connect_device(cli_context: CliContext) -> SwOSDevice:
 
 def _yes_no(value: bool) -> str:
     return "yes" if value else "no"
+
+
+def _ports(port_numbers: tuple[int, ...]) -> str:
+    return ",".join(str(number) for number in port_numbers) or "-"
+
+
+def _network(address: str | None, prefix_length: int) -> str:
+    return f"{address}/{prefix_length}" if address is not None else "*"
+
+
+def _measurement(value: int | float | None, unit: str) -> str:
+    return f"{value:g} {unit}" if value is not None else "-"
+
+
+def _packet_sizes(value: PacketSizeStatistics) -> str:
+    return (
+        f"64={value.frames_64_bytes}, 65-127={value.frames_65_to_127_bytes}, "
+        f"128-255={value.frames_128_to_255_bytes}, "
+        f"256-511={value.frames_256_to_511_bytes}, "
+        f"512-1023={value.frames_512_to_1023_bytes}, "
+        f"1024-1518={value.frames_1024_to_1518_bytes}, "
+        f"1519-max={value.frames_1519_to_max_bytes}"
+    )
+
+
+def _error_counter_lines(value: PortErrorStatistics) -> list[str]:
+    return [
+        "  RX errors: "
+        f"pause={value.rx_pause_frames}, fcs={value.rx_fcs_errors}, "
+        f"alignment={value.rx_alignment_errors}, runts={value.rx_runts}, "
+        f"fragments={value.rx_fragments}, too-long={value.rx_too_long}, "
+        f"overflows={value.rx_overflows}",
+        "  TX errors: "
+        f"pause={value.tx_pause_frames}, underruns={value.tx_underruns}, "
+        f"too-long={value.tx_too_long}, collisions={value.tx_collisions}, "
+        f"excessive-collisions={value.tx_excessive_collisions}, "
+        f"multiple-collisions={value.tx_multiple_collisions}, "
+        f"single-collisions={value.tx_single_collisions}, "
+        f"excessive-deferred={value.tx_excessive_deferred}, "
+        f"deferred={value.tx_deferred}, late-collisions={value.tx_late_collisions}",
+    ]
 
 
 def _error_code(error: SwOSError) -> str:

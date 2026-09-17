@@ -39,9 +39,13 @@ and safe hardware validation where hardware is available. Model capabilities
 must be tested independently even when multiple products share a firmware
 image.
 
-The current `swos-device-css106` package supports read-only system information,
-port state, cumulative counters, per-port VLAN policy, configured VLAN table
-entries, static and dynamically learned hosts, RSTP bridge/port state, and SNMP
-configuration for RB260GS (`CSS106-5G-1S`) running SwOS `2.19`, build
-`0x6a181cd5`. RB260GSP is recognized as a separate product but remains
-unsupported.
+The current `swos-device-css106` package supports the complete practical local
+read-only web-UI surface for RB260GS (`CSS106-5G-1S`) running SwOS `2.19`, build
+`0x6a181cd5`: system, management, health, port configuration/state, complete
+statistics, SFP diagnostics, forwarding, port lock, mirroring, bandwidth
+limits, VLANs, hosts, RSTP, SNMP, learned IGMP groups, and ACL rules.
+
+The exact field-level matrix, endpoint inventory, scaling rules, fixture status,
+and hardware-validation limits are documented in
+[`css106-2.19-read-coverage.md`](css106-2.19-read-coverage.md). RB260GSP is
+recognized as a separate product but remains unsupported.

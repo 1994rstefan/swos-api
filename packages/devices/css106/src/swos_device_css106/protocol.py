@@ -4,18 +4,33 @@ from __future__ import annotations
 
 from enum import StrEnum
 from ipaddress import IPv4Address
+from math import floor, log10
 from string import hexdigits
-from typing import NoReturn, TypeAlias, TypeVar
+from typing import Any, NoReturn, TypeAlias, TypeVar
 from unicodedata import category
 
 from pydantic import ValidationError
 from swos_core.errors import ProtocolError
 from swos_core.models import (
+    AclRule,
+    AclVlanTagMode,
+    AddressMode,
     DeviceIdentity,
+    ForwardingInfo,
     HostEntry,
     HostEntryType,
+    IgmpGroup,
+    IgmpInfo,
+    IgmpVersion,
+    PacketSizeStatistics,
+    PoeMode,
+    PoeStatus,
+    PortErrorStatistics,
+    PortForwardingInfo,
     PortInfo,
+    PortRateStatistics,
     PortStatistics,
+    PortTrafficStatistics,
     PortVlanInfo,
     RstpCostMode,
     RstpInfo,
@@ -24,8 +39,11 @@ from swos_core.models import (
     RstpProtocol,
     RstpRole,
     RstpState,
+    SfpInfo,
     SnmpInfo,
+    SystemHealth,
     SystemInfo,
+    SystemManagementInfo,
     VlanEgressMode,
     VlanInfo,
     VlanMembershipMode,
@@ -45,11 +63,13 @@ PORT_COUNTS = {
     "CSS106-1G-4P-1S": 6,
 }
 LINK_SPEEDS_MBPS = {0: 10, 1: 100, 2: 1000}
+FORCED_LINK_SPEEDS_MBPS = {0: 10, 1: 100}
 MAX_PAYLOAD_BYTES = 1024 * 1024
 MAX_NESTING_DEPTH = 64
 MAX_NUMBER_DIGITS = 32
 UPTIME_TICKS_PER_SECOND = 100
 MAX_VLAN_ENTRIES = 250
+MAX_ACL_RULES = 32
 
 EnumValue = TypeVar("EnumValue", bound=StrEnum)
 
@@ -95,6 +115,26 @@ def identity_from_system(data: dict[str, SwOSValue]) -> DeviceIdentity | None:
 def system_info_from_payload(data: dict[str, SwOSValue], identity: DeviceIdentity) -> SystemInfo:
     """Normalize CSS106 system fields into the public core model."""
 
+    port_count = _port_count(identity)
+    address_modes = tuple(AddressMode)
+    address_mode_index = _bounded_integer(data, "iptp", minimum=0, maximum=len(address_modes) - 1)
+    igmp_versions = tuple(IgmpVersion)
+    igmp_version_index = _bounded_integer(data, "igve", minimum=0, maximum=len(igmp_versions) - 1)
+    allowed_ports = _selected_ports(data, "allp", port_count)
+    fast_leave_ports = _selected_ports(data, "igfl", port_count)
+    discovery_ports = _selected_ports(data, "pdsc", port_count)
+    allowed_vlan = _bounded_integer(data, "avln", minimum=0, maximum=4095)
+    igmp_enabled = _boolean(data, "igmp")
+    querier_configured = _boolean(data, "igmq")
+
+    health = SystemHealth()
+    if identity.product_code == "CSS106-1G-4P-1S":
+        health = SystemHealth(
+            input_voltage_volts=_unsigned_32(data, "volt") / 10,
+            temperature_celsius=_signed_low_16(data, "temp"),
+            poe_in_long_cable=_boolean(data, "lcbl"),
+        )
+
     try:
         return SystemInfo(
             identity=identity,
@@ -104,6 +144,25 @@ def system_info_from_payload(data: dict[str, SwOSValue], identity: DeviceIdentit
             static_ip=_ip_address(data, "sip"),
             mac_address=_mac_address(data, "mac"),
             serial_number=_hex_text(data, "sid"),
+            management=SystemManagementInfo(
+                address_mode=address_modes[address_mode_index],
+                admin_mac_address=_mac_address(data, "amac"),
+                allow_from=_ip_address(data, "alla"),
+                allow_prefix_length=_bounded_integer(data, "allm", minimum=0, maximum=32),
+                allowed_port_numbers=allowed_ports,
+                allowed_vlan_id=allowed_vlan or None,
+                watchdog_enabled=_boolean(data, "wdt"),
+            ),
+            independent_vlan_lookup=_boolean(data, "ivl"),
+            igmp=IgmpInfo(
+                enabled=igmp_enabled,
+                querier_configured=querier_configured,
+                querier_effective=igmp_enabled and querier_configured,
+                fast_leave_port_numbers=fast_leave_ports,
+                version=igmp_versions[igmp_version_index],
+            ),
+            discovery_protocol_port_numbers=discovery_ports,
+            health=health,
         )
     except ValidationError as exc:
         raise ProtocolError("CSS106 system response contains invalid values") from exc
@@ -114,17 +173,18 @@ def ports_from_link_payload(
 ) -> tuple[PortInfo, ...]:
     """Normalize CSS106 link fields into ordered public port models."""
 
-    try:
-        port_count = PORT_COUNTS[identity.product_code]
-    except KeyError as exc:
-        raise ProtocolError(f"Unknown CSS106 product {identity.product_code!r}") from exc
+    port_count = _port_count(identity)
 
     raw_names = _array(data, "nm", port_count)
     raw_speeds = _array(data, "spd", port_count)
+    configured_speeds = _bounded_integer_values(
+        data, "spdc", port_count, minimum=0, maximum=len(FORCED_LINK_SPEEDS_MBPS) - 1
+    )
     enabled = _bit_values(data, "en", port_count)
     link_up = _bit_values(data, "lnk", port_count)
     full_duplex = _bit_values(data, "dpx", port_count)
     auto_negotiation = _bit_values(data, "an", port_count)
+    configured_full_duplex = _bit_values(data, "dpxc", port_count)
     flow_control = _bit_values(data, "fct", port_count)
 
     ports: list[PortInfo] = []
@@ -155,7 +215,10 @@ def ports_from_link_payload(
                     speed_mbps=speed_mbps,
                     full_duplex=duplex,
                     auto_negotiation=auto_negotiation[index],
+                    configured_speed_mbps=FORCED_LINK_SPEEDS_MBPS[configured_speeds[index]],
+                    configured_full_duplex=configured_full_duplex[index],
                     flow_control=flow_control[index],
+                    **_poe_port_fields(data, identity, index, port_count),
                 )
             )
         except ValidationError as exc:
@@ -166,19 +229,55 @@ def ports_from_link_payload(
 def port_statistics_from_payload(
     data: dict[str, SwOSValue], identity: DeviceIdentity
 ) -> tuple[PortStatistics, ...]:
-    """Normalize cumulative CSS106 counters without interpreting live-rate fields."""
+    """Normalize the complete CSS106 port statistics response."""
 
-    try:
-        port_count = PORT_COUNTS[identity.product_code]
-    except KeyError as exc:
-        raise ProtocolError(f"Unknown CSS106 product {identity.product_code!r}") from exc
+    port_count = _port_count(identity)
 
+    rx_rate_raw = _uint32_values(data, "rrb", port_count)
+    tx_rate_raw = _uint32_values(data, "trb", port_count)
+    rx_packet_rate_raw = _uint32_values(data, "rrp", port_count)
+    tx_packet_rate_raw = _uint32_values(data, "trp", port_count)
     rx_bytes = _wide_counter_values(data, "rb", "rbh", port_count)
     tx_bytes = _wide_counter_values(data, "tb", "tbh", port_count)
     rx_packets = _uint32_values(data, "rtp", port_count)
     tx_packets = _uint32_values(data, "ttp", port_count)
     rx_errors = _uint32_values(data, "rte", port_count)
     tx_errors = _uint32_values(data, "tte", port_count)
+    traffic_fields = {
+        name: _wide_counter_values(data, low, high, port_count)
+        for name, low, high in (
+            ("rx_unicast_packets", "rup", "ruph"),
+            ("tx_unicast_packets", "tup", "tuph"),
+            ("rx_broadcast_packets", "rbp", "rbph"),
+            ("tx_broadcast_packets", "tbp", "tbph"),
+            ("rx_multicast_packets", "rmp", "rmph"),
+            ("tx_multicast_packets", "tmp", "tmph"),
+        )
+    }
+    rx_sizes = _packet_size_values(data, "r", port_count)
+    tx_sizes = _packet_size_values(data, "t", port_count)
+    error_fields = {
+        name: _uint32_values(data, field, port_count)
+        for name, field in (
+            ("rx_pause_frames", "rpp"),
+            ("rx_fcs_errors", "rfcs"),
+            ("rx_alignment_errors", "rae"),
+            ("rx_runts", "rr"),
+            ("rx_fragments", "fr"),
+            ("rx_too_long", "rtl"),
+            ("rx_overflows", "rov"),
+            ("tx_pause_frames", "tpp"),
+            ("tx_underruns", "tur"),
+            ("tx_too_long", "ttl"),
+            ("tx_collisions", "tcl"),
+            ("tx_excessive_collisions", "tec"),
+            ("tx_multiple_collisions", "tmc"),
+            ("tx_single_collisions", "tsc"),
+            ("tx_excessive_deferred", "ted"),
+            ("tx_deferred", "tdf"),
+            ("tx_late_collisions", "tlc"),
+        )
+    }
     return tuple(
         PortStatistics(
             number=index + 1,
@@ -188,6 +287,24 @@ def port_statistics_from_payload(
             tx_packets=tx_packets[index],
             rx_errors=rx_errors[index],
             tx_errors=tx_errors[index],
+            rates=PortRateStatistics(
+                rx_bits_per_second=rx_rate_raw[index] / 0.08,
+                tx_bits_per_second=tx_rate_raw[index] / 0.08,
+                rx_packets_per_second=rx_packet_rate_raw[index] / 0.64,
+                tx_packets_per_second=tx_packet_rate_raw[index] / 0.64,
+            ),
+            traffic=PortTrafficStatistics(
+                **{name: values[index] for name, values in traffic_fields.items()}
+            ),
+            rx_sizes=PacketSizeStatistics(
+                **{name: values[index] for name, values in rx_sizes.items()}
+            ),
+            tx_sizes=PacketSizeStatistics(
+                **{name: values[index] for name, values in tx_sizes.items()}
+            ),
+            detailed_errors=PortErrorStatistics(
+                **{name: values[index] for name, values in error_fields.items()}
+            ),
         )
         for index in range(port_count)
     )
@@ -280,6 +397,7 @@ def rstp_from_payloads(
     forwarding = _bit_values(rstp_data, "fwd", port_count)
     roles = _enum_values(rstp_data, "role", port_count, RstpRole)
     root_path_costs = _uint32_values(rstp_data, "rpc", port_count)
+    configured_path_costs = _uint32_values(rstp_data, "cst", port_count)
     cost_modes = tuple(RstpCostMode)
     cost_mode_index = _bounded_integer(system_data, "cost", minimum=0, maximum=len(cost_modes) - 1)
 
@@ -297,6 +415,7 @@ def rstp_from_payloads(
                     protocol=RstpProtocol.RSTP if rstp_protocol[index] else RstpProtocol.STP,
                     role=roles[index],
                     root_path_cost=root_path_costs[index],
+                    configured_path_cost=configured_path_costs[index],
                     port_type=(
                         RstpPortType.EDGE
                         if edge[index]
@@ -331,6 +450,161 @@ def snmp_from_payload(data: dict[str, SwOSValue]) -> SnmpInfo:
         )
     except ValidationError as exc:
         raise ProtocolError("CSS106 SNMP response contains invalid values") from exc
+
+
+def sfp_from_payload(data: dict[str, SwOSValue]) -> SfpInfo:
+    """Normalize CSS106 SFP EEPROM identity and diagnostics."""
+
+    text = {
+        "vendor": _optional_hex_text(data, "vnd"),
+        "part_number": _optional_hex_text(data, "pnr"),
+        "revision": _optional_hex_text(data, "rev"),
+        "serial_number": _optional_hex_text(data, "ser"),
+        "manufacturing_date": _optional_hex_text(data, "dat"),
+        "media_type": _optional_hex_text(data, "typ"),
+    }
+    if text["media_type"] is not None:
+        text["media_type"] = {
+            "&mmf": "multi-mode fiber",
+            "&smf": "single-mode fiber",
+            "&f": "fiber",
+        }.get(text["media_type"], text["media_type"])
+    present = any(value is not None for value in text.values())
+    raw_temperature = _signed_low_16(data, "tmp")
+    raw_voltage = _unsigned_32(data, "vcc")
+    raw_bias = _unsigned_32(data, "tbs")
+    raw_tx_power = _unsigned_32(data, "tpw")
+    raw_rx_power = _unsigned_32(data, "rpw")
+
+    try:
+        return SfpInfo(
+            **text,
+            temperature_celsius=(
+                None if not present or raw_temperature == -128 else raw_temperature
+            ),
+            supply_voltage_volts=raw_voltage / 1000 if present else None,
+            tx_bias_ma=raw_bias if present else None,
+            tx_power_dbm=_optical_power_dbm(raw_tx_power) if present else None,
+            rx_power_dbm=_optical_power_dbm(raw_rx_power) if present else None,
+        )
+    except ValidationError as exc:
+        raise ProtocolError("CSS106 SFP response contains invalid values") from exc
+
+
+def forwarding_from_payload(data: dict[str, SwOSValue], identity: DeviceIdentity) -> ForwardingInfo:
+    """Normalize CSS106 forwarding, lock, mirroring, and egress-rate policy."""
+
+    port_count = _port_count(identity)
+    destination_ports = tuple(
+        _selected_ports(data, f"fp{index + 1}", port_count) for index in range(port_count)
+    )
+    locked = _bit_values(data, "lck", port_count)
+    lock_on_first = _bit_values(data, "lckf", port_count)
+    mirror_ingress = _bit_values(data, "imr", port_count)
+    mirror_egress = _bit_values(data, "omr", port_count)
+    egress_rates = _uint32_values(data, "or", port_count)
+    mirror_targets = _selected_ports(data, "mrto", port_count)
+    if len(mirror_targets) > 1:
+        raise ProtocolError("CSS106 field 'mrto' must select at most one mirror target")
+
+    try:
+        return ForwardingInfo(
+            mirror_target_port=mirror_targets[0] if mirror_targets else None,
+            ports=tuple(
+                PortForwardingInfo(
+                    number=index + 1,
+                    destination_port_numbers=destination_ports[index],
+                    lock=locked[index],
+                    lock_on_first=lock_on_first[index],
+                    mirror_ingress=mirror_ingress[index],
+                    mirror_egress=mirror_egress[index],
+                    egress_rate_limit_bps=egress_rates[index] or None,
+                )
+                for index in range(port_count)
+            ),
+        )
+    except ValidationError as exc:
+        raise ProtocolError("CSS106 forwarding response contains invalid values") from exc
+
+
+def igmp_groups_from_payload(
+    rows: list[SwOSValue], identity: DeviceIdentity
+) -> tuple[IgmpGroup, ...]:
+    """Normalize dynamically learned CSS106 multicast groups."""
+
+    port_count = _port_count(identity)
+    groups: list[IgmpGroup] = []
+    for row_index, row in enumerate(rows):
+        if not isinstance(row, dict):
+            raise ProtocolError(f"CSS106 IGMP row {row_index} must be an object")
+        try:
+            groups.append(
+                IgmpGroup(
+                    address=_required_ip_address(row, "addr"),
+                    vlan_id=_bounded_integer(row, "vlan", minimum=1, maximum=4095),
+                    port_numbers=_selected_ports(row, "prts", port_count),
+                )
+            )
+        except ValidationError as exc:
+            raise ProtocolError(f"CSS106 IGMP row {row_index} contains invalid values") from exc
+    return tuple(groups)
+
+
+def acl_rules_from_payload(rows: list[SwOSValue], identity: DeviceIdentity) -> tuple[AclRule, ...]:
+    """Normalize ordered CSS106 access-control rules."""
+
+    port_count = _port_count(identity)
+    if len(rows) > MAX_ACL_RULES:
+        raise ProtocolError(f"CSS106 ACL table exceeds {MAX_ACL_RULES} entries")
+    tag_modes = tuple(AclVlanTagMode)
+    rules: list[AclRule] = []
+    for row_index, row in enumerate(rows):
+        if not isinstance(row, dict):
+            raise ProtocolError(f"CSS106 ACL row {row_index} must be an object")
+        tag_index = _bounded_integer(row, "vlan", minimum=0, maximum=len(tag_modes) - 1)
+        priority = _bounded_integer(row, "prio", minimum=0, maximum=8)
+        dscp = _bounded_integer(row, "dscp", minimum=0, maximum=64)
+        redirect_enabled = _boolean(row, "snde")
+        redirect_ports = _selected_ports(row, "snd", port_count)
+        rate = _unsigned_32(row, "rate")
+        set_vlan_id = _bounded_integer(row, "svid", minimum=0, maximum=4095)
+        set_priority = _bounded_integer(row, "spri", minimum=0, maximum=8)
+        try:
+            rules.append(
+                AclRule(
+                    number=row_index + 1,
+                    ingress_port_numbers=_selected_ports(row, "frm", port_count),
+                    source_mac=_mac_address(row, "smac"),
+                    source_mac_mask=_wire_mac_address(row, "smsk"),
+                    destination_mac=_mac_address(row, "dmac"),
+                    destination_mac_mask=_wire_mac_address(row, "dmsk"),
+                    ether_type=_bounded_integer(row, "et", minimum=0, maximum=0xFFFF),
+                    vlan_tag=tag_modes[tag_index],
+                    vlan_id_min=_bounded_integer(row, "vidl", minimum=0, maximum=4095),
+                    vlan_id_max=_bounded_integer(row, "vidh", minimum=0, maximum=4095),
+                    vlan_priority=None if priority == 8 else priority,
+                    source_ip=_ip_address(row, "sip"),
+                    source_prefix_length=_bounded_integer(row, "sipm", minimum=0, maximum=32),
+                    source_port_min=_bounded_integer(row, "sptl", minimum=0, maximum=0xFFFF),
+                    source_port_max=_bounded_integer(row, "spth", minimum=0, maximum=0xFFFF),
+                    destination_ip=_ip_address(row, "dip"),
+                    destination_prefix_length=_bounded_integer(row, "dipm", minimum=0, maximum=32),
+                    destination_port_min=_bounded_integer(row, "dptl", minimum=0, maximum=0xFFFF),
+                    destination_port_max=_bounded_integer(row, "dpth", minimum=0, maximum=0xFFFF),
+                    protocol_number=_bounded_integer(row, "prot", minimum=0, maximum=0xFF),
+                    dscp=None if dscp == 64 else dscp,
+                    redirect_enabled=redirect_enabled,
+                    redirect_port_numbers=redirect_ports,
+                    drop=redirect_enabled and not redirect_ports,
+                    mirror=_boolean(row, "mirr"),
+                    ingress_rate_limit_bps=rate or None,
+                    set_vlan_id=set_vlan_id or None,
+                    set_vlan_priority=None if set_priority == 8 else set_priority,
+                )
+            )
+        except ValidationError as exc:
+            raise ProtocolError(f"CSS106 ACL row {row_index} contains invalid values") from exc
+    return tuple(rules)
 
 
 def port_vlans_from_forwarding_payload(
@@ -410,6 +684,66 @@ def _parse_value(payload: bytes) -> SwOSValue:
     except UnicodeDecodeError as exc:
         raise ProtocolError("CSS106 response is not ASCII") from exc
     return _Parser(text).parse()
+
+
+def _port_count(identity: DeviceIdentity) -> int:
+    try:
+        return PORT_COUNTS[identity.product_code]
+    except KeyError as exc:
+        raise ProtocolError(f"Unknown CSS106 product {identity.product_code!r}") from exc
+
+
+def _selected_ports(data: dict[str, SwOSValue], field: str, port_count: int) -> tuple[int, ...]:
+    return tuple(
+        index + 1 for index, selected in enumerate(_bit_values(data, field, port_count)) if selected
+    )
+
+
+def _packet_size_values(
+    data: dict[str, SwOSValue], prefix: str, port_count: int
+) -> dict[str, tuple[int, ...]]:
+    return {
+        name: _uint32_values(data, prefix + field, port_count)
+        for name, field in (
+            ("frames_64_bytes", "64"),
+            ("frames_65_to_127_bytes", "65"),
+            ("frames_128_to_255_bytes", "128"),
+            ("frames_256_to_511_bytes", "256"),
+            ("frames_512_to_1023_bytes", "512"),
+            ("frames_1024_to_1518_bytes", "1k"),
+            ("frames_1519_to_max_bytes", "max"),
+        )
+    }
+
+
+def _poe_port_fields(
+    data: dict[str, SwOSValue], identity: DeviceIdentity, index: int, port_count: int
+) -> dict[str, Any]:
+    if identity.product_code != "CSS106-1G-4P-1S" or index not in range(1, 5):
+        return {}
+    modes = _enum_values(data, "poe", port_count, PoeMode)
+    priorities = _bounded_integer_values(data, "prio", port_count, minimum=0, maximum=3)
+    statuses = _enum_values(data, "poes", port_count, PoeStatus)
+    currents = _uint32_values(data, "curr", port_count)
+    powers = _uint32_values(data, "pwr", port_count)
+    return {
+        "poe_mode": modes[index],
+        "poe_priority": priorities[index] + 1,
+        "poe_status": statuses[index],
+        "poe_current_ma": currents[index],
+        "poe_power_watts": powers[index] / 10,
+    }
+
+
+def _signed_low_16(data: dict[str, SwOSValue], field: str) -> int:
+    value = _unsigned_32(data, field) & 0xFFFF
+    return value - 0x10000 if value & 0x8000 else value
+
+
+def _optical_power_dbm(value: int) -> float | None:
+    if value == 0:
+        return None
+    return floor(1000 * 10 * log10(value / 10000)) / 1000
 
 
 def _integer(data: dict[str, SwOSValue], field: str) -> int:
@@ -526,6 +860,11 @@ def _hex_text(data: dict[str, SwOSValue], field: str) -> str:
     return _decode_hex_text(_string(data, field), field)
 
 
+def _optional_hex_text(data: dict[str, SwOSValue], field: str) -> str | None:
+    value = _hex_text(data, field).strip()
+    return value or None
+
+
 def _decode_hex_text(value: str, field: str) -> str:
     try:
         decoded = bytes.fromhex(value).decode("utf-8")
@@ -545,6 +884,13 @@ def _ip_address(data: dict[str, SwOSValue], field: str) -> str | None:
         return str(IPv4Address(value.to_bytes(4, byteorder="little")))
     except OverflowError as exc:
         raise ProtocolError(f"CSS106 field {field!r} is not an IPv4 address") from exc
+
+
+def _required_ip_address(data: dict[str, SwOSValue], field: str) -> str:
+    value = _ip_address(data, field)
+    if value is None:
+        raise ProtocolError(f"CSS106 field {field!r} cannot be the zero IPv4 address")
+    return value
 
 
 def _mac_address(data: dict[str, SwOSValue], field: str) -> str | None:

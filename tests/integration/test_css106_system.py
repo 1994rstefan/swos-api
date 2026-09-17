@@ -29,6 +29,13 @@ def test_rb260gs_219_system_information() -> None:
     assert info.current_ip is not None
     assert info.mac_address is not None
     assert info.serial_number is not None
+    assert info.management is not None
+    assert 0 <= info.management.allow_prefix_length <= 32
+    assert info.igmp is not None
+    assert info.igmp.querier_effective == (info.igmp.enabled and info.igmp.querier_configured)
+    assert info.health is not None
+    assert info.health.input_voltage_volts is None
+    assert info.health.temperature_celsius is None
 
     time.sleep(1.1)
     later_info = device.get_system_info()

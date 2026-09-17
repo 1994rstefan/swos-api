@@ -42,7 +42,12 @@ swosctl --device office system show
 swosctl system show --device office
 swosctl port list --device office
 swosctl port stats --device office
+swosctl port stats --full --device office
+swosctl sfp show --device office
+swosctl forwarding show --device office
 swosctl host list --device office
+swosctl igmp list --device office
+swosctl acl list --device office
 swosctl rstp show --device office
 swosctl snmp show --device office
 swosctl vlan ports --device office
@@ -51,6 +56,11 @@ swosctl vlan list --device office
 
 Global options may be placed before, between, or after command names. The two
 `system show` forms above are equivalent.
+
+`port stats` shows cumulative byte, packet, and aggregate error counters by
+default. Add `--rates`, `--traffic`, `--sizes`, or `--errors` for individual
+groups, or `--full` for the complete statistics response. These flags only
+filter presentation; the core API always returns the complete normalized model.
 
 Run all local checks:
 
@@ -88,7 +98,13 @@ Currently supported:
 
 | Device | Product code | Firmware | Build | Operations |
 | --- | --- | --- | --- | --- |
-| RB260GS | `CSS106-5G-1S` | `2.19` | `0x6a181cd5` | Read system, ports, counters, hosts, RSTP, SNMP, and VLAN configuration |
+| RB260GS | `CSS106-5G-1S` | `2.19` | `0x6a181cd5` | Complete local read-only web-UI data surface |
+
+The supported read surface includes system, management, health, port
+configuration/state, complete statistics, SFP diagnostics, forwarding, port
+lock, mirroring, bandwidth limits, VLANs, hosts, RSTP, SNMP, learned IGMP
+groups, and ACL rules. See the
+[CSS106 2.19 read-coverage matrix](docs/css106-2.19-read-coverage.md).
 
 ## License
 

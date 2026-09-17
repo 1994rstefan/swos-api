@@ -4,10 +4,14 @@ from swos_core.models import (
     DeviceCapabilities,
     DeviceConnection,
     DeviceIdentity,
+    ForwardingInfo,
     HostEntry,
+    IgmpGroup,
+    PortForwardingInfo,
     PortInfo,
     PortStatistics,
     PortVlanInfo,
+    SystemManagementInfo,
     VlanInfo,
     VlanPortMembership,
 )
@@ -51,6 +55,8 @@ def test_port_operational_state_is_consistent() -> None:
         speed_mbps=1000,
         full_duplex=True,
         auto_negotiation=True,
+        configured_speed_mbps=100,
+        configured_full_duplex=True,
         flow_control=True,
     )
 
@@ -64,6 +70,8 @@ def test_port_operational_state_is_consistent() -> None:
             speed_mbps=1000,
             full_duplex=True,
             auto_negotiation=True,
+            configured_speed_mbps=100,
+            configured_full_duplex=True,
             flow_control=True,
         )
 
@@ -78,6 +86,102 @@ def test_port_statistics_reject_negative_counters() -> None:
             tx_packets=0,
             rx_errors=0,
             tx_errors=0,
+            rates={
+                "rx_bits_per_second": 0,
+                "tx_bits_per_second": 0,
+                "rx_packets_per_second": 0,
+                "tx_packets_per_second": 0,
+            },
+            traffic={
+                "rx_unicast_packets": 0,
+                "tx_unicast_packets": 0,
+                "rx_broadcast_packets": 0,
+                "tx_broadcast_packets": 0,
+                "rx_multicast_packets": 0,
+                "tx_multicast_packets": 0,
+            },
+            rx_sizes={
+                "frames_64_bytes": 0,
+                "frames_65_to_127_bytes": 0,
+                "frames_128_to_255_bytes": 0,
+                "frames_256_to_511_bytes": 0,
+                "frames_512_to_1023_bytes": 0,
+                "frames_1024_to_1518_bytes": 0,
+                "frames_1519_to_max_bytes": 0,
+            },
+            tx_sizes={
+                "frames_64_bytes": 0,
+                "frames_65_to_127_bytes": 0,
+                "frames_128_to_255_bytes": 0,
+                "frames_256_to_511_bytes": 0,
+                "frames_512_to_1023_bytes": 0,
+                "frames_1024_to_1518_bytes": 0,
+                "frames_1519_to_max_bytes": 0,
+            },
+            detailed_errors={
+                "rx_pause_frames": 0,
+                "rx_fcs_errors": 0,
+                "rx_alignment_errors": 0,
+                "rx_runts": 0,
+                "rx_fragments": 0,
+                "rx_too_long": 0,
+                "rx_overflows": 0,
+                "tx_pause_frames": 0,
+                "tx_underruns": 0,
+                "tx_too_long": 0,
+                "tx_collisions": 0,
+                "tx_excessive_collisions": 0,
+                "tx_multiple_collisions": 0,
+                "tx_single_collisions": 0,
+                "tx_excessive_deferred": 0,
+                "tx_deferred": 0,
+                "tx_late_collisions": 0,
+            },
+        )
+
+
+def test_new_read_models_validate_addresses_and_port_numbers() -> None:
+    with pytest.raises(ValidationError, match="multicast"):
+        IgmpGroup(address="192.0.2.1", vlan_id=1, port_numbers=(1,))
+    with pytest.raises(ValidationError, match="member port"):
+        IgmpGroup(address="239.1.2.3", vlan_id=1, port_numbers=())
+    with pytest.raises(ValidationError, match="positive"):
+        PortForwardingInfo(
+            number=1,
+            destination_port_numbers=(0,),
+            lock=False,
+            lock_on_first=False,
+            mirror_ingress=False,
+            mirror_egress=False,
+        )
+    with pytest.raises(ValidationError, match="declared port"):
+        ForwardingInfo(
+            mirror_target_port=2,
+            ports=(
+                PortForwardingInfo(
+                    number=1,
+                    destination_port_numbers=(2,),
+                    lock=False,
+                    lock_on_first=False,
+                    mirror_ingress=False,
+                    mirror_egress=False,
+                ),
+            ),
+        )
+    with pytest.raises(ValidationError, match="unique"):
+        SystemManagementInfo(
+            address_mode="static",
+            allow_prefix_length=24,
+            allowed_port_numbers=(1, 1),
+            watchdog_enabled=True,
+        )
+    with pytest.raises(ValidationError):
+        SystemManagementInfo(
+            address_mode="static",
+            allow_from="not-an-ip",
+            allow_prefix_length=24,
+            allowed_port_numbers=(1,),
+            watchdog_enabled=True,
         )
 
 

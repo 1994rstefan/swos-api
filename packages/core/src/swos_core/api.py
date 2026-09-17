@@ -6,13 +6,17 @@ from typing import Protocol
 
 from swos_core.errors import UnsupportedFeatureError
 from swos_core.models import (
+    AclRule,
     DeviceCapabilities,
     DeviceIdentity,
+    ForwardingInfo,
     HostEntry,
+    IgmpGroup,
     PortInfo,
     PortStatistics,
     PortVlanInfo,
     RstpInfo,
+    SfpInfo,
     SnmpInfo,
     SystemInfo,
     VlanInfo,
@@ -62,6 +66,26 @@ class DeviceAdapter(Protocol):
 
     def get_snmp(self) -> SnmpInfo:
         """Read normalized SNMP service configuration."""
+
+        ...
+
+    def get_sfp(self) -> SfpInfo:
+        """Read normalized SFP identity and diagnostics."""
+
+        ...
+
+    def get_forwarding(self) -> ForwardingInfo:
+        """Read normalized forwarding, lock, mirror, and rate policy."""
+
+        ...
+
+    def get_igmp_groups(self) -> tuple[IgmpGroup, ...]:
+        """Read dynamically learned IGMP groups."""
+
+        ...
+
+    def get_acl_rules(self) -> tuple[AclRule, ...]:
+        """Read ordered access-control rules."""
 
         ...
 
@@ -157,6 +181,38 @@ class SwOSDevice:
         if not self.capabilities.supports("snmp"):
             raise UnsupportedFeatureError("snmp")
         return self._adapter.get_snmp()
+
+    def get_sfp(self) -> SfpInfo:
+        """Read SFP identity and diagnostics after enforcing read safety."""
+
+        self._authorize(write=False)
+        if not self.capabilities.supports("sfp"):
+            raise UnsupportedFeatureError("sfp")
+        return self._adapter.get_sfp()
+
+    def get_forwarding(self) -> ForwardingInfo:
+        """Read forwarding policy after enforcing read safety."""
+
+        self._authorize(write=False)
+        if not self.capabilities.supports("forwarding"):
+            raise UnsupportedFeatureError("forwarding")
+        return self._adapter.get_forwarding()
+
+    def get_igmp_groups(self) -> tuple[IgmpGroup, ...]:
+        """Read learned multicast groups after enforcing read safety."""
+
+        self._authorize(write=False)
+        if not self.capabilities.supports("igmp_groups"):
+            raise UnsupportedFeatureError("igmp_groups")
+        return self._adapter.get_igmp_groups()
+
+    def get_acl_rules(self) -> tuple[AclRule, ...]:
+        """Read access-control rules after enforcing read safety."""
+
+        self._authorize(write=False)
+        if not self.capabilities.supports("acl"):
+            raise UnsupportedFeatureError("acl")
+        return self._adapter.get_acl_rules()
 
     def get_port_vlans(self) -> tuple[PortVlanInfo, ...]:
         """Read per-port VLAN policy after enforcing read safety."""

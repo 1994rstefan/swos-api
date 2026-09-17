@@ -6,14 +6,18 @@ from collections.abc import Callable
 
 from swos_core.errors import ProtocolError
 from swos_core.models import (
+    AclRule,
     DeviceCapabilities,
     DeviceConnection,
     DeviceIdentity,
+    ForwardingInfo,
     HostEntry,
+    IgmpGroup,
     PortInfo,
     PortStatistics,
     PortVlanInfo,
     RstpInfo,
+    SfpInfo,
     SnmpInfo,
     SystemInfo,
     VlanInfo,
@@ -22,14 +26,18 @@ from swos_core.transport import HttpTransport
 
 from swos_device_css106.protocol import (
     MAX_PAYLOAD_BYTES,
+    acl_rules_from_payload,
     dynamic_hosts_from_payload,
+    forwarding_from_payload,
     identity_from_system,
+    igmp_groups_from_payload,
     parse_payload,
     parse_table_payload,
     port_statistics_from_payload,
     port_vlans_from_forwarding_payload,
     ports_from_link_payload,
     rstp_from_payloads,
+    sfp_from_payload,
     snmp_from_payload,
     static_hosts_from_payload,
     system_info_from_payload,
@@ -58,7 +66,19 @@ class CSS106Adapter:
     def capabilities(self) -> DeviceCapabilities:
         return DeviceCapabilities(
             features=frozenset(
-                {"hosts", "port_statistics", "ports", "rstp", "snmp", "system", "vlan"}
+                {
+                    "acl",
+                    "forwarding",
+                    "hosts",
+                    "igmp_groups",
+                    "port_statistics",
+                    "ports",
+                    "rstp",
+                    "sfp",
+                    "snmp",
+                    "system",
+                    "vlan",
+                }
             )
         )
 
@@ -128,6 +148,26 @@ class CSS106Adapter:
         with self._transport_factory(self._connection) as transport:
             payload = transport.request("GET", "/snmp.b", max_response_bytes=MAX_PAYLOAD_BYTES)
         return snmp_from_payload(parse_payload(payload))
+
+    def get_sfp(self) -> SfpInfo:
+        with self._transport_factory(self._connection) as transport:
+            payload = transport.request("GET", "/sfp.b", max_response_bytes=MAX_PAYLOAD_BYTES)
+        return sfp_from_payload(parse_payload(payload))
+
+    def get_forwarding(self) -> ForwardingInfo:
+        with self._transport_factory(self._connection) as transport:
+            payload = transport.request("GET", "/fwd.b", max_response_bytes=MAX_PAYLOAD_BYTES)
+        return forwarding_from_payload(parse_payload(payload), self._identity)
+
+    def get_igmp_groups(self) -> tuple[IgmpGroup, ...]:
+        with self._transport_factory(self._connection) as transport:
+            payload = transport.request("GET", "/!igmp.b", max_response_bytes=MAX_PAYLOAD_BYTES)
+        return igmp_groups_from_payload(parse_table_payload(payload), self._identity)
+
+    def get_acl_rules(self) -> tuple[AclRule, ...]:
+        with self._transport_factory(self._connection) as transport:
+            payload = transport.request("GET", "/acl.b", max_response_bytes=MAX_PAYLOAD_BYTES)
+        return acl_rules_from_payload(parse_table_payload(payload), self._identity)
 
     def get_port_vlans(self) -> tuple[PortVlanInfo, ...]:
         with self._transport_factory(self._connection) as transport:

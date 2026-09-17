@@ -1,17 +1,30 @@
 import json
 from importlib import import_module
 
+import pytest
 from swos_cli import __version__
 from swos_core.models import (
+    AclRule,
     DeviceIdentity,
+    ForwardingInfo,
     HostEntry,
+    IgmpGroup,
+    IgmpInfo,
+    PacketSizeStatistics,
+    PortErrorStatistics,
+    PortForwardingInfo,
     PortInfo,
+    PortRateStatistics,
     PortStatistics,
+    PortTrafficStatistics,
     PortVlanInfo,
     RstpInfo,
     RstpPortInfo,
+    SfpInfo,
     SnmpInfo,
+    SystemHealth,
     SystemInfo,
+    SystemManagementInfo,
     VlanInfo,
     VlanPortMembership,
 )
@@ -21,6 +34,40 @@ from typer.testing import CliRunner
 app_module = import_module("swos_cli.app")
 app = app_module.app
 runner = CliRunner()
+
+
+def _packet_sizes(base: int) -> PacketSizeStatistics:
+    return PacketSizeStatistics(
+        frames_64_bytes=base,
+        frames_65_to_127_bytes=base + 1,
+        frames_128_to_255_bytes=base + 2,
+        frames_256_to_511_bytes=base + 3,
+        frames_512_to_1023_bytes=base + 4,
+        frames_1024_to_1518_bytes=base + 5,
+        frames_1519_to_max_bytes=base + 6,
+    )
+
+
+def _detailed_errors() -> PortErrorStatistics:
+    return PortErrorStatistics(
+        rx_pause_frames=1,
+        rx_fcs_errors=2,
+        rx_alignment_errors=3,
+        rx_runts=4,
+        rx_fragments=5,
+        rx_too_long=6,
+        rx_overflows=7,
+        tx_pause_frames=8,
+        tx_underruns=9,
+        tx_too_long=10,
+        tx_collisions=11,
+        tx_excessive_collisions=12,
+        tx_multiple_collisions=13,
+        tx_single_collisions=14,
+        tx_excessive_deferred=15,
+        tx_deferred=16,
+        tx_late_collisions=17,
+    )
 
 
 class FakeDevice:
@@ -41,6 +88,29 @@ class FakeDevice:
             static_ip="192.168.88.1",
             mac_address="02:00:00:00:00:01",
             serial_number="TEST1234",
+            management=SystemManagementInfo(
+                address_mode="dhcp_with_fallback",
+                admin_mac_address=None,
+                allow_from="192.168.88.0",
+                allow_prefix_length=24,
+                allowed_port_numbers=(1, 6),
+                allowed_vlan_id=10,
+                watchdog_enabled=True,
+            ),
+            independent_vlan_lookup=True,
+            igmp=IgmpInfo(
+                enabled=True,
+                querier_configured=True,
+                querier_effective=True,
+                fast_leave_port_numbers=(2,),
+                version="v3",
+            ),
+            discovery_protocol_port_numbers=(1, 2),
+            health=SystemHealth(
+                input_voltage_volts=24.2,
+                temperature_celsius=41,
+                poe_in_long_cable=False,
+            ),
         )
 
     def get_ports(self) -> tuple[PortInfo, ...]:
@@ -53,6 +123,8 @@ class FakeDevice:
                 speed_mbps=1000,
                 full_duplex=True,
                 auto_negotiation=True,
+                configured_speed_mbps=100,
+                configured_full_duplex=True,
                 flow_control=True,
             ),
             PortInfo(
@@ -61,6 +133,8 @@ class FakeDevice:
                 enabled=True,
                 link_up=False,
                 auto_negotiation=True,
+                configured_speed_mbps=100,
+                configured_full_duplex=True,
                 flow_control=False,
             ),
         )
@@ -75,6 +149,23 @@ class FakeDevice:
                 tx_packets=34,
                 rx_errors=0,
                 tx_errors=1,
+                rates=PortRateStatistics(
+                    rx_bits_per_second=1000,
+                    tx_bits_per_second=2000,
+                    rx_packets_per_second=10,
+                    tx_packets_per_second=20,
+                ),
+                traffic=PortTrafficStatistics(
+                    rx_unicast_packets=10,
+                    tx_unicast_packets=20,
+                    rx_broadcast_packets=1,
+                    tx_broadcast_packets=2,
+                    rx_multicast_packets=3,
+                    tx_multicast_packets=4,
+                ),
+                rx_sizes=_packet_sizes(1),
+                tx_sizes=_packet_sizes(2),
+                detailed_errors=_detailed_errors(),
             ),
         )
 
@@ -116,6 +207,83 @@ class FakeDevice:
 
     def get_snmp(self) -> SnmpInfo:
         return SnmpInfo(enabled=True, community="public", contact="Ops", location="Office")
+
+    def get_sfp(self) -> SfpInfo:
+        return SfpInfo(
+            vendor="Test Optics",
+            part_number="MOD-1000SX",
+            revision="A1",
+            serial_number="SFPTEST001",
+            manufacturing_date="2026-09-01",
+            media_type="multi-mode fiber",
+            temperature_celsius=25,
+            supply_voltage_volts=3.3,
+            tx_bias_ma=7,
+            tx_power_dbm=0,
+            rx_power_dbm=-10,
+        )
+
+    def get_forwarding(self) -> ForwardingInfo:
+        return ForwardingInfo(
+            mirror_target_port=6,
+            ports=(
+                PortForwardingInfo(
+                    number=1,
+                    destination_port_numbers=(2, 6),
+                    lock=True,
+                    lock_on_first=False,
+                    mirror_ingress=True,
+                    mirror_egress=False,
+                    egress_rate_limit_bps=1_000_000,
+                ),
+                PortForwardingInfo(
+                    number=2,
+                    destination_port_numbers=(1, 6),
+                    lock=False,
+                    lock_on_first=False,
+                    mirror_ingress=False,
+                    mirror_egress=False,
+                ),
+                PortForwardingInfo(
+                    number=6,
+                    destination_port_numbers=(1, 2),
+                    lock=False,
+                    lock_on_first=False,
+                    mirror_ingress=False,
+                    mirror_egress=False,
+                ),
+            ),
+        )
+
+    def get_igmp_groups(self) -> tuple[IgmpGroup, ...]:
+        return (IgmpGroup(address="239.1.2.3", vlan_id=10, port_numbers=(1, 3)),)
+
+    def get_acl_rules(self) -> tuple[AclRule, ...]:
+        return (
+            AclRule(
+                number=1,
+                ingress_port_numbers=(1, 2),
+                source_mac="02:00:00:00:00:01",
+                source_mac_mask="ff:ff:ff:ff:ff:ff",
+                destination_mac=None,
+                destination_mac_mask="ff:ff:ff:ff:ff:ff",
+                ether_type=0x0800,
+                vlan_tag="present",
+                vlan_id_min=10,
+                vlan_id_max=20,
+                source_prefix_length=0,
+                source_port_min=0,
+                source_port_max=65535,
+                destination_prefix_length=0,
+                destination_port_min=80,
+                destination_port_max=80,
+                protocol_number=6,
+                redirect_enabled=True,
+                redirect_port_numbers=(6,),
+                drop=False,
+                mirror=True,
+            ),
+        )
 
     def get_port_vlans(self) -> tuple[PortVlanInfo, ...]:
         return (
@@ -294,6 +462,9 @@ def test_system_show_human_output(monkeypatch) -> None:  # type: ignore[no-untyp
     assert "Firmware: SwOS 2.19" in result.stdout
     assert "Uptime: 1d 01:01:01" in result.stdout
     assert "Current IP: 192.168.88.1" in result.stdout
+    assert "Address Mode: dhcp with fallback" in result.stdout
+    assert "IGMP Querier Effective: yes" in result.stdout
+    assert "Input Voltage: 24.2 V" in result.stdout
 
 
 def test_system_show_accepts_global_url_after_command(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -362,6 +533,29 @@ def test_system_show_json_output(monkeypatch) -> None:  # type: ignore[no-untype
 
 def test_system_show_requires_url() -> None:
     result = runner.invoke(app, ["system", "show"])
+
+    assert result.exit_code == 2
+    assert "A device URL is required" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        ["port", "list"],
+        ["port", "stats"],
+        ["sfp", "show"],
+        ["forwarding", "show"],
+        ["host", "list"],
+        ["igmp", "list"],
+        ["acl", "list"],
+        ["rstp", "show"],
+        ["snmp", "show"],
+        ["vlan", "ports"],
+        ["vlan", "list"],
+    ],
+)
+def test_read_commands_require_url(command: list[str]) -> None:
+    result = runner.invoke(app, command)
 
     assert result.exit_code == 2
     assert "A device URL is required" in result.stderr
@@ -444,7 +638,83 @@ def test_port_stats_human_and_json_output(monkeypatch) -> None:  # type: ignore[
     assert "RX BYTES" in human.stdout
     assert "1234" in human.stdout
     assert machine.exit_code == 0
-    assert json.loads(machine.stdout)["data"]["ports"][0]["tx_errors"] == 1
+    port = json.loads(machine.stdout)["data"]["ports"][0]
+    assert port["tx_errors"] == 1
+    assert "rates" not in port
+
+
+def test_port_stats_optional_groups_and_full_output(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    mock_registry(monkeypatch)
+
+    selected = runner.invoke(
+        app,
+        ["port", "stats", "--rates", "--errors", "--url", "http://192.0.2.1", "-ojson"],
+    )
+    full = runner.invoke(
+        app,
+        ["port", "stats", "--full", "--url", "http://192.0.2.1"],
+    )
+
+    assert selected.exit_code == 0
+    port = json.loads(selected.stdout)["data"]["ports"][0]
+    assert port["rates"]["rx_bits_per_second"] == 1000
+    assert port["detailed_errors"]["rx_fcs_errors"] == 2
+    assert "traffic" not in port
+    assert "rx_sizes" not in port
+    assert full.exit_code == 0
+    assert "RX sizes:" in full.stdout
+    assert "TX errors:" in full.stdout
+
+
+def test_sfp_show_human_and_json_output(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    mock_registry(monkeypatch)
+
+    human = runner.invoke(app, ["sfp", "show", "--url", "http://192.0.2.1"])
+    machine = runner.invoke(app, ["sfp", "show", "--url", "http://192.0.2.1", "-ojson"])
+
+    assert human.exit_code == 0
+    assert "Vendor: Test Optics" in human.stdout
+    assert "RX Power: -10 dBm" in human.stdout
+    assert machine.exit_code == 0
+    assert json.loads(machine.stdout)["data"]["media_type"] == "multi-mode fiber"
+
+
+def test_forwarding_show_human_and_json_output(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    mock_registry(monkeypatch)
+
+    human = runner.invoke(app, ["forwarding", "show", "--url", "http://192.0.2.1"])
+    machine = runner.invoke(app, ["forwarding", "show", "--url", "http://192.0.2.1", "-ojson"])
+
+    assert human.exit_code == 0
+    assert "Mirror Target: 6" in human.stdout
+    assert "1000000 bps" in human.stdout
+    assert machine.exit_code == 0
+    assert json.loads(machine.stdout)["data"]["ports"][0]["lock"] is True
+
+
+def test_igmp_list_human_and_json_output(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    mock_registry(monkeypatch)
+
+    human = runner.invoke(app, ["igmp", "list", "--url", "http://192.0.2.1"])
+    machine = runner.invoke(app, ["igmp", "list", "--url", "http://192.0.2.1", "-ojson"])
+
+    assert human.exit_code == 0
+    assert "239.1.2.3" in human.stdout
+    assert machine.exit_code == 0
+    assert json.loads(machine.stdout)["data"]["groups"][0]["port_numbers"] == [1, 3]
+
+
+def test_acl_list_human_and_json_output(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    mock_registry(monkeypatch)
+
+    human = runner.invoke(app, ["acl", "list", "--url", "http://192.0.2.1"])
+    machine = runner.invoke(app, ["acl", "list", "--url", "http://192.0.2.1", "-ojson"])
+
+    assert human.exit_code == 0
+    assert "Rule 1" in human.stdout
+    assert "redirect=6" in human.stdout
+    assert machine.exit_code == 0
+    assert json.loads(machine.stdout)["data"]["rules"][0]["ether_type"] == 0x0800
 
 
 def test_host_list_human_and_json_output(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -478,6 +748,7 @@ def test_rstp_show_human_and_json_output(monkeypatch) -> None:  # type: ignore[n
 
     assert human.exit_code == 0
     assert "Bridge Priority: 0x8000" in human.stdout
+    assert "CONFIG COST" in human.stdout
     assert "designated" in human.stdout
     assert machine.exit_code == 0
     data = json.loads(machine.stdout)["data"]

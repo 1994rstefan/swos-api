@@ -7,18 +7,23 @@ from swos_core.plugins import PluginRegistry
 from swos_core.safety import FirmwareSafetyPolicy
 from swos_device_css106 import CSS106Plugin, plugin
 from swos_device_css106.protocol import (
+    MAX_ACL_RULES,
     MAX_NESTING_DEPTH,
     MAX_PAYLOAD_BYTES,
     MAX_VLAN_ENTRIES,
     UPTIME_TICKS_PER_SECOND,
+    acl_rules_from_payload,
     dynamic_hosts_from_payload,
+    forwarding_from_payload,
     identity_from_system,
+    igmp_groups_from_payload,
     parse_payload,
     parse_table_payload,
     port_statistics_from_payload,
     port_vlans_from_forwarding_payload,
     ports_from_link_payload,
     rstp_from_payloads,
+    sfp_from_payload,
     snmp_from_payload,
     static_hosts_from_payload,
     system_info_from_payload,
@@ -35,6 +40,9 @@ DYNAMIC_HOST_FIXTURE = Path(__file__).parent / "fixtures" / "dhost.b"
 RSTP_FIXTURE = Path(__file__).parent / "fixtures" / "rstp.b"
 RSTP_SYSTEM_FIXTURE = Path(__file__).parent / "fixtures" / "rstp_sys.b"
 SNMP_FIXTURE = Path(__file__).parent / "fixtures" / "snmp.b"
+SFP_FIXTURE = Path(__file__).parent / "fixtures" / "sfp.b"
+IGMP_FIXTURE = Path(__file__).parent / "fixtures" / "igmp.b"
+ACL_FIXTURE = Path(__file__).parent / "fixtures" / "acl.b"
 
 
 class FakeTransport:
@@ -104,6 +112,18 @@ def snmp_fixture_payload() -> bytes:
     return SNMP_FIXTURE.read_bytes()
 
 
+def sfp_fixture_payload() -> bytes:
+    return SFP_FIXTURE.read_bytes()
+
+
+def igmp_fixture_payload() -> bytes:
+    return IGMP_FIXTURE.read_bytes()
+
+
+def acl_fixture_payload() -> bytes:
+    return ACL_FIXTURE.read_bytes()
+
+
 def test_plugin_declares_exact_hardware_validated_support() -> None:
     record = plugin.support_records()[0]
 
@@ -143,6 +163,16 @@ def test_probe_and_adapter_normalize_system_data() -> None:
     assert info.static_ip == "192.168.88.1"
     assert info.mac_address == "02:00:00:00:00:01"
     assert info.serial_number == "TEST1234"
+    assert info.management is not None
+    assert info.management.address_mode.value == "dhcp_with_fallback"
+    assert info.management.allowed_port_numbers == (1, 2, 3, 4, 5, 6)
+    assert info.management.allowed_vlan_id is None
+    assert info.igmp is not None
+    assert info.igmp.querier_configured
+    assert not info.igmp.querier_effective
+    assert info.discovery_protocol_port_numbers == (1, 2, 3, 4, 5, 6)
+    assert info.health is not None
+    assert info.health.temperature_celsius is None
     assert transport.requests == [("GET", "/sys.b"), ("GET", "/sys.b")]
 
 
@@ -165,6 +195,9 @@ def test_adapter_normalizes_port_state() -> None:
     assert ports[0].link_up
     assert ports[0].speed_mbps == 1000
     assert ports[0].full_duplex is True
+    assert ports[0].configured_speed_mbps == 100
+    assert ports[0].configured_full_duplex
+    assert ports[0].poe_mode is None
     assert ports[4].name == "Port5"
     assert not ports[4].link_up
     assert ports[4].speed_mbps is None
@@ -220,6 +253,41 @@ def test_port_parser_handles_supported_link_variants_and_empty_names() -> None:
     assert ports[1].full_duplex is False
 
 
+def test_shared_decoder_model_gates_rb260gsp_health_and_poe_fields() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    poe_identity = identity.model_copy(
+        update={"product_code": "CSS106-1G-4P-1S", "marketing_name": "RB260GSP"}
+    )
+    system_data = parse_payload(fixture_payload())
+    system_data["volt"] = 242
+    system_data["temp"] = 0xFFFFFFF6
+    system_data["lcbl"] = 1
+    link_data = parse_payload(link_fixture_payload())
+    link_data["poe"] = [0, 1, 2, 3, 1, 0]
+    link_data["prio"] = [0, 1, 2, 3, 0, 0]
+    link_data["poes"] = [0, 2, 3, 4, 10, 0]
+    link_data["curr"] = [0, 100, 200, 300, 400, 0]
+    link_data["pwr"] = [0, 10, 20, 30, 40, 0]
+
+    system = system_info_from_payload(system_data, poe_identity)
+    ports = ports_from_link_payload(link_data, poe_identity)
+
+    assert system.health is not None
+    assert system.health.input_voltage_volts == 24.2
+    assert system.health.temperature_celsius == -10
+    assert system.health.poe_in_long_cable
+    assert ports[0].poe_mode is None
+    assert ports[1].poe_mode is not None
+    assert ports[1].poe_mode.value == "auto"
+    assert ports[1].poe_priority == 2
+    assert ports[1].poe_status is not None
+    assert ports[1].poe_status.value == "waiting_for_load"
+    assert ports[1].poe_current_ma == 100
+    assert ports[1].poe_power_watts == 1
+    assert ports[5].poe_mode is None
+
+
 def test_adapter_normalizes_cumulative_port_statistics() -> None:
     identity = identity_from_system(parse_payload(fixture_payload()))
     assert identity is not None
@@ -240,7 +308,141 @@ def test_adapter_normalizes_cumulative_port_statistics() -> None:
     assert statistics[2].tx_bytes == 0x100000300
     assert statistics[1].rx_errors == 1
     assert statistics[2].tx_errors == 2
+    assert statistics[0].rates.rx_bits_per_second == 100
+    assert statistics[0].rates.rx_packets_per_second == 100
+    assert statistics[0].traffic.rx_unicast_packets == 0x100000001
+    assert statistics[1].traffic.tx_unicast_packets == 0x100000014
+    assert statistics[0].rx_sizes.frames_64_bytes == 1
+    assert statistics[0].tx_sizes.frames_1519_to_max_bytes == 17
+    assert statistics[0].detailed_errors.rx_fcs_errors == 2
+    assert statistics[0].detailed_errors.tx_late_collisions == 17
     assert transport.requests == [("GET", "/!stats.b")]
+
+
+def test_adapter_normalizes_sfp_diagnostics() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    transport = FakeTransport(sfp_fixture_payload())
+    adapter = CSS106Plugin(transport_factory=lambda connection: transport).create(  # type: ignore[arg-type]
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+
+    info = adapter.get_sfp()
+
+    assert info.vendor == "Test Optics"
+    assert info.media_type == "multi-mode fiber"
+    assert info.temperature_celsius == 25
+    assert info.supply_voltage_volts == 3.3
+    assert info.tx_power_dbm == 0
+    assert info.rx_power_dbm == -10
+    assert transport.requests == [("GET", "/sfp.b")]
+
+
+def test_sfp_decoder_handles_absent_module_and_signed_temperature() -> None:
+    data = parse_payload(sfp_fixture_payload())
+    for field in ("vnd", "pnr", "rev", "ser", "dat", "typ"):
+        data[field] = ""
+    data["tmp"] = 0xFFFFFF80
+    data["vcc"] = 0
+    data["tbs"] = 0
+    data["tpw"] = 0
+    data["rpw"] = 0
+
+    info = sfp_from_payload(data)
+
+    assert info.vendor is None
+    assert info.temperature_celsius is None
+    assert info.supply_voltage_volts is None
+    assert info.tx_power_dbm is None
+
+
+def test_adapter_normalizes_forwarding_policy() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    transport = FakeTransport(forwarding_fixture_payload())
+    adapter = CSS106Plugin(transport_factory=lambda connection: transport).create(  # type: ignore[arg-type]
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+
+    info = adapter.get_forwarding()
+
+    assert info.mirror_target_port == 1
+    assert info.ports[0].destination_port_numbers == (2, 3, 4, 5, 6)
+    assert info.ports[0].egress_rate_limit_bps is None
+    assert transport.requests == [("GET", "/fwd.b")]
+
+    data = parse_payload(forwarding_fixture_payload())
+    data["mrto"] = 3
+    with pytest.raises(ProtocolError, match="at most one"):
+        forwarding_from_payload(data, identity)
+
+
+def test_adapter_normalizes_dynamic_igmp_groups() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    transport = FakeTransport(igmp_fixture_payload())
+    adapter = CSS106Plugin(transport_factory=lambda connection: transport).create(  # type: ignore[arg-type]
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+
+    groups = adapter.get_igmp_groups()
+
+    assert groups[0].address == "239.1.2.3"
+    assert groups[0].vlan_id == 10
+    assert groups[0].port_numbers == (1, 3)
+    assert groups[1].port_numbers == (6,)
+    assert transport.requests == [("GET", "/!igmp.b")]
+
+    with pytest.raises(ProtocolError, match="IGMP row 0 must be an object"):
+        igmp_groups_from_payload([1], identity)
+
+    rows = parse_table_payload(igmp_fixture_payload())
+    assert isinstance(rows[0], dict)
+    rows[0]["addr"] = 0x010200C0
+    with pytest.raises(ProtocolError, match="invalid values"):
+        igmp_groups_from_payload(rows, identity)
+
+    rows = parse_table_payload(igmp_fixture_payload())
+    assert isinstance(rows[0], dict)
+    rows[0]["prts"] = 0
+    with pytest.raises(ProtocolError, match="invalid values"):
+        igmp_groups_from_payload(rows, identity)
+
+
+def test_adapter_normalizes_acl_rules_and_drop_action() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    transport = FakeTransport(acl_fixture_payload())
+    adapter = CSS106Plugin(transport_factory=lambda connection: transport).create(  # type: ignore[arg-type]
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+
+    rules = adapter.get_acl_rules()
+
+    assert rules[0].source_ip == "192.0.2.0"
+    assert rules[0].destination_ip == "198.51.100.1"
+    assert rules[0].redirect_port_numbers == (6,)
+    assert not rules[0].drop
+    assert rules[0].dscp is None
+    assert rules[0].set_vlan_id == 100
+    assert rules[1].drop
+    assert rules[1].source_mac is None
+    assert transport.requests == [("GET", "/acl.b")]
+
+    with pytest.raises(ProtocolError, match=f"exceeds {MAX_ACL_RULES}"):
+        acl_rules_from_payload([{}] * (MAX_ACL_RULES + 1), identity)
 
 
 def test_port_statistics_reject_invalid_counter_arrays() -> None:
@@ -341,6 +543,7 @@ def test_adapter_normalizes_rstp_state() -> None:
     assert len(info.ports) == 6
     assert info.ports[0].protocol.value == "rstp"
     assert info.ports[0].role.value == "designated"
+    assert info.ports[0].configured_path_cost == 4
     assert info.ports[0].port_type.value == "edge"
     assert info.ports[0].state.value == "forwarding"
     assert info.ports[4].port_type.value == "point_to_point"
@@ -375,6 +578,7 @@ def test_rstp_decoder_handles_all_combined_states_and_rejects_roles() -> None:
     assert info.ports[3].port_type.value == "edge"
     assert info.ports[3].state.value == "forwarding"
     assert info.ports[5].root_path_cost == 5
+    assert info.ports[5].configured_path_cost == 4
     assert [port.role.value for port in info.ports[:5]] == [
         "disabled",
         "alternate",

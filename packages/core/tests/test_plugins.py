@@ -11,15 +11,24 @@ from swos_core.errors import (
     UnsupportedFirmwareError,
 )
 from swos_core.models import (
+    AclRule,
     DeviceCapabilities,
     DeviceConnection,
     DeviceIdentity,
+    ForwardingInfo,
     HostEntry,
+    IgmpGroup,
+    PacketSizeStatistics,
+    PortErrorStatistics,
+    PortForwardingInfo,
     PortInfo,
+    PortRateStatistics,
     PortStatistics,
+    PortTrafficStatistics,
     PortVlanInfo,
     RstpInfo,
     RstpPortInfo,
+    SfpInfo,
     SnmpInfo,
     SystemInfo,
     VlanInfo,
@@ -71,7 +80,19 @@ class FakeAdapter:
     def capabilities(self) -> DeviceCapabilities:
         return DeviceCapabilities(
             features=frozenset(
-                {"hosts", "port_statistics", "ports", "rstp", "snmp", "system", "vlan"}
+                {
+                    "acl",
+                    "forwarding",
+                    "hosts",
+                    "igmp_groups",
+                    "port_statistics",
+                    "ports",
+                    "rstp",
+                    "sfp",
+                    "snmp",
+                    "system",
+                    "vlan",
+                }
             )
         )
 
@@ -89,6 +110,8 @@ class FakeAdapter:
                 full_duplex=True,
                 auto_negotiation=True,
                 flow_control=True,
+                configured_speed_mbps=100,
+                configured_full_duplex=True,
             ),
         )
 
@@ -102,6 +125,23 @@ class FakeAdapter:
                 tx_packets=4,
                 rx_errors=0,
                 tx_errors=0,
+                rates=PortRateStatistics(
+                    rx_bits_per_second=1,
+                    tx_bits_per_second=2,
+                    rx_packets_per_second=3,
+                    tx_packets_per_second=4,
+                ),
+                traffic=PortTrafficStatistics(
+                    rx_unicast_packets=1,
+                    tx_unicast_packets=2,
+                    rx_broadcast_packets=3,
+                    tx_broadcast_packets=4,
+                    rx_multicast_packets=5,
+                    tx_multicast_packets=6,
+                ),
+                rx_sizes=_packet_sizes(),
+                tx_sizes=_packet_sizes(),
+                detailed_errors=_errors(),
             ),
         )
 
@@ -137,6 +177,30 @@ class FakeAdapter:
     def get_snmp(self) -> SnmpInfo:
         return SnmpInfo(enabled=True, community="public", contact="Ops", location="Office")
 
+    def get_sfp(self) -> SfpInfo:
+        return SfpInfo(vendor="Test")
+
+    def get_forwarding(self) -> ForwardingInfo:
+        return ForwardingInfo(
+            mirror_target_port=None,
+            ports=(
+                PortForwardingInfo(
+                    number=1,
+                    destination_port_numbers=(1,),
+                    lock=False,
+                    lock_on_first=False,
+                    mirror_ingress=False,
+                    mirror_egress=False,
+                ),
+            ),
+        )
+
+    def get_igmp_groups(self) -> tuple[IgmpGroup, ...]:
+        return (IgmpGroup(address="239.1.2.3", vlan_id=1, port_numbers=(1,)),)
+
+    def get_acl_rules(self) -> tuple[AclRule, ...]:
+        return ()
+
     def get_port_vlans(self) -> tuple[PortVlanInfo, ...]:
         return (
             PortVlanInfo(
@@ -166,6 +230,40 @@ def identity(version: str = "2.19") -> DeviceIdentity:
         product_code="CSS106-5G-1S",
         firmware_version=version,
         marketing_name="RB260GS",
+    )
+
+
+def _packet_sizes() -> PacketSizeStatistics:
+    return PacketSizeStatistics(
+        frames_64_bytes=0,
+        frames_65_to_127_bytes=0,
+        frames_128_to_255_bytes=0,
+        frames_256_to_511_bytes=0,
+        frames_512_to_1023_bytes=0,
+        frames_1024_to_1518_bytes=0,
+        frames_1519_to_max_bytes=0,
+    )
+
+
+def _errors() -> PortErrorStatistics:
+    return PortErrorStatistics(
+        rx_pause_frames=0,
+        rx_fcs_errors=0,
+        rx_alignment_errors=0,
+        rx_runts=0,
+        rx_fragments=0,
+        rx_too_long=0,
+        rx_overflows=0,
+        tx_pause_frames=0,
+        tx_underruns=0,
+        tx_too_long=0,
+        tx_collisions=0,
+        tx_excessive_collisions=0,
+        tx_multiple_collisions=0,
+        tx_single_collisions=0,
+        tx_excessive_deferred=0,
+        tx_deferred=0,
+        tx_late_collisions=0,
     )
 
 
@@ -223,6 +321,10 @@ def test_policy_bound_device_rechecks_read_permission() -> None:
     assert device.get_hosts()[0].port_numbers == (1,)
     assert device.get_rstp().ports[0].role.value == "designated"
     assert device.get_snmp().community == "public"
+    assert device.get_sfp().vendor == "Test"
+    assert device.get_forwarding().ports[0].number == 1
+    assert device.get_igmp_groups()[0].vlan_id == 1
+    assert device.get_acl_rules() == ()
     assert device.get_port_vlans()[0].default_vlan_id == 10
     assert device.get_vlans()[0].vlan_id == 10
     assert device.warnings[0].code == "untested_firmware"
@@ -265,6 +367,14 @@ def test_policy_bound_device_rejects_unsupported_feature() -> None:
         device.get_rstp()
     with pytest.raises(UnsupportedFeatureError, match="snmp"):
         device.get_snmp()
+    with pytest.raises(UnsupportedFeatureError, match="sfp"):
+        device.get_sfp()
+    with pytest.raises(UnsupportedFeatureError, match="forwarding"):
+        device.get_forwarding()
+    with pytest.raises(UnsupportedFeatureError, match="igmp groups"):
+        device.get_igmp_groups()
+    with pytest.raises(UnsupportedFeatureError, match="acl"):
+        device.get_acl_rules()
     with pytest.raises(UnsupportedFeatureError, match="vlan"):
         device.get_port_vlans()
     with pytest.raises(UnsupportedFeatureError, match="vlan"):

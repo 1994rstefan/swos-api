@@ -29,3 +29,11 @@ def test_rb260gs_219_cumulative_port_statistics() -> None:
         assert port.tx_packets >= 0
         assert port.rx_errors >= 0
         assert port.tx_errors >= 0
+        assert port.rates.rx_bits_per_second >= 0
+        assert port.rates.tx_packets_per_second >= 0
+        assert port.traffic.rx_unicast_packets >= 0
+        assert port.traffic.tx_multicast_packets >= 0
+        assert port.rx_sizes.frames_64_bytes >= 0
+        assert port.tx_sizes.frames_1519_to_max_bytes >= 0
+        assert port.detailed_errors.rx_fcs_errors >= 0
+        assert port.detailed_errors.tx_late_collisions >= 0
