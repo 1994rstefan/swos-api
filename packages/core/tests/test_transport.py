@@ -2,7 +2,7 @@ import gzip
 
 import httpx
 import pytest
-from swos_core.errors import AuthenticationError, TransportError
+from swos_core.errors import AuthenticationError, HttpStatusError, TransportError
 from swos_core.models import DeviceConnection
 from swos_core.transport import HttpTransport
 
@@ -53,6 +53,8 @@ def test_transport_normalizes_server_failure() -> None:
         transport.request("GET", "/sys.b")
 
     assert "HTTP 500" in str(error.value)
+    assert isinstance(error.value, HttpStatusError)
+    assert error.value.status_code == 500
 
 
 def test_transport_normalizes_timeout() -> None:

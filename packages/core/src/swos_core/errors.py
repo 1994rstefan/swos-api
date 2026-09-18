@@ -11,6 +11,14 @@ class TransportError(SwOSError):
     """A device request failed before a valid response was received."""
 
 
+class HttpStatusError(TransportError):
+    """A device request returned an unsuccessful HTTP status."""
+
+    def __init__(self, status_code: int) -> None:
+        super().__init__(f"The SwOS device returned HTTP {status_code}")
+        self.status_code = status_code
+
+
 class AuthenticationError(TransportError):
     """The SwOS device rejected the supplied credentials."""
 
@@ -21,6 +29,10 @@ class ProtocolError(SwOSError):
 
 class InvalidOperationError(SwOSError):
     """A requested operation is invalid for the selected device."""
+
+
+class PasswordUpdateRejectedError(SwOSError):
+    """The device rejected an administrator password update."""
 
 
 class UnsupportedFeatureError(SwOSError):

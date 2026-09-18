@@ -1,8 +1,10 @@
 import json
 from importlib import import_module
+from typing import ClassVar
 
 import pytest
 from swos_cli import __version__
+from swos_core.errors import AuthenticationError
 from swos_core.models import (
     AclRule,
     DeviceIdentity,
@@ -15,6 +17,7 @@ from swos_core.models import (
     IgmpInfo,
     OperationResult,
     PacketSizeStatistics,
+    PasswordUpdate,
     PortConfigurationUpdate,
     PortErrorStatistics,
     PortForwardingInfo,
@@ -81,6 +84,8 @@ def _detailed_errors() -> PortErrorStatistics:
 
 
 class FakeDevice:
+    password_updates: ClassVar[list[str]] = []
+
     def __init__(
         self,
         identity: DeviceIdentity,
@@ -352,6 +357,19 @@ class FakeDevice:
     def set_device_name(self, update: DeviceNameUpdate) -> OperationResult[SystemInfo]:
         info = self.get_system_info().model_copy(update={"name": update.name})
         return OperationResult[SystemInfo](changed=update.name != "Office Switch", value=info)
+
+    def set_admin_password(self, update: PasswordUpdate) -> OperationResult[SystemInfo]:
+        self.password_updates.append(update.new_password.get_secret_value())
+        return OperationResult[SystemInfo](
+            changed=True,
+            value=self.get_system_info(),
+            warnings=(
+                SafetyWarning(
+                    code="administrator_credentials_changed",
+                    message="Administrator credentials changed; future connections need them.",
+                ),
+            ),
+        )
 
     def set_system_configuration(
         self,
@@ -767,6 +785,150 @@ def test_system_rename_human_and_json_output_without_confirmation(monkeypatch) -
     data = json.loads(machine.stdout)["data"]
     assert data["changed"] is False
     assert data["system"]["name"] == "Office Switch"
+
+
+def test_system_password_set_reads_environment_without_output_leakage(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    mock_registry(monkeypatch)
+    FakeDevice.password_updates.clear()
+    secret = "rotation-secret-1"
+
+    result = runner.invoke(
+        app,
+        [
+            "system",
+            "password",
+            "set",
+            "--new-password-env",
+            "ROTATION_SECRET",
+            "--url",
+            "http://192.0.2.1",
+            "-ojson",
+        ],
+        env={"ROTATION_SECRET": secret},
+    )
+
+    assert result.exit_code == 0
+    assert FakeDevice.password_updates == [secret]
+    payload = json.loads(result.stdout)
+    assert payload["data"]["changed"] is True
+    assert payload["data"]["system"]["identity"]["product_code"] == "CSS106-5G-1S"
+    assert payload["data"]["warnings"][0]["code"] == "administrator_credentials_changed"
+    assert secret not in result.stdout
+    assert secret not in result.stderr
+
+
+@pytest.mark.parametrize(
+    "stdin_value, expected",
+    [
+        ("stdin-secret\n", "stdin-secret"),
+        ("\n", ""),
+        ("", ""),
+    ],
+)
+def test_system_password_set_reads_stdin_and_preserves_empty_password(
+    monkeypatch,
+    stdin_value: str,
+    expected: str,
+) -> None:  # type: ignore[no-untyped-def]
+    mock_registry(monkeypatch)
+    FakeDevice.password_updates.clear()
+
+    result = runner.invoke(
+        app,
+        [
+            "system",
+            "password",
+            "set",
+            "--new-password-stdin",
+            "--url",
+            "http://192.0.2.1",
+        ],
+        input=stdin_value,
+    )
+
+    assert result.exit_code == 0
+    assert FakeDevice.password_updates == [expected]
+    assert "Administrator password changed and verified" in result.stdout
+    if expected:
+        assert expected not in result.stdout
+        assert expected not in result.stderr
+
+
+def test_system_password_set_preserves_empty_environment_value(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    mock_registry(monkeypatch)
+    FakeDevice.password_updates.clear()
+
+    result = runner.invoke(
+        app,
+        [
+            "system",
+            "password",
+            "set",
+            "--new-password-env",
+            "EMPTY_PASSWORD",
+            "--url",
+            "http://192.0.2.1",
+        ],
+        env={"EMPTY_PASSWORD": ""},
+    )
+
+    assert result.exit_code == 0
+    assert FakeDevice.password_updates == [""]
+
+
+@pytest.mark.parametrize(
+    "arguments, message",
+    [
+        ([], "Exactly one"),
+        (
+            ["--new-password-stdin", "--new-password-env", "ROTATION_SECRET"],
+            "Exactly one",
+        ),
+        (["--new-password-env", "MISSING_ROTATION_SECRET"], "is not set"),
+        (["--new-password", "plaintext"], "No such option"),
+    ],
+)
+def test_system_password_set_requires_exactly_one_secure_source(
+    arguments: list[str],
+    message: str,
+) -> None:
+    result = runner.invoke(app, ["system", "password", "set", *arguments], input="ignored")
+
+    assert result.exit_code == 2
+    assert message in result.stderr
+
+
+def test_system_password_set_authentication_failure_is_structured_and_secret_free(
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    secret = "never-render-this-secret"
+
+    def fail(self: FakeDevice, update: PasswordUpdate) -> OperationResult[SystemInfo]:
+        del self, update
+        raise AuthenticationError("The SwOS device rejected the supplied credentials")
+
+    monkeypatch.setattr(FakeDevice, "set_admin_password", fail)
+    mock_registry(monkeypatch)
+    result = runner.invoke(
+        app,
+        [
+            "system",
+            "password",
+            "set",
+            "--new-password-env",
+            "ROTATION_SECRET",
+            "--url",
+            "http://192.0.2.1",
+            "-ojson",
+        ],
+        env={"ROTATION_SECRET": secret},
+    )
+
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["error"]["code"] == "authentication_error"
+    assert secret not in result.stdout
+    assert secret not in result.stderr
 
 
 def test_system_configure_uses_explicit_options_and_full_baseline(monkeypatch) -> None:  # type: ignore[no-untyped-def]

@@ -13,6 +13,7 @@ from swos_core.models import (
     HostEntry,
     IgmpGroup,
     OperationResult,
+    PasswordUpdate,
     PortConfigurationUpdate,
     PortForwardingInfo,
     PortInfo,
@@ -51,6 +52,17 @@ def test_connection_hides_password() -> None:
 
     assert "top-secret" not in repr(connection)
     assert connection.password.get_secret_value() == "top-secret"
+
+
+def test_password_update_never_serializes_or_represents_plaintext() -> None:
+    update = PasswordUpdate(new_password="rotation-secret")
+
+    assert update.model_dump(mode="python") == {}
+    assert update.model_dump(mode="json") == {}
+    assert update.model_dump_json() == "{}"
+    assert "rotation-secret" not in repr(update)
+    assert "rotation-secret" not in str(update)
+    assert update.new_password.get_secret_value() == "rotation-secret"
 
 
 def test_capability_lookup() -> None:

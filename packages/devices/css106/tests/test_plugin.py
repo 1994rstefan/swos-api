@@ -1,7 +1,15 @@
 from pathlib import Path
 
 import pytest
-from swos_core.errors import InvalidOperationError, ProtocolError, UnsupportedFirmwareError
+from pydantic import SecretStr
+from swos_core.errors import (
+    AuthenticationError,
+    HttpStatusError,
+    InvalidOperationError,
+    PasswordUpdateRejectedError,
+    ProtocolError,
+    UnsupportedFirmwareError,
+)
 from swos_core.models import (
     AddressMode,
     DeviceConnection,
@@ -11,6 +19,7 @@ from swos_core.models import (
     ForwardingMirroringUpdate,
     ForwardingPortPolicyUpdate,
     HostEntry,
+    PasswordUpdate,
     PortConfigurationUpdate,
     PortNameUpdate,
     PortVlanPolicyUpdate,
@@ -27,6 +36,7 @@ from swos_core.safety import FirmwareSafetyPolicy
 from swos_device_css106 import CSS106Plugin, plugin
 from swos_device_css106.protocol import (
     MAX_ACL_RULES,
+    MAX_ADMIN_PASSWORD_BYTES,
     MAX_DEVICE_NAME_BYTES,
     MAX_NESTING_DEPTH,
     MAX_PAYLOAD_BYTES,
@@ -41,6 +51,7 @@ from swos_device_css106.protocol import (
     encode_forwarding_matrix_update,
     encode_forwarding_mirroring_update,
     encode_forwarding_port_policy_update,
+    encode_password_update,
     encode_port_configuration_update,
     encode_port_name_update,
     encode_port_vlan_policy_update,
@@ -66,6 +77,7 @@ from swos_device_css106.protocol import (
     system_configuration_write_state_from_payload,
     system_info_from_payload,
     validate_device_name,
+    validate_password_update,
     vlan_table_write_state_from_payload,
     vlans_from_payload,
 )
@@ -115,6 +127,26 @@ class FakeTransport:
 
     def __exit__(self, *args: object) -> None:
         pass
+
+
+class FailingTransport(FakeTransport):
+    def __init__(self, error: Exception) -> None:
+        super().__init__(b"")
+        self.error = error
+
+    def request(
+        self,
+        method: str,
+        path: str,
+        *,
+        content: bytes | str | None = None,
+        headers: dict[str, str] | None = None,
+        max_response_bytes: int | None = None,
+    ) -> bytes:
+        self.requests.append((method, path))
+        self.request_details.append((method, path, content, headers))
+        assert max_response_bytes == MAX_PAYLOAD_BYTES
+        raise self.error
 
 
 def fixture_payload() -> bytes:
@@ -297,6 +329,7 @@ def test_probe_and_adapter_normalize_system_data() -> None:
     assert info.discovery_protocol_port_numbers == (1, 2, 3, 4, 5, 6)
     assert info.health is not None
     assert info.health.temperature_celsius is None
+    assert adapter.capabilities.supports("admin_password_write")
     assert adapter.capabilities.supports("rstp_port_enable_write")
     assert adapter.capabilities.supports("forwarding_port_policy_write")
     assert not adapter.capabilities.supports("rstp_bridge_write")
@@ -882,6 +915,300 @@ def test_adapter_rejects_port_name_read_back_mismatch() -> None:
 
     with pytest.raises(ProtocolError, match="read-back verification"):
         adapter.set_port_name(PortNameUpdate(number=1, name="Uplink"))
+
+
+@pytest.mark.parametrize(
+    "new_password, current_password, expected",
+    [
+        ("", "", "6414bd2b64166b6271272cf3dd1464ad0f479a5109cdc8e40d14998fdcbef5df"),
+        ("new", "old", "7d40892fc4eba7eda72a454d96ec084ccdd2894c51b2fbfe56ac3b1806653869"),
+        ("same", "same", "fbd9792ab6d4b90f8bc521bcc8ac0b403e3183d3af15a0ae625c98d208001641"),
+        (
+            "123456789012345",
+            "abcdefghijklmno",
+            "3371053543f92285a41bff3236b175ec19dedf0c20a85316e20d130e3e2f9dfa",
+        ),
+        ("", "old", "7d40892faa8ed0eda72a454d96ec084ccdd2894c51b2fbfe56ac3b1806653869"),
+        ("new", "", "647ad85c64166b6271272cf3dd1464ad0f479a5109cdc8e40d14998fdcbef5df"),
+        ("new", "päss", "4a6c3e871a981a7d4a29102eded3832e0f396594cce68d53d072b28f22a2881f"),
+        (
+            "ASCII",
+            "密码",
+            "5bbb78c6d8a13e9e048bf12a1368f65734085a10755dec0f70bb641e73e3f3767969",
+        ),
+        (
+            "next",
+            "🔒old",
+            "d8e8dd8396ce5017e6caffc482d401970acf90e6dbc31897f859c4326e2991c5b6d9",
+        ),
+        (
+            "x",
+            "😀😀😀😀😀😀😀a",
+            "d8efde39d84ade18d831de2dd8bdde4fd8ddde1bd837de5ad846dee427d9fecbcc582940d2551fa3fb8a72b71558",
+        ),
+    ],
+)
+def test_password_encoder_matches_independent_ui_vectors(
+    new_password: str,
+    current_password: str,
+    expected: str,
+) -> None:
+    content = encode_password_update(
+        PasswordUpdate(new_password=new_password),
+        SecretStr(current_password),
+    )
+
+    assert content == f"{{pwd:'{expected}'}}".encode("ascii")
+
+
+@pytest.mark.parametrize(
+    "new_password, current_password, message",
+    [
+        ("x" * (MAX_ADMIN_PASSWORD_BYTES + 1), "old", "new.*cannot exceed"),
+        ("new", "x" * (MAX_ADMIN_PASSWORD_BYTES + 1), "current.*cannot exceed"),
+        ("pässword", "old", "new.*must be ASCII"),
+        ("new", "😀" * 8, "current.*cannot exceed.*UTF-16 code units"),
+    ],
+)
+def test_password_encoder_rejects_invalid_new_and_connection_passwords(
+    new_password: str,
+    current_password: str,
+    message: str,
+) -> None:
+    update = PasswordUpdate(new_password=new_password)
+
+    with pytest.raises(InvalidOperationError, match=message):
+        validate_password_update(update, SecretStr(current_password))
+    with pytest.raises(InvalidOperationError, match=message):
+        encode_password_update(update, SecretStr(current_password))
+
+
+def test_adapter_rotates_password_then_verifies_with_copied_new_credentials() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    current_transport = FakeTransport(b"")
+    new_transport = FakeTransport(fixture_payload())
+    transports = iter((current_transport, new_transport))
+    connections: list[DeviceConnection] = []
+
+    def transport_factory(connection: DeviceConnection) -> FakeTransport:
+        connections.append(connection)
+        return next(transports)
+
+    connection = DeviceConnection(
+        url="https://192.0.2.1",
+        username="admin",
+        password="old",
+        timeout=4.0,
+        verify_tls=False,
+    )
+    adapter = CSS106Plugin(transport_factory=transport_factory).create(  # type: ignore[arg-type]
+        identity=identity,
+        connection=connection,
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+
+    result = adapter.set_admin_password(PasswordUpdate(new_password="new"))
+
+    assert result.changed
+    assert result.value.identity == identity
+    assert result.warnings[0].code == "administrator_credentials_changed"
+    assert current_transport.requests == [("POST", "/!pwd.b")]
+    assert current_transport.request_details[0][2:] == (
+        b"{pwd:'7d40892fc4eba7eda72a454d96ec084ccdd2894c51b2fbfe56ac3b1806653869'}",
+        {"Content-Type": "text/plain"},
+    )
+    assert new_transport.requests == [("GET", "/sys.b")]
+    assert len(connections) == 2
+    assert connections[0] is connection
+    assert connections[1] is not connection
+    assert connections[1].url == connection.url
+    assert connections[1].username == connection.username
+    assert connections[1].timeout == connection.timeout
+    assert connections[1].verify_tls == connection.verify_tls
+    assert connections[0].password.get_secret_value() == "old"
+    assert connections[1].password.get_secret_value() == "new"
+    rendered = repr(result) + str(result) + result.model_dump_json()
+    assert "old" not in rendered
+    assert "{pwd:" not in rendered
+
+
+def test_adapter_executes_and_verifies_same_password_request() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    current_transport = FakeTransport(b"")
+    verification_transport = FakeTransport(fixture_payload())
+    transports = iter((current_transport, verification_transport))
+    adapter = CSS106Plugin(  # type: ignore[arg-type]
+        transport_factory=lambda connection: next(transports)
+    ).create(
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1", password="same"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+
+    result = adapter.set_admin_password(PasswordUpdate(new_password="same"))
+
+    assert result.changed
+    assert current_transport.requests == [("POST", "/!pwd.b")]
+    assert verification_transport.requests == [("GET", "/sys.b")]
+
+
+def test_adapter_uses_new_connection_for_subsequent_reads_and_writes() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    current_transport = FakeTransport(b"")
+    verification_transport = FakeTransport(fixture_payload())
+    read_transport = FakeTransport(fixture_payload())
+    write_transport = FakeTransport((fixture_payload(), b"", renamed_system_payload("Rotated")))
+    transports = iter((current_transport, verification_transport, read_transport, write_transport))
+    connections: list[DeviceConnection] = []
+
+    def transport_factory(connection: DeviceConnection) -> FakeTransport:
+        connections.append(connection)
+        return next(transports)
+
+    adapter = CSS106Plugin(transport_factory=transport_factory).create(  # type: ignore[arg-type]
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1", password="before-rotate"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+
+    rotation = adapter.set_admin_password(PasswordUpdate(new_password="after-rotate"))
+    read = adapter.get_system_info()
+    write = adapter.set_device_name(DeviceNameUpdate(name="Rotated"))
+
+    assert rotation.changed
+    assert read.identity == identity
+    assert write.changed
+    assert write.value.name == "Rotated"
+    assert current_transport.requests == [("POST", "/!pwd.b")]
+    assert verification_transport.requests == [("GET", "/sys.b")]
+    assert read_transport.requests == [("GET", "/sys.b")]
+    assert write_transport.requests == [
+        ("GET", "/sys.b"),
+        ("POST", "/sys.b"),
+        ("GET", "/sys.b"),
+    ]
+    assert [connection.password.get_secret_value() for connection in connections] == [
+        "before-rotate",
+        "after-rotate",
+        "after-rotate",
+        "after-rotate",
+    ]
+    rendered = repr(rotation) + rotation.model_dump_json() + repr(read) + repr(write)
+    assert "before-rotate" not in rendered
+    assert "after-rotate" not in rendered
+
+
+def test_adapter_normalizes_password_endpoint_405_without_leaking_secret() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    transport = FailingTransport(HttpStatusError(405))
+    adapter = CSS106Plugin(transport_factory=lambda connection: transport).create(  # type: ignore[arg-type]
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1", password="old-secret"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+
+    with pytest.raises(PasswordUpdateRejectedError) as error:
+        adapter.set_admin_password(PasswordUpdate(new_password="new-secret"))
+
+    assert transport.requests == [("POST", "/!pwd.b")]
+    assert "old-secret" not in str(error.value)
+    assert "new-secret" not in str(error.value)
+
+
+def test_adapter_does_not_retry_old_credentials_after_new_authentication_failure() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    current_transport = FakeTransport(b"")
+    verification_transport = FailingTransport(AuthenticationError("authentication failed"))
+    transports = iter((current_transport, verification_transport))
+    connections: list[DeviceConnection] = []
+
+    def transport_factory(connection: DeviceConnection) -> FakeTransport:
+        connections.append(connection)
+        return next(transports)
+
+    adapter = CSS106Plugin(transport_factory=transport_factory).create(  # type: ignore[arg-type]
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1", password="old-secret"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+
+    with pytest.raises(AuthenticationError, match="authentication failed"):
+        adapter.set_admin_password(PasswordUpdate(new_password="new-secret"))
+
+    assert current_transport.requests == [("POST", "/!pwd.b")]
+    assert verification_transport.requests == [("GET", "/sys.b")]
+    assert [item.password.get_secret_value() for item in connections] == [
+        "old-secret",
+        "new-secret",
+    ]
+
+
+def test_adapter_requires_exact_identity_with_new_credentials() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    current_transport = FakeTransport(b"")
+    changed_identity = fixture_payload().replace(b"322e3139", b"322e3230")
+    verification_transport = FakeTransport(changed_identity)
+    later_read_transport = FakeTransport(fixture_payload())
+    transports = iter((current_transport, verification_transport, later_read_transport))
+    connections: list[DeviceConnection] = []
+
+    def transport_factory(connection: DeviceConnection) -> FakeTransport:
+        connections.append(connection)
+        return next(transports)
+
+    adapter = CSS106Plugin(transport_factory=transport_factory).create(  # type: ignore[arg-type]
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1", password="old"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+
+    with pytest.raises(ProtocolError, match="identity changed"):
+        adapter.set_admin_password(PasswordUpdate(new_password="new"))
+    adapter.get_system_info()
+
+    assert current_transport.requests == [("POST", "/!pwd.b")]
+    assert verification_transport.requests == [("GET", "/sys.b")]
+    assert later_read_transport.requests == [("GET", "/sys.b")]
+    assert [connection.password.get_secret_value() for connection in connections] == [
+        "old",
+        "new",
+        "old",
+    ]
+
+
+def test_adapter_validates_passwords_before_opening_transport() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    factory_calls = 0
+
+    def transport_factory(connection: DeviceConnection) -> FakeTransport:
+        nonlocal factory_calls
+        del connection
+        factory_calls += 1
+        return FakeTransport(b"")
+
+    adapter = CSS106Plugin(transport_factory=transport_factory).create(  # type: ignore[arg-type]
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1", password="x" * 16),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+
+    with pytest.raises(InvalidOperationError, match=r"current.*cannot exceed"):
+        adapter.set_admin_password(PasswordUpdate(new_password="valid"))
+    assert factory_calls == 0
 
 
 def test_adapter_sets_device_name_with_one_complete_system_post_and_verifies_it() -> None:

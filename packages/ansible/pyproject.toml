@@ -21,7 +21,7 @@ classifiers = [
   "Programming Language :: Python :: 3.14",
   "Typing :: Typed",
 ]
-dependencies = ["swos-core>=0.8.1,<0.10.0"]
+dependencies = ["swos-core>=0.8.1,<0.11.0"]
 
 [project.urls]
 Homepage = "https://github.com/1994rstefan/swos-api"

@@ -17,6 +17,7 @@ from swos_core.models import (
     HostEntry,
     IgmpGroup,
     OperationResult,
+    PasswordUpdate,
     PortConfigurationUpdate,
     PortInfo,
     PortNameUpdate,
@@ -139,6 +140,16 @@ class DeviceAdapter(Protocol):
 
     def set_device_name(self, update: DeviceNameUpdate) -> OperationResult[SystemInfo]:
         """Set and verify the configured device name."""
+
+        ...
+
+    def set_admin_password(self, update: PasswordUpdate) -> OperationResult[SystemInfo]:
+        """Set the administrator password and verify with the new credentials."""
+
+        ...
+
+    def validate_admin_password(self, update: PasswordUpdate) -> None:
+        """Validate a password update without writing to the device."""
 
         ...
 
@@ -496,6 +507,24 @@ class SwOSDevice:
 
         warnings = self._authorize_write("device_name_write")
         self._adapter.validate_device_name(update)
+        return warnings
+
+    def set_admin_password(self, update: PasswordUpdate) -> OperationResult[SystemInfo]:
+        """Rotate the administrator password after write safety and capability checks."""
+
+        warnings = self._authorize_write("admin_password_write")
+        result = self._adapter.set_admin_password(update)
+        return OperationResult[SystemInfo](
+            changed=result.changed,
+            value=result.value,
+            warnings=warnings + result.warnings,
+        )
+
+    def validate_admin_password(self, update: PasswordUpdate) -> tuple[SafetyWarning, ...]:
+        """Validate an administrator password under write policy without changing it."""
+
+        warnings = self._authorize_write("admin_password_write")
+        self._adapter.validate_admin_password(update)
         return warnings
 
     def set_system_configuration(

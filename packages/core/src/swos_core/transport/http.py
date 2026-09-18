@@ -7,7 +7,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from swos_core.errors import AuthenticationError, TransportError
+from swos_core.errors import AuthenticationError, HttpStatusError, TransportError
 from swos_core.models import DeviceConnection
 
 
@@ -79,9 +79,7 @@ class HttpTransport:
         except httpx.TimeoutException as exc:
             raise TransportError("The SwOS device request timed out") from exc
         except httpx.HTTPStatusError as exc:
-            raise TransportError(
-                f"The SwOS device returned HTTP {exc.response.status_code}"
-            ) from exc
+            raise HttpStatusError(exc.response.status_code) from exc
         except httpx.RequestError as exc:
             raise TransportError("The SwOS device request failed") from exc
 

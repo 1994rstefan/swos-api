@@ -20,6 +20,8 @@ swosctl system rename "Office Switch" --device office
 swosctl system configure --static-ip 192.0.2.10 --device office
 swosctl system configure --igmp-snooping on --igmp-version v3 --device office
 swosctl system configure --allow-port 1 --allow-port 6 --device office
+swosctl system password set --new-password-env NEW_SWOS_PASSWORD --device office
+printf '%s\n' "$NEW_SWOS_PASSWORD" | swosctl system password set --new-password-stdin --device office
 swosctl port rename 1 Uplink --device office
 swosctl port configure 5 --state enabled --flow-control on --device office
 swosctl port configure 5 --negotiation auto --device office
@@ -41,6 +43,14 @@ swosctl -o json port rename 1 Uplink --device office
 Omitted SNMP metadata options preserve their current values. Passing an empty
 string explicitly clears the selected field. Write commands do not prompt for
 confirmation; firmware write authorization is enforced by `swos-core`.
+
+`system password set` requires exactly one secure, noninteractive source:
+`--new-password-env NAME` or `--new-password-stdin`. There is no command-line
+argument containing the new password and no confirmation prompt. Empty values
+are preserved. A trailing line ending supplied through stdin is treated as the
+input delimiter. Rotation always executes, even when the supplied value may
+equal the current password, and returns only verified system state plus a
+credential-change/lockout warning.
 
 `system configure` accepts explicit options for address mode/static IP, admin
 MAC, identity, management source/prefix/ports/VLAN, independent VLAN lookup,

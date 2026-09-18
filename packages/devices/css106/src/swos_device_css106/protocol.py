@@ -10,7 +10,7 @@ from string import hexdigits
 from typing import Any, NoReturn, TypeAlias, TypeVar
 from unicodedata import category
 
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
 from swos_core.errors import InvalidOperationError, ProtocolError
 from swos_core.models import (
     AclRule,
@@ -27,6 +27,7 @@ from swos_core.models import (
     IgmpInfo,
     IgmpVersion,
     PacketSizeStatistics,
+    PasswordUpdate,
     PoeMode,
     PoeStatus,
     PortConfigurationUpdate,
@@ -85,6 +86,7 @@ MAX_STATIC_HOSTS = 2048
 MAX_DEVICE_NAME_BYTES = 16
 MAX_PORT_NAME_BYTES = 16
 MAX_SNMP_METADATA_BYTES = 64
+MAX_ADMIN_PASSWORD_BYTES = 15
 
 EnumValue = TypeVar("EnumValue", bound=StrEnum)
 
@@ -401,6 +403,41 @@ def validate_device_name(name: str) -> bytes:
     """Validate and encode a device name accepted by tested CSS106 firmware."""
 
     return _validate_printable_ascii(name, "device names", MAX_DEVICE_NAME_BYTES)
+
+
+def encode_password_update(update: PasswordUpdate, current_password: SecretStr) -> bytes:
+    """Encode the exact CSS106 password body produced by the SwOS 2.19 UI."""
+
+    old = _validate_current_password(current_password)
+    new = _validate_new_password(update.new_password)
+    buffer = [*old, 0, *new]
+    buffer.extend([0] * (32 - len(buffer)))
+
+    key_source = old or (ord("*"),)
+    key = (key_source * (16 // len(key_source) + 1))[:16]
+    state = list(range(256))
+    key_index = 0
+    for index in range(256):
+        key_index = (key_index + state[index] + key[index % len(key)]) & 0xFF
+        state[index], state[key_index] = state[key_index], state[index]
+
+    left = 0
+    right = 0
+    for index in range(64):
+        left = (left + 1) & 0xFF
+        right = (right + state[left]) & 0xFF
+        state[left], state[right] = state[right], state[left]
+        buffer[index & 31] ^= state[(state[left] + state[right]) & 0xFF]
+
+    encoded = "".join(f"{value:02x}" for value in buffer)
+    return f"{{pwd:'{encoded}'}}".encode("ascii")
+
+
+def validate_password_update(update: PasswordUpdate, current_password: SecretStr) -> None:
+    """Validate both password inputs accepted by the CSS106 2.19 UI."""
+
+    _validate_current_password(current_password)
+    _validate_new_password(update.new_password)
 
 
 def ports_from_link_payload(
@@ -1665,6 +1702,32 @@ def _validate_printable_ascii(value: str, label: str, maximum_bytes: int) -> byt
     if len(encoded) > maximum_bytes:
         raise InvalidOperationError(f"CSS106 {label} cannot exceed {maximum_bytes} characters")
     return encoded
+
+
+def _validate_current_password(secret: SecretStr) -> tuple[int, ...]:
+    encoded = secret.get_secret_value().encode("utf-16-le", errors="surrogatepass")
+    units = tuple(
+        int.from_bytes(encoded[index : index + 2], byteorder="little")
+        for index in range(0, len(encoded), 2)
+    )
+    if len(units) > MAX_ADMIN_PASSWORD_BYTES:
+        raise InvalidOperationError(
+            "CSS106 current administrator password cannot exceed "
+            f"{MAX_ADMIN_PASSWORD_BYTES} UTF-16 code units"
+        )
+    return units
+
+
+def _validate_new_password(secret: SecretStr) -> tuple[int, ...]:
+    try:
+        encoded = secret.get_secret_value().encode("ascii")
+    except UnicodeEncodeError as exc:
+        raise InvalidOperationError("CSS106 new administrator password must be ASCII") from exc
+    if len(encoded) > MAX_ADMIN_PASSWORD_BYTES:
+        raise InvalidOperationError(
+            f"CSS106 new administrator password cannot exceed {MAX_ADMIN_PASSWORD_BYTES} characters"
+        )
+    return tuple(encoded)
 
 
 def _selected_ports(data: dict[str, SwOSValue], field: str, port_count: int) -> tuple[int, ...]:

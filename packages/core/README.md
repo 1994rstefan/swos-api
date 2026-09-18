@@ -17,10 +17,12 @@ Matching `validate_*` methods enforce the same firmware policy, capability, and
 adapter-specific preconditions without performing a write. Consumers use these
 after fresh reads to implement device-validating dry runs and check mode.
 
-Desired state covers complete system configuration, device names, port names,
-per-port RSTP enable, bridge settings, forwarding matrix/mirroring/port policy,
-per-port VLAN policy, SNMP contact/location metadata, complete VLAN/static-host
-tables, and complete ordered ACL tables.
+Desired state covers administrator password rotation, complete system
+configuration, device names, port names, per-port RSTP enable, bridge settings,
+forwarding matrix/mirroring/port policy, per-port VLAN policy, SNMP
+contact/location metadata, complete VLAN/static-host tables, and complete ordered
+ACL tables. `PasswordUpdate` stores its value as `SecretStr` and excludes it from
+all model serialization.
 Static-host writes reuse `HostEntry` but reject dynamic entries. `None` preserves
 an omitted field where supported; explicit `"unlimited"` clears an egress rate.
 

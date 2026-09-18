@@ -41,6 +41,21 @@ use the complete system object described below. The complete SNMP body is
 ordered `en`, `com`, `ci`, `loc` and preserves the raw enabled and community
 fields.
 
+Administrator password rotation is exposed separately through
+`admin_password_write`. The desired password must be ASCII and at most 15
+characters; the current connection password may be non-ASCII and is limited to
+15 JavaScript UTF-16 code units. Empty passwords are valid. The adapter
+reproduces the SwOS 2.19 UI transform and posts only its lowercase hexadecimal
+result to `/!pwd.b` using the current credentials. Non-ASCII current code units
+above `0xff` make that result longer than the usual 64 characters, matching the
+UI's untruncated `charCodeAt` behavior. The adapter then creates a new transport
+from the same connection settings with a new `SecretStr` password and verifies
+the exact identity through `/sys.b`. Only after successful verification does it
+replace its connection, keeping the same facade usable for later operations. It
+never tries an old-credential readback, never skips a possible same-password
+request, and returns no secret material. Verification failure can leave
+credentials in an uncertain lockout state.
+
 Guarded complete `/sys.b` configuration writes post exactly `iptp`, `sip`,
 `amac`, `id`, `alla`, `allm`, `allp`, `avln`, `ivl`, `igmp`, `igmq`, `igfl`,
 `igve`, and `pdsc` in UI order. Read-only and unrelated fields are excluded.

@@ -13,7 +13,7 @@ from typing import Annotated, Any, Literal, cast
 import typer
 import typer._click as click
 from dotenv import dotenv_values
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
 from swos_core import (
     AclRule,
     AclVlanTagMode,
@@ -28,6 +28,7 @@ from swos_core import (
     IgmpVersion,
     OperationResult,
     PacketSizeStatistics,
+    PasswordUpdate,
     PluginRegistry,
     PortConfigurationUpdate,
     PortErrorStatistics,
@@ -187,6 +188,8 @@ app = typer.Typer(
 )
 system_app = typer.Typer(help="Read and configure system information.", no_args_is_help=True)
 app.add_typer(system_app, name="system")
+system_password_app = typer.Typer(help="Rotate administrator credentials.", no_args_is_help=True)
+system_app.add_typer(system_password_app, name="password")
 port_app = typer.Typer(help="Read and configure port state.", no_args_is_help=True)
 app.add_typer(port_app, name="port")
 host_app = typer.Typer(help="Read forwarding-database entries.", no_args_is_help=True)
@@ -425,6 +428,74 @@ def system_rename(
         if result.changed
         else f"Device name is already {result.value.name!r}; no change required."
     )
+    if result.warnings:
+        human += "\n" + "\n".join(f"Warning: {warning.message}" for warning in result.warnings)
+    renderer.success(data, human=human)
+
+
+@system_password_app.command("set")
+def system_password_set(
+    ctx: typer.Context,
+    new_password_stdin: Annotated[
+        bool,
+        typer.Option(
+            "--new-password-stdin",
+            help="Read the new password from noninteractive standard input.",
+        ),
+    ] = False,
+    new_password_env: Annotated[
+        str | None,
+        typer.Option(
+            "--new-password-env",
+            metavar="NAME",
+            help="Read the new password from environment variable NAME.",
+        ),
+    ] = None,
+) -> None:
+    """Set and verify a new administrator password without exposing it in argv."""
+
+    if new_password_stdin == (new_password_env is not None):
+        raise typer.BadParameter(
+            "Exactly one of --new-password-stdin or --new-password-env is required"
+        )
+    if new_password_env is not None:
+        if not new_password_env:
+            raise typer.BadParameter("--new-password-env requires a non-empty variable name")
+        if new_password_env not in os.environ:
+            raise typer.BadParameter(
+                f"Environment variable {new_password_env!r} is not set",
+                param_hint="--new-password-env",
+            )
+        new_password = os.environ[new_password_env]
+    else:
+        if sys.stdin.isatty():
+            raise typer.BadParameter(
+                "--new-password-stdin requires piped standard input",
+                param_hint="--new-password-stdin",
+            )
+        new_password = _read_password_stdin()
+
+    cli_context: CliContext = ctx.ensure_object(CliContext)
+    renderer = OutputRenderer(cli_context.configuration.settings.output)
+    try:
+        connected_device = _connect_device(cli_context)
+        result = connected_device.set_admin_password(
+            PasswordUpdate(new_password=SecretStr(new_password))
+        )
+    except ConfigurationError as exc:
+        renderer.error("configuration_error", str(exc))
+        raise typer.Exit(code=2) from exc
+    except SwOSError as exc:
+        renderer.error(_error_code(exc), str(exc))
+        raise typer.Exit(code=1) from exc
+
+    data: dict[str, Any] = {
+        "changed": result.changed,
+        "system": result.value.model_dump(mode="json"),
+    }
+    if result.warnings:
+        data["warnings"] = [warning.model_dump(mode="json") for warning in result.warnings]
+    human = "Administrator password changed and verified with the new credentials."
     if result.warnings:
         human += "\n" + "\n".join(f"Warning: {warning.message}" for warning in result.warnings)
     renderer.success(data, human=human)
@@ -1773,6 +1844,15 @@ def _connect_device(cli_context: CliContext) -> SwOSDevice:
             f"firmware {identity.firmware_version!r}"
         )
     return registry.connect(identity, connection, cli_context.firmware_policy)
+
+
+def _read_password_stdin() -> str:
+    value = sys.stdin.read()
+    if value.endswith("\n"):
+        value = value[:-1]
+        if value.endswith("\r"):
+            value = value[:-1]
+    return value
 
 
 def _yes_no(value: bool) -> str:

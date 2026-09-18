@@ -20,6 +20,24 @@ Destructive tests require both explicit gates:
 pytest --run-integration --run-destructive -m destructive
 ```
 
+Administrator password rotation has a third, separate gate and must be selected
+explicitly:
+
+```bash
+pytest --run-integration --run-destructive --run-password-rotation -m password_rotation
+```
+
+The password test reads the original credential from the configured
+`DeviceConnection` secret, rotates to a fixed 15-character printable ASCII
+temporary credential, verifies the same facade with that credential, and
+rotates back. It skips when the configured password exceeds 15 JavaScript
+UTF-16 code units or already equals the temporary credential. Cleanup probes
+the original credential first without writing. Only when the original probe
+fails and the temporary credential succeeds for the exact expected device does
+cleanup attempt restoration; if neither credential works, the test stops
+writing and reports that a manual reset is required without printing either
+credential.
+
 The CSS106 write tests change and restore the device name, SNMP metadata, port
 name, flow-control state, RSTP enable, lock, lock-on-first, egress rate, and
 selected system masks in `finally`. The system-mask tests toggle only port 5 in

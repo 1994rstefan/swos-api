@@ -4,7 +4,13 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from swos_core.errors import InvalidOperationError, ProtocolError
+from pydantic import SecretStr
+from swos_core.errors import (
+    HttpStatusError,
+    InvalidOperationError,
+    PasswordUpdateRejectedError,
+    ProtocolError,
+)
 from swos_core.models import (
     AclRule,
     AddressMode,
@@ -20,6 +26,7 @@ from swos_core.models import (
     HostEntry,
     IgmpGroup,
     OperationResult,
+    PasswordUpdate,
     PortConfigurationUpdate,
     PortInfo,
     PortNameUpdate,
@@ -49,6 +56,7 @@ from swos_device_css106.protocol import (
     encode_forwarding_matrix_update,
     encode_forwarding_mirroring_update,
     encode_forwarding_port_policy_update,
+    encode_password_update,
     encode_port_configuration_update,
     encode_port_name_update,
     encode_port_vlan_policy_update,
@@ -79,6 +87,7 @@ from swos_device_css106.protocol import (
     system_configuration_write_state_from_payload,
     system_info_from_payload,
     validate_device_name,
+    validate_password_update,
     validate_port_name,
     validate_snmp_metadata,
     vlan_table_write_state_from_payload,
@@ -121,6 +130,7 @@ class CSS106Adapter:
         if self._identity.product_code == "CSS106-5G-1S":
             features.update(
                 {
+                    "admin_password_write",
                     "device_name_write",
                     "port_configuration_write",
                     "port_name_write",
@@ -416,6 +426,61 @@ class CSS106Adapter:
         """Validate a device-name update without opening a transport."""
 
         validate_device_name(update.name)
+
+    def set_admin_password(self, update: PasswordUpdate) -> OperationResult[SystemInfo]:
+        """Rotate credentials and verify identity using only the new password."""
+
+        validate_password_update(update, self._connection.password)
+        content = encode_password_update(update, self._connection.password)
+        try:
+            with self._transport_factory(self._connection) as transport:
+                transport.request(
+                    "POST",
+                    "/!pwd.b",
+                    content=content,
+                    headers={"Content-Type": "text/plain"},
+                    max_response_bytes=MAX_PAYLOAD_BYTES,
+                )
+        except HttpStatusError as exc:
+            if exc.status_code == 405:
+                raise PasswordUpdateRejectedError(
+                    "The SwOS device rejected the current administrator password"
+                ) from exc
+            raise
+
+        new_connection = self._connection.model_copy(
+            update={
+                "password": SecretStr(update.new_password.get_secret_value()),
+            }
+        )
+        with self._transport_factory(new_connection) as transport:
+            after_data = parse_payload(
+                transport.request("GET", "/sys.b", max_response_bytes=MAX_PAYLOAD_BYTES)
+            )
+        reported_identity = identity_from_system(after_data)
+        if reported_identity != self._identity:
+            raise ProtocolError("CSS106 identity changed after administrator password update")
+        self._connection = new_connection
+        verified_info = system_info_from_payload(after_data, reported_identity)
+        return OperationResult[SystemInfo](
+            changed=True,
+            value=verified_info,
+            warnings=(
+                SafetyWarning(
+                    code="administrator_credentials_changed",
+                    message=(
+                        "Administrator credentials changed. Future connections must use the new "
+                        "password; failed verification can indicate credential lockout and may "
+                        "require a manual factory reset."
+                    ),
+                ),
+            ),
+        )
+
+    def validate_admin_password(self, update: PasswordUpdate) -> None:
+        """Validate current and desired credentials without opening a transport."""
+
+        validate_password_update(update, self._connection.password)
 
     def set_system_configuration(
         self,

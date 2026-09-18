@@ -51,6 +51,12 @@ Passwords should normally be supplied through `SWOS_PASSWORD`; command-line
 passwords may be visible in process listings. A future keyring integration is
 planned. Secret values are excluded from configuration validation errors.
 
+Administrator password rotation does not accept the new password through a
+plain command-line value or the persistent settings above. Use exactly one of
+`swosctl system password set --new-password-env NAME` or
+`swosctl system password set --new-password-stdin`. Both preserve an empty
+password; stdin removes one trailing LF or CRLF delimiter.
+
 ## Output
 
 - `human` provides terminal-oriented output.

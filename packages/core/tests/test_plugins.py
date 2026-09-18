@@ -26,6 +26,7 @@ from swos_core.models import (
     IgmpInfo,
     OperationResult,
     PacketSizeStatistics,
+    PasswordUpdate,
     PortConfigurationUpdate,
     PortErrorStatistics,
     PortForwardingInfo,
@@ -99,6 +100,7 @@ class FakeAdapter:
                 {
                     "acl",
                     "acl_write",
+                    "admin_password_write",
                     "device_name_write",
                     "forwarding",
                     "forwarding_matrix_write",
@@ -314,6 +316,17 @@ class FakeAdapter:
         )
 
     def validate_device_name(self, update: DeviceNameUpdate) -> None:
+        del update
+
+    def set_admin_password(self, update: PasswordUpdate) -> OperationResult[SystemInfo]:
+        del update
+        return OperationResult[SystemInfo](
+            changed=True,
+            value=self.get_system_info(),
+            warnings=(SafetyWarning(code="credentials_changed", message="Credentials changed"),),
+        )
+
+    def validate_admin_password(self, update: PasswordUpdate) -> None:
         del update
 
     def set_system_configuration(
@@ -669,6 +682,10 @@ def test_policy_bound_device_rejects_unsupported_feature() -> None:
         device.set_device_name(DeviceNameUpdate(name="Core Switch"))
     with pytest.raises(UnsupportedFeatureError, match="device name write"):
         device.validate_device_name(DeviceNameUpdate(name="Core Switch"))
+    with pytest.raises(UnsupportedFeatureError, match="admin password write"):
+        device.set_admin_password(PasswordUpdate(new_password="new-password"))
+    with pytest.raises(UnsupportedFeatureError, match="admin password write"):
+        device.validate_admin_password(PasswordUpdate(new_password="new-password"))
     system = FakeAdapter(identity()).get_system_info()
     with pytest.raises(UnsupportedFeatureError, match="system configuration write"):
         device.set_system_configuration(
@@ -754,6 +771,7 @@ def test_policy_bound_device_authorizes_and_returns_write_result() -> None:
     assert configured.warnings == ()
 
     device_name = device.set_device_name(DeviceNameUpdate(name="Core Switch"))
+    password = device.set_admin_password(PasswordUpdate(new_password="new-password"))
     system_before = device.get_system_info()
     system = device.set_system_configuration(
         SystemConfigurationUpdate(name="Core Switch"), expected_current=system_before
@@ -762,6 +780,8 @@ def test_policy_bound_device_authorizes_and_returns_write_result() -> None:
 
     assert device_name.value.name == "Core Switch"
     assert device_name.warnings == ()
+    assert password.changed
+    assert password.warnings[0].code == "credentials_changed"
     assert system.value.name == "Core Switch"
     assert system.warnings == ()
     warning_result = device.set_system_configuration(
@@ -775,6 +795,7 @@ def test_policy_bound_device_authorizes_and_returns_write_result() -> None:
     assert metadata.warnings == ()
 
     assert device.validate_device_name(DeviceNameUpdate(name="Core Switch")) == ()
+    assert device.validate_admin_password(PasswordUpdate(new_password="new-password")) == ()
     assert (
         device.validate_system_configuration(
             SystemConfigurationUpdate(name="Core Switch"), current=device.get_system_info()

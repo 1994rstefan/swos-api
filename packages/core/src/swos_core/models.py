@@ -156,6 +156,14 @@ class DeviceNameUpdate(BaseModel):
     name: str
 
 
+class PasswordUpdate(BaseModel):
+    """Desired administrator password held only as a non-serializing secret."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    new_password: SecretStr = Field(exclude=True)
+
+
 class SystemConfigurationUpdate(BaseModel):
     """Desired system changes, preserving fields omitted as ``None``."""
 
