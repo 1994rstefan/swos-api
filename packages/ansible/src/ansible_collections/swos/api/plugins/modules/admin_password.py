@@ -11,6 +11,8 @@ description:
   - The connection O(password) is the current password and O(new_password) is the replacement.
   - Check mode validates the replacement and always reports changed because password equality cannot
     be read.
+  - The replacement is at most 15 JavaScript UTF-16 code units and every unit must be in
+    C(U+0000..U+007F); ASCII controls and DEL are valid.
   - Neither password is returned or logged.
 version_added: "0.2.0"
 extends_documentation_fragment: [swos.api.connection]

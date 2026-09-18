@@ -4,6 +4,7 @@ from typing import ClassVar
 
 import pytest
 from swos_cli import __version__
+from swos_cli.output import OutputFormat, OutputRenderer
 from swos_core.errors import AuthenticationError
 from swos_core.models import (
     AclRule,
@@ -35,6 +36,7 @@ from swos_core.models import (
     RstpPortEnableUpdate,
     RstpPortInfo,
     SfpInfo,
+    SnmpConfigurationUpdate,
     SnmpInfo,
     SnmpMetadataUpdate,
     SystemConfigurationUpdate,
@@ -50,6 +52,16 @@ from typer.testing import CliRunner
 app_module = import_module("swos_cli.app")
 app = app_module.app
 runner = CliRunner()
+
+
+def test_output_renderer_sanitizes_human_controls_and_json_escapes_them(capsys) -> None:  # type: ignore[no-untyped-def]
+    OutputRenderer(OutputFormat.HUMAN).success({}, human="safe\nunsafe\x1b[31m")
+    assert capsys.readouterr().out == "safe\nunsafe\ufffd[31m\n"
+
+    OutputRenderer(OutputFormat.JSON).success({"value": "unsafe\x1b"}, human="")
+    output = capsys.readouterr().out
+    assert "\\u001b" in output
+    assert "\x1b" not in output
 
 
 def _packet_sizes(base: int) -> PacketSizeStatistics:
@@ -88,6 +100,7 @@ def _detailed_errors() -> PortErrorStatistics:
 
 class FakeDevice:
     password_updates: ClassVar[list[str]] = []
+    snmp_community_updates: ClassVar[list[str]] = []
     system_readback_urls: ClassVar[list[str | None]] = []
 
     def __init__(
@@ -463,6 +476,22 @@ class FakeDevice:
             }
         )
         return OperationResult[SnmpInfo](changed=info != before, value=info)
+
+    def set_snmp_configuration(self, update: SnmpConfigurationUpdate) -> OperationResult[SnmpInfo]:
+        before = self.get_snmp()
+        changes: dict[str, object] = {}
+        if update.enabled is not None:
+            changes["enabled"] = update.enabled
+        if update.community is not None:
+            community = update.community.get_secret_value()
+            self.snmp_community_updates.append(community)
+            changes["community"] = community
+        if update.contact is not None:
+            changes["contact"] = update.contact
+        if update.location is not None:
+            changes["location"] = update.location
+        value = before.model_copy(update=changes)
+        return OperationResult[SnmpInfo](changed=value != before, value=value)
 
     def set_rstp_port_enabled(
         self,
@@ -1758,7 +1787,7 @@ def test_rstp_bridge_configure_returns_complete_verified_state(monkeypatch) -> N
     assert data["rstp"]["forward_reserved_multicast"] is True
 
 
-def test_snmp_show_outputs_community_normally(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_snmp_show_preserves_established_read_community(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     mock_registry(monkeypatch)
 
     human = runner.invoke(app, ["snmp", "show", "--url", "http://192.0.2.1"])
@@ -1770,7 +1799,89 @@ def test_snmp_show_outputs_community_normally(monkeypatch) -> None:  # type: ign
     assert human.exit_code == 0
     assert "Community: public" in human.stdout
     assert machine.exit_code == 0
-    assert json.loads(machine.stdout)["data"]["community"] == "public"
+    data = json.loads(machine.stdout)["data"]
+    assert data["community"] == "public"
+    assert "community_configured" not in data
+
+
+def test_snmp_configure_reads_secure_community_source_and_redacts_result(
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    mock_registry(monkeypatch)
+    FakeDevice.snmp_community_updates.clear()
+    secret = "private-community"
+
+    result = runner.invoke(
+        app,
+        [
+            "snmp",
+            "configure",
+            "--enabled",
+            "off",
+            "--community-env",
+            "SNMP_SECRET",
+            "--contact",
+            "NOC",
+            "--url",
+            "http://192.0.2.1",
+            "-ojson",
+        ],
+        env={"SNMP_SECRET": secret},
+    )
+
+    assert result.exit_code == 0
+    assert FakeDevice.snmp_community_updates == [secret]
+    data = json.loads(result.stdout)["data"]
+    assert data["snmp"]["enabled"] is False
+    assert data["snmp"]["community_configured"] is True
+    assert "community" not in data["snmp"]
+    assert secret not in result.stdout
+    assert secret not in result.stderr
+
+
+def test_snmp_configure_reads_community_from_stdin_and_redacts_result(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    mock_registry(monkeypatch)
+    FakeDevice.snmp_community_updates.clear()
+    secret = "stdin-community"
+
+    result = runner.invoke(
+        app,
+        [
+            "snmp",
+            "configure",
+            "--community-stdin",
+            "--url",
+            "http://192.0.2.1",
+            "-ojson",
+        ],
+        input=secret + "\n",
+    )
+
+    assert result.exit_code == 0
+    assert FakeDevice.snmp_community_updates == [secret]
+    snmp = json.loads(result.stdout)["data"]["snmp"]
+    assert snmp["community_configured"] is True
+    assert "community" not in snmp
+    assert secret not in result.stdout
+    assert secret not in result.stderr
+
+
+@pytest.mark.parametrize(
+    "arguments, message",
+    [
+        ([], "At least one"),
+        (["--community", "plaintext"], "No such option"),
+        (["--community-env", "MISSING"], "is not set"),
+        (["--community-env", "SNMP_SECRET", "--community-stdin"], "cannot be combined"),
+    ],
+)
+def test_snmp_configure_rejects_plaintext_and_invalid_secure_sources(
+    arguments: list[str], message: str
+) -> None:
+    result = runner.invoke(app, ["snmp", "configure", *arguments], input="ignored")
+
+    assert result.exit_code == 2
+    assert message in result.stderr
 
 
 def test_snmp_metadata_set_preserves_omitted_and_allows_explicit_clear(monkeypatch) -> None:  # type: ignore[no-untyped-def]

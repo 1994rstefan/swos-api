@@ -41,6 +41,7 @@ from swos_core import (
     RstpCostMode,
     RstpInfo,
     RstpPortEnableUpdate,
+    SnmpConfigurationUpdate,
     SnmpInfo,
     SnmpMetadataUpdate,
     SwOSDevice,
@@ -200,7 +201,7 @@ host_app = typer.Typer(help="Read forwarding-database entries.", no_args_is_help
 app.add_typer(host_app, name="host")
 rstp_app = typer.Typer(help="Read spanning-tree state.", no_args_is_help=True)
 app.add_typer(rstp_app, name="rstp")
-snmp_app = typer.Typer(help="Read and configure SNMP metadata.", no_args_is_help=True)
+snmp_app = typer.Typer(help="Read and configure SNMP service state.", no_args_is_help=True)
 app.add_typer(snmp_app, name="snmp")
 snmp_metadata_app = typer.Typer(help="Configure SNMP metadata.", no_args_is_help=True)
 snmp_app.add_typer(snmp_metadata_app, name="metadata")
@@ -402,7 +403,7 @@ def system_show(ctx: typer.Context) -> None:
 def system_rename(
     ctx: typer.Context,
     name: Annotated[
-        str, typer.Argument(help="New device name (up to 16 printable ASCII characters).")
+        str, typer.Argument(help="New device name (up to 16 printable Unicode UTF-16 units).")
     ],
 ) -> None:
     """Set and verify the configured device name."""
@@ -477,7 +478,7 @@ def system_password_set(
                 "--new-password-stdin requires piped standard input",
                 param_hint="--new-password-stdin",
             )
-        new_password = _read_password_stdin()
+        new_password = _read_secret_stdin()
 
     cli_context: CliContext = ctx.ensure_object(CliContext)
     renderer = OutputRenderer(cli_context.configuration.settings.output)
@@ -720,7 +721,7 @@ def port_rename(
     ctx: typer.Context,
     number: Annotated[int, typer.Argument(min=1, help="Port number to rename.")],
     name: Annotated[
-        str, typer.Argument(help="New port name (up to 16 printable ASCII characters).")
+        str, typer.Argument(help="New port name (up to 16 printable Unicode UTF-16 units).")
     ],
 ) -> None:
     """Set and verify the configured name of one port."""
@@ -1727,6 +1728,93 @@ def snmp_show(ctx: typer.Context) -> None:
     renderer.success(data, human="\n".join(lines))
 
 
+@snmp_app.command("configure")
+def snmp_configure(
+    ctx: typer.Context,
+    enabled: Annotated[
+        ToggleOption | None,
+        typer.Option("--enabled", help="Set the SNMP service on or off."),
+    ] = None,
+    community_stdin: Annotated[
+        bool,
+        typer.Option("--community-stdin", help="Read the community from noninteractive stdin."),
+    ] = False,
+    community_env: Annotated[
+        str | None,
+        typer.Option(
+            "--community-env", metavar="NAME", help="Read the community from environment NAME."
+        ),
+    ] = None,
+    contact: Annotated[
+        str | None,
+        typer.Option("--contact", help="SNMP contact; empty clears it, omitted preserves it."),
+    ] = None,
+    location: Annotated[
+        str | None,
+        typer.Option("--location", help="SNMP location; empty clears it, omitted preserves it."),
+    ] = None,
+) -> None:
+    """Set and verify complete SNMP service configuration."""
+
+    if community_stdin and community_env is not None:
+        raise typer.BadParameter("--community-stdin and --community-env cannot be combined")
+    community: str | None = None
+    if community_env is not None:
+        if not community_env:
+            raise typer.BadParameter("--community-env requires a non-empty variable name")
+        if community_env not in os.environ:
+            raise typer.BadParameter(
+                f"Environment variable {community_env!r} is not set",
+                param_hint="--community-env",
+            )
+        community = os.environ[community_env]
+    elif community_stdin:
+        if sys.stdin.isatty():
+            raise typer.BadParameter(
+                "--community-stdin requires piped standard input",
+                param_hint="--community-stdin",
+            )
+        community = _read_secret_stdin()
+    if enabled is None and community is None and contact is None and location is None:
+        raise typer.BadParameter("At least one SNMP configuration option is required")
+
+    update = SnmpConfigurationUpdate(
+        enabled=None if enabled is None else enabled is ToggleOption.ON,
+        community=None if community is None else SecretStr(community),
+        contact=contact,
+        location=location,
+    )
+    cli_context: CliContext = ctx.ensure_object(CliContext)
+    renderer = OutputRenderer(cli_context.configuration.settings.output)
+    try:
+        connected_device = _connect_device(cli_context)
+        result = connected_device.set_snmp_configuration(update)
+    except ConfigurationError as exc:
+        renderer.error("configuration_error", str(exc))
+        raise typer.Exit(code=2) from exc
+    except SwOSError as exc:
+        renderer.error(_error_code(exc), str(exc))
+        raise typer.Exit(code=1) from exc
+
+    data: dict[str, Any] = {
+        "changed": result.changed,
+        "snmp": _serialize_snmp_write_result(result.value),
+    }
+    if result.warnings:
+        data["warnings"] = [warning.model_dump(mode="json") for warning in result.warnings]
+    action = "changed" if result.changed else "already configured; no change required"
+    human = "\n".join(
+        [
+            f"SNMP configuration {action}.",
+            f"Enabled: {_yes_no(result.value.enabled)}",
+            f"Community configured: {_yes_no(bool(result.value.community))}",
+            f"Contact: {result.value.contact}",
+            f"Location: {result.value.location}",
+        ]
+    )
+    renderer.success(data, human=human)
+
+
 @snmp_metadata_app.command("set")
 def snmp_metadata_set(
     ctx: typer.Context,
@@ -2041,7 +2129,7 @@ def _connect_device(cli_context: CliContext) -> SwOSDevice:
     return registry.connect(identity, connection, cli_context.firmware_policy)
 
 
-def _read_password_stdin() -> str:
+def _read_secret_stdin() -> str:
     value = sys.stdin.read()
     if value.endswith("\n"):
         value = value[:-1]
@@ -2174,6 +2262,13 @@ def _serialize_port(port: PortInfo) -> dict[str, Any]:
             "duplex": "full" if configured_duplex else "half",
         }
     )
+    return serialized
+
+
+def _serialize_snmp_write_result(info: SnmpInfo) -> dict[str, Any]:
+    serialized = info.model_dump(mode="json")
+    serialized.pop("community")
+    serialized["community_configured"] = bool(info.community)
     return serialized
 
 

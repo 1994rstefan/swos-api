@@ -13,7 +13,8 @@ extends_documentation_fragment: [swos.api.connection]
 options:
   name:
     description:
-      - Desired printable ASCII device name, at most 16 characters. An empty string clears it.
+      - Desired printable Unicode device name, at most 16 UTF-16 code units.
+      - An empty string clears it.
     type: str
     required: true
 author:

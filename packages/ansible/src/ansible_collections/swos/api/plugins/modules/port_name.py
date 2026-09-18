@@ -18,7 +18,8 @@ options:
     choices: [1, 2, 3, 4, 5]
   name:
     description:
-      - Desired printable ASCII port name, at most 16 characters. An empty string clears it.
+      - Desired printable Unicode port name, at most 16 UTF-16 code units.
+      - An empty string clears it.
     type: str
     required: true
 author:

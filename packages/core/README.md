@@ -19,10 +19,11 @@ after fresh reads to implement device-validating dry runs and check mode.
 
 Desired state covers administrator password rotation, complete system
 configuration, device names, port names, per-port RSTP enable, bridge settings,
-forwarding matrix/mirroring/port policy, per-port VLAN policy, SNMP
-contact/location metadata, complete VLAN/static-host tables, and complete ordered
-ACL tables. `PasswordUpdate` stores its value as `SecretStr` and excludes it from
-all model serialization.
+forwarding matrix/mirroring/port policy, per-port VLAN policy, complete SNMP
+service configuration, complete VLAN/static-host tables, and complete ordered
+ACL tables. SNMP community write input and administrator passwords use
+`SecretStr` and are excluded from desired-model serialization. Established
+`SnmpInfo` read semantics intentionally expose the configured community.
 Static-host writes reuse `HostEntry` but reject dynamic entries. `None` preserves
 an omitted field where supported; explicit `"unlimited"` clears an egress rate.
 `VlanInfo.table_position` retains raw table order for equality and stale-baseline
@@ -54,3 +55,10 @@ transport construction use the same canonical URL.
 
 Network link speeds and rates use bits per second in public models and JSON
 representations.
+
+Public desired-state booleans and integers are strict: JSON and direct Python
+callers must provide actual booleans and integers, not numeric strings or
+booleans used as integers. Documented string values remain accepted for
+`StrEnum` fields. All desired/write models reject unknown fields and binary
+coercion into text, secret, or enum inputs. Writable names and SNMP text accept printable Unicode by
+UTF-16 code-unit limits; controls, NUL, and unpaired surrogates are rejected.

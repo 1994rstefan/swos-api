@@ -7,15 +7,19 @@ DOCUMENTATION = r"""
 module: snmp_metadata
 short_description: Manage SwOS SNMP contact and location metadata
 description:
-  - Manages printable ASCII SNMP contact and location values while preserving service settings.
+  - Manages printable Unicode SNMP contact and location values while preserving service settings.
 version_added: "0.1.0"
 extends_documentation_fragment: [swos.api.connection]
 options:
   contact:
-    description: Desired printable ASCII SNMP contact, at most 64 characters. Empty clears it.
+    description:
+      - Desired printable Unicode SNMP contact, at most 64 UTF-16 code units.
+      - Empty clears it.
     type: str
   location:
-    description: Desired printable ASCII SNMP location, at most 64 characters. Empty clears it.
+    description:
+      - Desired printable Unicode SNMP location, at most 64 UTF-16 code units.
+      - Empty clears it.
     type: str
 author:
   - 1994rstefan (@1994rstefan)

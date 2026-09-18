@@ -27,6 +27,7 @@ from swos_core.models import (
     PortVlanPolicyUpdate,
     RstpBridgeUpdate,
     RstpPortEnableUpdate,
+    SnmpConfigurationUpdate,
     SnmpMetadataUpdate,
     SystemConfigurationUpdate,
     VlanInfo,
@@ -43,12 +44,12 @@ from swos_device_css106.adapter import (
 )
 from swos_device_css106.protocol import (
     MAX_ACL_RULES,
-    MAX_ADMIN_PASSWORD_BYTES,
-    MAX_DEVICE_NAME_BYTES,
+    MAX_ADMIN_PASSWORD_UNITS,
+    MAX_DEVICE_NAME_UNITS,
     MAX_NESTING_DEPTH,
     MAX_PAYLOAD_BYTES,
-    MAX_PORT_NAME_BYTES,
-    MAX_SNMP_METADATA_BYTES,
+    MAX_PORT_NAME_UNITS,
+    MAX_SNMP_TEXT_UNITS,
     MAX_STATIC_HOSTS,
     MAX_VLAN_ENTRIES,
     UPTIME_TICKS_PER_SECOND,
@@ -64,6 +65,7 @@ from swos_device_css106.protocol import (
     encode_port_vlan_policy_update,
     encode_rstp_bridge_update,
     encode_rstp_port_enable_update,
+    encode_snmp_configuration_update,
     encode_snmp_metadata_update,
     encode_static_hosts,
     encode_system_configuration_update,
@@ -381,6 +383,7 @@ def test_probe_and_adapter_normalize_system_data() -> None:
     assert adapter.capabilities.supports("rstp_bridge_write")
     assert adapter.capabilities.supports("forwarding_matrix_write")
     assert adapter.capabilities.supports("forwarding_mirroring_write")
+    assert adapter.capabilities.supports("snmp_configuration_write")
     assert adapter.capabilities.supports("static_hosts_write")
     assert adapter.capabilities.supports("system_configuration_write")
     assert adapter.capabilities.supports("acl_write")
@@ -699,9 +702,10 @@ def test_system_configuration_encoder_rejects_port_6_mask_changes() -> None:
 @pytest.mark.parametrize(
     "name, message",
     [
-        ("x" * (MAX_DEVICE_NAME_BYTES + 1), "cannot exceed"),
-        ("Core\nSwitch", "printable ASCII"),
-        ("Cöre", "printable ASCII"),
+        ("x" * (MAX_DEVICE_NAME_UNITS + 1), "cannot exceed"),
+        ("Core\nSwitch", "printable Unicode"),
+        ("😀" * 9, "UTF-16 code units"),
+        ("Core\N{RIGHT-TO-LEFT OVERRIDE}", "printable Unicode"),
     ],
 )
 def test_device_name_encoder_rejects_unvalidated_values(name: str, message: str) -> None:
@@ -709,12 +713,30 @@ def test_device_name_encoder_rejects_unvalidated_values(name: str, message: str)
         validate_device_name(name)
 
 
+def test_adapter_rejects_unsafe_device_name_before_transport() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    transport = FakeTransport(())
+    adapter = CSS106Plugin(transport_factory=lambda connection: transport).create(  # type: ignore[arg-type]
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+
+    with pytest.raises(InvalidOperationError, match="printable Unicode"):
+        adapter.set_device_name(DeviceNameUpdate(name="unsafe\nname"))
+
+    assert transport.requests == []
+
+
 @pytest.mark.parametrize(
     "name, message",
     [
-        ("x" * (MAX_PORT_NAME_BYTES + 1), "cannot exceed"),
-        ("Upl\nink", "printable ASCII"),
-        ("Uplänk", "printable ASCII"),
+        ("x" * (MAX_PORT_NAME_UNITS + 1), "cannot exceed"),
+        ("Upl\nink", "printable Unicode"),
+        ("😀" * 9, "UTF-16 code units"),
+        ("Upl\ud800ink", "printable Unicode"),
     ],
 )
 def test_port_name_encoder_rejects_unvalidated_values(name: str, message: str) -> None:
@@ -727,6 +749,43 @@ def test_port_name_encoder_rejects_unvalidated_values(name: str, message: str) -
             identity,
             PortNameUpdate(number=1, name=name),
         )
+
+
+def test_name_encoders_use_ui_cesu8_and_utf16_unit_limits() -> None:
+    assert validate_device_name("Café") == b"Caf\xc3\xa9"
+    assert validate_device_name("😀" * 8) == bytes.fromhex("eda0bdedb880") * 8
+
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    data = parse_payload(link_fixture_payload())
+    names = data["nm"]
+    assert isinstance(names, list)
+    names[0] = "eda0bdedb880"
+    assert ports_from_link_payload(data, identity)[0].name == "😀"
+
+
+def test_ui_text_decoder_truncates_at_nul_before_decoding_following_cesu8() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    data = parse_payload(link_fixture_payload())
+    names = data["nm"]
+    assert isinstance(names, list)
+    names[0] = "55706c696e6b00eda0bd"
+
+    assert ports_from_link_payload(data, identity)[0].name == "Uplink"
+
+
+@pytest.mark.parametrize("raw_name", ["eda0bd", "edb880"])
+def test_ui_text_decoder_rejects_unpaired_cesu8_surrogates(raw_name: str) -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    data = parse_payload(link_fixture_payload())
+    names = data["nm"]
+    assert isinstance(names, list)
+    names[0] = raw_name
+
+    with pytest.raises(ProtocolError, match="unpaired surrogate"):
+        ports_from_link_payload(data, identity)
 
 
 def test_adapter_sets_and_verifies_port_name() -> None:
@@ -1008,12 +1067,17 @@ def test_password_encoder_matches_independent_ui_vectors(
     assert content == f"{{pwd:'{expected}'}}".encode("ascii")
 
 
+@pytest.mark.parametrize("new_password", ["start\x00end", "delete\x7f"])
+def test_password_validator_accepts_ascii_control_and_del_code_units(new_password: str) -> None:
+    validate_password_update(PasswordUpdate(new_password=new_password), SecretStr("old"))
+
+
 @pytest.mark.parametrize(
     "new_password, current_password, message",
     [
-        ("x" * (MAX_ADMIN_PASSWORD_BYTES + 1), "old", "new.*cannot exceed"),
-        ("new", "x" * (MAX_ADMIN_PASSWORD_BYTES + 1), "current.*cannot exceed"),
-        ("pässword", "old", "new.*must be ASCII"),
+        ("x" * (MAX_ADMIN_PASSWORD_UNITS + 1), "old", "new.*cannot exceed"),
+        ("new", "x" * (MAX_ADMIN_PASSWORD_UNITS + 1), "current.*cannot exceed"),
+        ("pässword", "old", r"new.*U\+0000\.\.U\+007F"),
         ("new", "😀" * 8, "current.*cannot exceed.*UTF-16 code units"),
     ],
 )
@@ -1343,8 +1407,8 @@ def test_adapter_validates_device_name_before_transport() -> None:
         support=plugin.support_records()[0],
     )
 
-    with pytest.raises(InvalidOperationError, match="printable ASCII"):
-        adapter.set_device_name(DeviceNameUpdate(name="Cöre"))
+    with pytest.raises(InvalidOperationError, match="printable Unicode"):
+        adapter.set_device_name(DeviceNameUpdate(name="Core\nSwitch"))
     assert transport.requests == []
 
 
@@ -2117,8 +2181,8 @@ def test_adapter_validates_port_name_before_no_op_or_transport() -> None:
         support=plugin.support_records()[0],
     )
 
-    with pytest.raises(InvalidOperationError, match="printable ASCII"):
-        adapter.set_port_name(PortNameUpdate(number=1, name="Pört1"))
+    with pytest.raises(InvalidOperationError, match="printable Unicode"):
+        adapter.set_port_name(PortNameUpdate(number=1, name="Port\n1"))
 
     assert transport.requests == []
 
@@ -2474,7 +2538,10 @@ def test_acl_encoder_emits_exact_ordered_table_and_guards_management_ingress() -
 
     assert encode_acl_rules((), identity) == b"[]"
     first_row = acl_fixture_payload().strip()[1:].split(b"},{", 1)[0]
-    assert content == b"[" + first_row + b"}]"
+    expected = b"[" + first_row + b"}]"
+    expected = expected.replace(b"smac:'000000000000',", b"")
+    expected = expected.replace(b"dmac:'000000000000',", b"")
+    assert content == expected
     zero_rule = type(rules[0]).model_validate(
         {
             **rules[0].model_dump(mode="python"),
@@ -2821,6 +2888,50 @@ def test_rstp_encoders_emit_complete_groups_and_preserve_port_6() -> None:
         )
 
 
+def test_adapter_rejects_rstp_changes_disabled_by_fresh_reserved_multicast_state() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    system = rstp_system_fixture_payload().replace(b"frmc:0x00", b"frmc:0x01")
+    current = rstp_from_payloads(
+        parse_payload(rstp_fixture_payload()), parse_payload(system), identity
+    )
+    transport = FakeTransport((system, rstp_fixture_payload()))
+    adapter = CSS106Plugin(transport_factory=lambda connection: transport).create(  # type: ignore[arg-type]
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+
+    with pytest.raises(InvalidOperationError, match="reserved multicast forwarding"):
+        adapter.set_rstp_port_enabled(
+            RstpPortEnableUpdate(number=5, enabled=False), expected_current=current
+        )
+
+    assert transport.requests == [("GET", "/sys.b"), ("GET", "/rstp.b")]
+
+
+def test_adapter_rejects_rstp_bridge_change_using_fresh_reserved_multicast_state() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    system = rstp_system_fixture_payload().replace(b"frmc:0x00", b"frmc:0x01")
+    current = rstp_from_payloads(
+        parse_payload(rstp_fixture_payload()), parse_payload(system), identity
+    )
+    transport = FakeTransport((system, rstp_fixture_payload()))
+    adapter = CSS106Plugin(transport_factory=lambda connection: transport).create(  # type: ignore[arg-type]
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+
+    with pytest.raises(InvalidOperationError, match="reserved multicast forwarding"):
+        adapter.set_rstp_bridge(RstpBridgeUpdate(cost_mode="long"), expected_current=current)
+
+    assert transport.requests == [("GET", "/sys.b"), ("GET", "/rstp.b")]
+
+
 def test_adapter_sets_rstp_enable_with_baseline_noop_and_readback_guards() -> None:
     identity = identity_from_system(parse_payload(fixture_payload()))
     assert identity is not None
@@ -3127,9 +3238,9 @@ def test_snmp_metadata_encoder_preserves_omitted_and_clears_empty_values() -> No
 @pytest.mark.parametrize(
     "update, message",
     [
-        (SnmpMetadataUpdate(contact="x" * (MAX_SNMP_METADATA_BYTES + 1)), "cannot exceed"),
-        (SnmpMetadataUpdate(location="Rack\n1"), "printable ASCII"),
-        (SnmpMetadataUpdate(contact="Tëam"), "printable ASCII"),
+        (SnmpMetadataUpdate(contact="x" * (MAX_SNMP_TEXT_UNITS + 1)), "cannot exceed"),
+        (SnmpMetadataUpdate(location="Rack\n1"), "printable Unicode"),
+        (SnmpMetadataUpdate(contact="😀" * 33), "UTF-16 code units"),
     ],
 )
 def test_snmp_metadata_encoder_rejects_unvalidated_values(
@@ -3137,6 +3248,44 @@ def test_snmp_metadata_encoder_rejects_unvalidated_values(
 ) -> None:
     with pytest.raises(InvalidOperationError, match=message):
         encode_snmp_metadata_update(parse_payload(snmp_fixture_payload()), update)
+
+
+def test_complete_snmp_encoder_updates_service_and_secret_community_exactly() -> None:
+    content, desired = encode_snmp_configuration_update(
+        parse_payload(snmp_fixture_payload()),
+        SnmpConfigurationUpdate(
+            enabled=False,
+            community=SecretStr("private"),
+            contact="Tëam",
+        ),
+    )
+
+    assert content == (b"{en:0x00,com:'70726976617465',ci:'54c3ab616d',loc:'4f6666696365'}")
+    assert desired.enabled == 0
+    assert desired.raw_community == "70726976617465"
+
+
+def test_adapter_sets_and_verifies_complete_snmp_configuration() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    after = b"{en:0x00,com:'70726976617465',ci:'4f7073',loc:'4f6666696365'}"
+    transport = FakeTransport((fixture_payload(), snmp_fixture_payload(), b"", after))
+    adapter = CSS106Plugin(transport_factory=lambda connection: transport).create(  # type: ignore[arg-type]
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+
+    result = adapter.set_snmp_configuration(
+        SnmpConfigurationUpdate(enabled=False, community=SecretStr("private"))
+    )
+
+    assert result.changed
+    assert result.value.enabled is False
+    assert result.value.community == "private"
+    assert transport.request_details[2][2] == after
+    assert "private" not in repr(SnmpConfigurationUpdate(community=SecretStr("private")))
 
 
 def test_adapter_sets_and_verifies_complete_snmp_metadata_state() -> None:
@@ -3228,8 +3377,8 @@ def test_adapter_validates_all_snmp_metadata_before_transport() -> None:
         support=plugin.support_records()[0],
     )
 
-    with pytest.raises(InvalidOperationError, match="printable ASCII"):
-        adapter.set_snmp_metadata(SnmpMetadataUpdate(contact="Ops", location="Räck"))
+    with pytest.raises(InvalidOperationError, match="printable Unicode"):
+        adapter.set_snmp_metadata(SnmpMetadataUpdate(contact="Ops", location="Rack\n1"))
     assert transport.requests == []
 
 
@@ -3847,7 +3996,7 @@ def test_identity_fields_are_validated() -> None:
         identity_from_system(data)
 
     data["brd"] = "not-hex"
-    with pytest.raises(ProtocolError, match="hex-encoded UTF-8"):
+    with pytest.raises(ProtocolError, match="hex-encoded UI text"):
         identity_from_system(data)
 
 

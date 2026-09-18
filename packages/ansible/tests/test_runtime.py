@@ -62,6 +62,7 @@ def _device() -> SwOSDevice:
                 "port_name_write",
                 "port_configuration_write",
                 "snmp_metadata_write",
+                "snmp_configuration_write",
                 "static_hosts_write",
                 "rstp_port_enable_write",
                 "forwarding_port_policy_write",
@@ -81,6 +82,7 @@ def _device() -> SwOSDevice:
     mocked.validate_port_name.return_value = ()
     mocked.validate_port_configuration.return_value = ()
     mocked.validate_snmp_metadata.return_value = ()
+    mocked.validate_snmp_configuration.return_value = ()
     mocked.validate_static_hosts.return_value = ()
     mocked.validate_rstp_port_enabled.return_value = ()
     mocked.validate_forwarding_port_policy.return_value = ()
@@ -297,15 +299,28 @@ def test_facts_gathers_only_requested_subsets_and_warnings() -> None:
     assert result["swos_warnings"] == [warning.model_dump(mode="json")]
 
 
-def test_device_name_check_mode_projects_change_without_write() -> None:
+def test_snmp_facts_preserve_established_read_community() -> None:
+    device = _device()
+    cast(Mock, device.get_snmp).return_value = SnmpInfo(
+        enabled=True, community="public", contact="Ops", location="Rack 1"
+    )
+
+    result = execute("facts", {"gather_subset": ["snmp"]}, device=device)
+
+    snmp = result["ansible_facts"]["swos"]["snmp"]
+    assert snmp["community"] == "public"
+    assert "community_configured" not in snmp
+
+
+def test_device_name_check_mode_accepts_unicode_and_projects_without_write() -> None:
     device = _device()
     cast(Mock, device.get_system_info).return_value = _system()
 
-    result = execute("device_name", {"name": "Office"}, check_mode=True, device=device)
+    result = execute("device_name", {"name": "Büro"}, check_mode=True, device=device)
 
     assert result == {
         "changed": True,
-        "system": {**_system().model_dump(mode="json"), "name": "Office"},
+        "system": {**_system().model_dump(mode="json"), "name": "Büro"},
     }
     cast(Mock, device.validate_device_name).assert_called_once()
     cast(Mock, device.set_device_name).assert_not_called()
@@ -399,7 +414,7 @@ def test_forwarding_rate_rejects_bool_float_and_numeric_string_before_connect(
     ("operation", "params", "message"),
     [
         ("device_name", {"name": "x" * 17}, "cannot exceed 16"),
-        ("port_name", {"port": 1, "name": "Uplänk"}, "printable ASCII"),
+        ("port_name", {"port": 1, "name": "Upl\nink"}, "printable Unicode"),
         ("snmp_metadata", {"contact": "x" * 65}, "cannot exceed 64"),
         ("static_hosts", {"hosts": [{}] * 2049}, "cannot exceed 2048"),
     ],
@@ -447,6 +462,69 @@ def test_snmp_check_mode_preserves_omitted_metadata() -> None:
     assert result["snmp"]["contact"] == "New"
     assert result["snmp"]["location"] == "Rack 1"
     cast(Mock, device.set_snmp_metadata).assert_not_called()
+
+
+def test_snmp_configuration_check_mode_preserves_omitted_and_redacts_community() -> None:
+    device = _device()
+    cast(Mock, device.get_snmp).return_value = SnmpInfo(
+        enabled=True, community="public", contact="Old", location="Rack 1"
+    )
+
+    result = execute(
+        "snmp_configuration",
+        {"enabled": False, "community": "private", "contact": "New"},
+        check_mode=True,
+        device=device,
+    )
+
+    assert result["changed"] is True
+    assert result["snmp"] == {
+        "enabled": False,
+        "contact": "New",
+        "location": "Rack 1",
+        "community_configured": True,
+    }
+    assert "private" not in repr(result)
+    cast(Mock, device.validate_snmp_configuration).assert_called_once()
+    cast(Mock, device.set_snmp_configuration).assert_not_called()
+
+
+def test_snmp_configuration_normal_mode_writes_and_redacts_community() -> None:
+    device = _device()
+    cast(Mock, device.get_snmp).return_value = SnmpInfo(
+        enabled=True, community="public", contact="Old", location="Rack 1"
+    )
+    cast(Mock, device.set_snmp_configuration).return_value = OperationResult(
+        changed=True,
+        value=SnmpInfo(enabled=False, community="private", contact="New", location="Rack 1"),
+    )
+
+    result = execute(
+        "snmp_configuration",
+        {"enabled": False, "community": "private", "contact": "New"},
+        device=device,
+    )
+
+    assert result["changed"] is True
+    assert result["snmp"] == {
+        "enabled": False,
+        "contact": "New",
+        "location": "Rack 1",
+        "community_configured": True,
+    }
+    assert "private" not in repr(result)
+    update = cast(Mock, device.set_snmp_configuration).call_args.args[0]
+    assert update.community.get_secret_value() == "private"
+
+
+@pytest.mark.parametrize("community", [1, True, ["private"]])
+def test_snmp_configuration_rejects_non_string_community_before_connect(
+    community: object,
+) -> None:
+    with patch("swos_ansible.runtime.PluginRegistry.discover") as discover:
+        with pytest.raises(ValueError, match="SNMP community must be a string"):
+            execute("snmp_configuration", {"community": community}, check_mode=True)
+    discover.assert_not_called()
 
 
 def test_static_hosts_filter_dynamic_baseline_and_sort_ports() -> None:
@@ -660,15 +738,37 @@ def test_admin_password_check_mode_always_changes_validates_and_never_returns_se
 
     result = execute(
         "admin_password",
-        {"new_password": "replacement-secret"},
+        {"new_password": "new-secret"},
         check_mode=True,
         device=device,
     )
 
     assert result["changed"] is True
-    assert "replacement-secret" not in repr(result)
+    assert "new-secret" not in repr(result)
     cast(Mock, device.validate_admin_password).assert_called_once()
     cast(Mock, device.set_admin_password).assert_not_called()
+
+
+@pytest.mark.parametrize("new_password", ["start\x00end", "delete\x7f"])
+def test_admin_password_accepts_ascii_control_and_del_code_units(new_password: str) -> None:
+    device = _device()
+    cast(Mock, device.get_system_info).return_value = _system()
+
+    result = execute(
+        "admin_password", {"new_password": new_password}, check_mode=True, device=device
+    )
+
+    assert result["changed"] is True
+    assert new_password not in repr(result)
+    update = cast(Mock, device.validate_admin_password).call_args.args[0]
+    assert update.new_password.get_secret_value() == new_password
+
+
+def test_admin_password_rejects_non_ascii_before_connect() -> None:
+    with patch("swos_ansible.runtime.PluginRegistry.discover") as discover:
+        with pytest.raises(ValueError, match=r"U\+0000\.\.U\+007F"):
+            execute("admin_password", {"new_password": "pässword"}, check_mode=True)
+    discover.assert_not_called()
 
 
 def test_admin_password_write_returns_only_verified_system_and_warnings() -> None:
@@ -681,11 +781,11 @@ def test_admin_password_write_returns_only_verified_system_and_warnings() -> Non
         warnings=(warning,),
     )
 
-    result = execute("admin_password", {"new_password": "replacement-secret"}, device=device)
+    result = execute("admin_password", {"new_password": "new-secret"}, device=device)
 
     assert result["changed"] is True
     assert result["swos_warnings"] == [warning.model_dump(mode="json")]
-    assert "replacement-secret" not in repr(result)
+    assert "new-secret" not in repr(result)
 
 
 def test_acl_check_mode_derives_ordered_numbers_and_calls_public_validator() -> None:

@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any, Literal, Protocol, TypeVar, cast
 
+from pydantic import SecretStr
 from swos_core import (
     AclRule,
     DeviceConnection,
@@ -24,6 +25,7 @@ from swos_core import (
     RstpBridgeUpdate,
     RstpPortEnableUpdate,
     SafetyWarning,
+    SnmpConfigurationUpdate,
     SnmpMetadataUpdate,
     SwOSDevice,
     SystemConfigurationUpdate,
@@ -38,9 +40,10 @@ from swos_core import (
 
 JsonObject = dict[str, Any]
 Params = Mapping[str, Any]
-MAX_DEVICE_NAME_BYTES = 16
-MAX_PORT_NAME_BYTES = 16
-MAX_SNMP_METADATA_BYTES = 64
+MAX_DEVICE_NAME_UNITS = 16
+MAX_PORT_NAME_UNITS = 16
+MAX_SNMP_TEXT_UNITS = 64
+MAX_ADMIN_PASSWORD_UNITS = 15
 MAX_STATIC_HOSTS = 2048
 FACT_SUBSETS = frozenset(
     {
@@ -76,6 +79,7 @@ WRITE_CAPABILITIES = {
     "port_name": "port_name_write",
     "port_configuration": "port_configuration_write",
     "snmp_metadata": "snmp_metadata_write",
+    "snmp_configuration": "snmp_configuration_write",
     "static_hosts": "static_hosts_write",
     "rstp_port": "rstp_port_enable_write",
     "forwarding_port_policy": "forwarding_port_policy_write",
@@ -118,6 +122,8 @@ def execute(
         return _port_configuration(device, params, check_mode, authorization_warnings)
     if operation == "snmp_metadata":
         return _snmp_metadata(device, params, check_mode, authorization_warnings)
+    if operation == "snmp_configuration":
+        return _snmp_configuration(device, params, check_mode, authorization_warnings)
     if operation == "static_hosts":
         return _static_hosts(device, params, check_mode, authorization_warnings)
     if operation == "rstp_port":
@@ -353,11 +359,58 @@ def _snmp_metadata(
     desired = current.model_copy(update=changes)
     changed = desired != current
     if check_mode:
-        return _with_warnings({"changed": changed, "snmp": _dump(desired)}, validation_warnings)
+        return _with_warnings(
+            {"changed": changed, "snmp": _dump_snmp_write_result(desired)}, validation_warnings
+        )
     if not changed:
-        return _with_warnings({"changed": False, "snmp": _dump(current)}, validation_warnings)
+        return _with_warnings(
+            {"changed": False, "snmp": _dump_snmp_write_result(current)}, validation_warnings
+        )
     result = device.set_snmp_metadata(update)
-    return _with_warnings({"changed": result.changed, "snmp": _dump(result.value)}, result.warnings)
+    return _with_warnings(
+        {"changed": result.changed, "snmp": _dump_snmp_write_result(result.value)}, result.warnings
+    )
+
+
+def _snmp_configuration(
+    device: SwOSDevice,
+    params: Params,
+    check_mode: bool,
+    warnings: tuple[SafetyWarning, ...],
+) -> JsonObject:
+    del warnings
+    community = params.get("community")
+    update = SnmpConfigurationUpdate(
+        enabled=_optional_bool(params, "enabled"),
+        community=None if community is None else SecretStr(cast(str, community)),
+        contact=cast(str | None, params.get("contact")),
+        location=cast(str | None, params.get("location")),
+    )
+    current = device.get_snmp()
+    validation_warnings = device.validate_snmp_configuration(update)
+    changes: JsonObject = {}
+    if update.enabled is not None:
+        changes["enabled"] = update.enabled
+    if update.community is not None:
+        changes["community"] = update.community.get_secret_value()
+    if update.contact is not None:
+        changes["contact"] = update.contact
+    if update.location is not None:
+        changes["location"] = update.location
+    desired = current.model_copy(update=changes)
+    changed = desired != current
+    if check_mode:
+        return _with_warnings(
+            {"changed": changed, "snmp": _dump_snmp_write_result(desired)}, validation_warnings
+        )
+    if not changed:
+        return _with_warnings(
+            {"changed": False, "snmp": _dump_snmp_write_result(current)}, validation_warnings
+        )
+    result = device.set_snmp_configuration(update)
+    return _with_warnings(
+        {"changed": result.changed, "snmp": _dump_snmp_write_result(result.value)}, result.warnings
+    )
 
 
 def _static_hosts(
@@ -724,11 +777,11 @@ def _validate_operation_params(operation: str, params: Params) -> None:
             raise ValueError(f"unknown facts subsets: {', '.join(sorted(unknown))}")
         return
     if operation == "device_name":
-        _validate_ascii(params.get("name"), "device name", MAX_DEVICE_NAME_BYTES)
+        _validate_safe_text(params.get("name"), "device name", MAX_DEVICE_NAME_UNITS)
         return
     if operation == "port_name":
         _validate_port_param(params)
-        _validate_ascii(params.get("name"), "port name", MAX_PORT_NAME_BYTES)
+        _validate_safe_text(params.get("name"), "port name", MAX_PORT_NAME_UNITS)
         return
     if operation == "port_configuration":
         number = _validate_port_param(params)
@@ -773,10 +826,30 @@ def _validate_operation_params(operation: str, params: Params) -> None:
         if contact is None and location is None:
             raise ValueError("at least one of contact or location is required")
         if contact is not None:
-            _validate_ascii(contact, "SNMP contact", MAX_SNMP_METADATA_BYTES)
+            _validate_safe_text(contact, "SNMP contact", MAX_SNMP_TEXT_UNITS)
         if location is not None:
-            _validate_ascii(location, "SNMP location", MAX_SNMP_METADATA_BYTES)
+            _validate_safe_text(location, "SNMP location", MAX_SNMP_TEXT_UNITS)
         SnmpMetadataUpdate(contact=contact, location=location)
+        return
+    if operation == "snmp_configuration":
+        enabled = _validate_optional_bool(params, "enabled")
+        community = params.get("community")
+        contact = params.get("contact")
+        location = params.get("location")
+        if all(value is None for value in (enabled, community, contact, location)):
+            raise ValueError("at least one SNMP configuration option is required")
+        if community is not None:
+            _validate_safe_text(community, "SNMP community", MAX_SNMP_TEXT_UNITS)
+        if contact is not None:
+            _validate_safe_text(contact, "SNMP contact", MAX_SNMP_TEXT_UNITS)
+        if location is not None:
+            _validate_safe_text(location, "SNMP location", MAX_SNMP_TEXT_UNITS)
+        SnmpConfigurationUpdate(
+            enabled=enabled,
+            community=None if community is None else SecretStr(cast(str, community)),
+            contact=cast(str | None, contact),
+            location=cast(str | None, location),
+        )
         return
     if operation == "static_hosts":
         hosts = params.get("hosts")
@@ -847,8 +920,7 @@ def _validate_operation_params(operation: str, params: Params) -> None:
         return
     if operation == "admin_password":
         new_password = params.get("new_password")
-        if not isinstance(new_password, str):
-            raise ValueError("new_password must be a string")
+        _validate_new_password(new_password)
         PasswordUpdate.model_validate({"new_password": new_password})
         return
     if operation == "acl_rules":
@@ -895,17 +967,29 @@ def _require_bool(value: object, name: str) -> bool:
     return value
 
 
-def _validate_ascii(value: object, label: str, maximum_bytes: int) -> str:
+def _validate_new_password(value: object) -> str:
+    if not isinstance(value, str):
+        raise ValueError("new_password must be a string")
+    encoded = value.encode("utf-16-le", errors="surrogatepass")
+    units = tuple(
+        int.from_bytes(encoded[index : index + 2], byteorder="little")
+        for index in range(0, len(encoded), 2)
+    )
+    if len(units) > MAX_ADMIN_PASSWORD_UNITS:
+        raise ValueError(f"new_password cannot exceed {MAX_ADMIN_PASSWORD_UNITS} UTF-16 code units")
+    if any(unit > 0x7F for unit in units):
+        raise ValueError("new_password code units must be in the range U+0000..U+007F")
+    return value
+
+
+def _validate_safe_text(value: object, label: str, maximum_units: int) -> str:
     if not isinstance(value, str):
         raise ValueError(f"{label} must be a string")
-    try:
-        encoded = value.encode("ascii")
-    except UnicodeEncodeError as exc:
-        raise ValueError(f"{label} must contain printable ASCII only") from exc
-    if any(byte < 0x20 or byte > 0x7E for byte in encoded):
-        raise ValueError(f"{label} must contain printable ASCII only")
-    if len(encoded) > maximum_bytes:
-        raise ValueError(f"{label} cannot exceed {maximum_bytes} characters")
+    if any(not character.isprintable() for character in value):
+        raise ValueError(f"{label} must contain printable Unicode without controls or surrogates")
+    units = len(value.encode("utf-16-le", errors="surrogatepass")) // 2
+    if units > maximum_units:
+        raise ValueError(f"{label} cannot exceed {maximum_units} UTF-16 code units")
     return value
 
 
@@ -969,7 +1053,7 @@ def _system_update(params: Params) -> SystemConfigurationUpdate:
         if value is not None:
             data[name] = _port_numbers(value, name, maximum=6)
     if "name" in data:
-        _validate_ascii(data["name"], "device name", MAX_DEVICE_NAME_BYTES)
+        _validate_safe_text(data["name"], "device name", MAX_DEVICE_NAME_UNITS)
     return SystemConfigurationUpdate.model_validate(data)
 
 
@@ -1140,6 +1224,13 @@ def _dump(value: _Serializable) -> JsonObject:
 
 def _dump_many(values: Sequence[_Serializable]) -> list[JsonObject]:
     return [_dump(value) for value in values]
+
+
+def _dump_snmp_write_result(value: _Serializable) -> JsonObject:
+    serialized = value.model_dump(mode="json")
+    community = serialized.pop("community", "")
+    serialized["community_configured"] = bool(community)
+    return serialized
 
 
 def _with_warnings(result: JsonObject, warnings: tuple[SafetyWarning, ...]) -> JsonObject:

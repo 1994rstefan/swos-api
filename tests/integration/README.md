@@ -94,8 +94,8 @@ any conflicting observation refuses cleanup. Both cases perform no write. If
 neither URL is reachable, cleanup also raises reset-required and performs no
 further write.
 
-The CSS106 write tests change and restore the device name, SNMP metadata, port
-name, flow-control state, RSTP enable, lock, lock-on-first, egress rate, and
+The CSS106 write tests change and restore the device name, SNMP configuration,
+port name, flow-control state, RSTP enable, lock, lock-on-first, egress rate, and
 selected system masks in `finally`. The system-mask tests toggle only port 5 in
 the discovery, IGMP fast-leave, or management allowed-port mask, one mask per
 test. They preserve port 6's exact mask state; management allowed-port tests
@@ -107,8 +107,17 @@ fresh-reads the full writable configuration: it restores only from that
 temporary state, does nothing if already at the original state, and refuses to
 overwrite any third state. Port tests run only after confirming that their
 target is link-down.
-Each test changes one setting at a time. The name test uses Ethernet port 5 by default;
-select another Ethernet port (1-5 only) with `SWOS_INTEGRATION_WRITE_PORT`.
+The device-name and port-5 name cycles use short BMP Unicode plus one
+supplementary emoji and verify normalized readback, making them representative
+CESU-8 hardware checks. The port-name cycle rechecks that port 5 is link-down
+immediately before writing and verifies that the complete writable port group,
+including port 6, is otherwise unchanged. SNMP contact and enabled are
+exercised in separate cycles, and a fixed short Unicode/ASCII community is
+passed and restored as `SecretStr` without including its value in assertion
+output. These are representative full-SNMP hardware checks; each cycle
+preserves every other SNMP field.
+Each test changes one setting at a time. The name test always uses Ethernet port
+5; port 6 is the protected SFP management path and is never selected.
 The ordinary configuration, per-port RSTP, and forwarding-policy tests always
 target down port 5. Port 6 is the SFP management path and is always rejected.
 The hardware tests never disable an Ethernet port or change negotiation. Every
@@ -117,8 +126,11 @@ asserts that the SFP port-6 policy remains identical. System tests do not change
 address mode, static IP, management VLAN, allow-from policy, or admin MAC unless
 the separately gated management reconnect marker is selected.
 
-Static-host, RSTP, forwarding, VLAN-policy, and system-mask cleanup passes the
-verified post-mutation state as the restore precondition. A concurrent
+Name and SNMP cleanup fresh-reads the complete writable group and restores only
+from the exact expected temporary state, accepts an already restored exact
+original, and refuses any third state without writing. Static-host, RSTP,
+forwarding, VLAN-policy, and system-mask cleanup passes the verified
+post-mutation state as the restore precondition. A concurrent
 configuration change therefore aborts the `finally` cleanup rather than being
 accepted as a new baseline and overwritten.
 

@@ -64,6 +64,7 @@ Available modules:
 - `swos.api.device_name`
 - `swos.api.port_name`
 - `swos.api.port_configuration`
+- `swos.api.snmp_configuration`
 - `swos.api.snmp_metadata`
 - `swos.api.static_hosts`
 - `swos.api.rstp_port`
@@ -76,6 +77,18 @@ Available modules:
 - `swos.api.rstp_bridge`
 - `swos.api.forwarding_matrix`
 - `swos.api.forwarding_mirroring`
+
+`snmp_configuration` manages enabled state, community, contact, and location.
+Its `community` argument is `no_log`, and SNMP write results expose only
+`community_configured`; they never return the write value. The `facts` module
+retains established normalized read behavior and exposes the configured
+community. Omitted fields are preserved in normal and check mode. RSTP modules reject port-enable and bridge
+priority/cost changes while the freshly read Forward Reserved Multicast state is
+enabled.
+
+Administrator replacement passwords are limited to 15 JavaScript UTF-16 code
+units, each in `U+0000..U+007F`. This intentionally permits ASCII controls and
+DEL, matching the UI transform; non-ASCII code units are rejected.
 
 The Python execution layer is intentionally independent of `ansible-core`, so
 it can be unit tested with a mocked public `SwOSDevice`.

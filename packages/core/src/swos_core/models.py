@@ -10,12 +10,57 @@ from pydantic import (
     AfterValidator,
     AnyHttpUrl,
     BaseModel,
+    BeforeValidator,
     ConfigDict,
     Field,
     SecretStr,
+    Strict,
     field_validator,
     model_validator,
 )
+
+_StrictInt = Annotated[int, Strict()]
+_StrictBool = Annotated[bool, Strict()]
+_StrictStr = Annotated[str, Strict()]
+
+
+def _validate_secret_string(value: object) -> object:
+    raw_value = value.get_secret_value() if isinstance(value, SecretStr) else value
+    if type(raw_value) is not str:
+        raise ValueError("secret values must be strings")
+    return value
+
+
+def _validate_string_enum(value: object) -> object:
+    if not isinstance(value, str):
+        raise ValueError("enum values must use their documented string spelling")
+    return value
+
+
+_StrictSecretStr = Annotated[SecretStr, BeforeValidator(_validate_secret_string)]
+
+
+def _reject_binary_values(value: object) -> None:
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        raise ValueError("binary values are not accepted by desired-state models")
+    if isinstance(value, dict):
+        for item in value.values():
+            _reject_binary_values(item)
+    elif isinstance(value, (list, tuple, set, frozenset)):
+        for item in value:
+            _reject_binary_values(item)
+
+
+class _DesiredStateModel(BaseModel):
+    """Strict boundary shared by values that can reach a device write."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_binary_values(cls, value: object) -> object:
+        _reject_binary_values(value)
+        return value
 
 
 def _validate_port_numbers(value: tuple[int, ...]) -> tuple[int, ...]:
@@ -26,7 +71,7 @@ def _validate_port_numbers(value: tuple[int, ...]) -> tuple[int, ...]:
     return value
 
 
-_PortNumbers = Annotated[tuple[int, ...], AfterValidator(_validate_port_numbers)]
+_PortNumbers = Annotated[tuple[_StrictInt, ...], AfterValidator(_validate_port_numbers)]
 
 
 class DeviceIdentity(BaseModel):
@@ -148,40 +193,34 @@ class SystemInfo(BaseModel):
     health: SystemHealth | None = None
 
 
-class DeviceNameUpdate(BaseModel):
+class DeviceNameUpdate(_DesiredStateModel):
     """Desired device name."""
 
-    model_config = ConfigDict(frozen=True)
-
-    name: str
+    name: _StrictStr
 
 
-class PasswordUpdate(BaseModel):
+class PasswordUpdate(_DesiredStateModel):
     """Desired administrator password held only as a non-serializing secret."""
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    new_password: SecretStr = Field(exclude=True)
+    new_password: _StrictSecretStr = Field(exclude=True)
 
 
-class SystemConfigurationUpdate(BaseModel):
+class SystemConfigurationUpdate(_DesiredStateModel):
     """Desired system changes, preserving fields omitted as ``None``."""
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    address_mode: AddressMode | None = None
-    static_ip: str | Literal["unset"] | None = None
-    admin_mac_address: str | Literal["unset"] | None = None
-    name: str | None = None
-    allow_from: str | Literal["unset"] | None = None
-    allow_prefix_length: int | None = Field(default=None, ge=0, le=32)
+    address_mode: Annotated[AddressMode, BeforeValidator(_validate_string_enum)] | None = None
+    static_ip: _StrictStr | Literal["unset"] | None = None
+    admin_mac_address: _StrictStr | Literal["unset"] | None = None
+    name: _StrictStr | None = None
+    allow_from: _StrictStr | Literal["unset"] | None = None
+    allow_prefix_length: _StrictInt | None = Field(default=None, ge=0, le=32)
     allowed_port_numbers: _PortNumbers | None = None
-    allowed_vlan_id: Annotated[int, Field(ge=1, le=4095)] | Literal["unset"] | None = None
-    independent_vlan_lookup: bool | None = None
-    igmp_enabled: bool | None = None
-    igmp_querier: bool | None = None
+    allowed_vlan_id: Annotated[_StrictInt, Field(ge=1, le=4095)] | Literal["unset"] | None = None
+    independent_vlan_lookup: _StrictBool | None = None
+    igmp_enabled: _StrictBool | None = None
+    igmp_querier: _StrictBool | None = None
     igmp_fast_leave_port_numbers: _PortNumbers | None = None
-    igmp_version: IgmpVersion | None = None
+    igmp_version: Annotated[IgmpVersion, BeforeValidator(_validate_string_enum)] | None = None
     discovery_protocol_port_numbers: _PortNumbers | None = None
 
     @field_validator("static_ip")
@@ -279,36 +318,30 @@ class PortInfo(BaseModel):
         return self
 
 
-class PortNameUpdate(BaseModel):
+class PortNameUpdate(_DesiredStateModel):
     """Desired name for one numbered switch port."""
 
-    model_config = ConfigDict(frozen=True)
-
-    number: int = Field(ge=1)
-    name: str
+    number: _StrictInt = Field(ge=1)
+    name: _StrictStr
 
 
-class ForcedPortNegotiation(BaseModel):
+class ForcedPortNegotiation(_DesiredStateModel):
     """Desired forced speed and duplex for one Ethernet port."""
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    speed_bps: int = Field(ge=1)
+    speed_bps: _StrictInt = Field(ge=1)
     duplex: Literal["full", "half"]
 
 
 PortNegotiation: TypeAlias = Literal["auto"] | ForcedPortNegotiation
 
 
-class PortConfigurationUpdate(BaseModel):
+class PortConfigurationUpdate(_DesiredStateModel):
     """Desired configuration changes for one non-management Ethernet port."""
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    number: int = Field(ge=1)
-    enabled: bool | None = None
+    number: _StrictInt = Field(ge=1)
+    enabled: _StrictBool | None = None
     negotiation: PortNegotiation | None = None
-    flow_control: bool | None = None
+    flow_control: _StrictBool | None = None
 
     @model_validator(mode="after")
     def validate_non_empty_update(self) -> Self:
@@ -430,16 +463,14 @@ class PortForwardingInfo(BaseModel):
     egress_rate_limit_bps: int | None = Field(default=None, ge=1)
 
 
-class ForwardingPortPolicyUpdate(BaseModel):
+class ForwardingPortPolicyUpdate(_DesiredStateModel):
     """Desired lock and egress-rate changes for one non-management port."""
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    number: int = Field(ge=1)
-    lock: bool | None = None
-    lock_on_first: bool | None = None
+    number: _StrictInt = Field(ge=1)
+    lock: _StrictBool | None = None
+    lock_on_first: _StrictBool | None = None
     egress_rate_limit_bps: (
-        Annotated[int, Field(ge=1, le=0xFFFFFFFF)] | Literal["unlimited"] | None
+        Annotated[_StrictInt, Field(ge=1, le=0xFFFFFFFF)] | Literal["unlimited"] | None
     ) = None
 
     @model_validator(mode="after")
@@ -449,24 +480,20 @@ class ForwardingPortPolicyUpdate(BaseModel):
         return self
 
 
-class ForwardingMatrixUpdate(BaseModel):
+class ForwardingMatrixUpdate(_DesiredStateModel):
     """Desired forwarding destinations for one source port."""
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    number: int = Field(ge=1)
+    number: _StrictInt = Field(ge=1)
     destination_port_numbers: _PortNumbers
 
 
-class ForwardingMirroringUpdate(BaseModel):
+class ForwardingMirroringUpdate(_DesiredStateModel):
     """Desired mirroring changes, preserving values omitted as ``None``."""
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    source_port_number: int = Field(ge=1)
-    mirror_ingress: bool | None = None
-    mirror_egress: bool | None = None
-    mirror_target_port: int | Literal["none"] | None = None
+    source_port_number: _StrictInt = Field(ge=1)
+    mirror_ingress: _StrictBool | None = None
+    mirror_egress: _StrictBool | None = None
+    mirror_target_port: _StrictInt | Literal["none"] | None = None
 
     @model_validator(mode="after")
     def validate_non_empty_update(self) -> Self:
@@ -534,41 +561,41 @@ class AclVlanTagMode(StrEnum):
     NOT_PRESENT = "not_present"
 
 
-class AclRule(BaseModel):
+class AclRule(_DesiredStateModel):
     """Normalized ordered CSS106 access-control rule."""
 
-    model_config = ConfigDict(frozen=True)
-
-    number: int = Field(ge=1)
+    number: _StrictInt = Field(ge=1)
     ingress_port_numbers: _PortNumbers
-    source_mac: str | None = Field(default=None, pattern=r"(?i)^(?:[0-9a-f]{2}:){5}[0-9a-f]{2}$")
-    source_mac_mask: str = Field(pattern=r"(?i)^(?:[0-9a-f]{2}:){5}[0-9a-f]{2}$")
-    destination_mac: str | None = Field(
+    source_mac: _StrictStr | None = Field(
         default=None, pattern=r"(?i)^(?:[0-9a-f]{2}:){5}[0-9a-f]{2}$"
     )
-    destination_mac_mask: str = Field(pattern=r"(?i)^(?:[0-9a-f]{2}:){5}[0-9a-f]{2}$")
-    ether_type: int = Field(ge=0, le=0xFFFF)
-    vlan_tag: AclVlanTagMode
-    vlan_id_min: int = Field(ge=0, le=4095)
-    vlan_id_max: int = Field(ge=0, le=4095)
-    vlan_priority: int | None = Field(default=None, ge=0, le=7)
-    source_ip: str | None = None
-    source_prefix_length: int = Field(ge=0, le=32)
-    source_port_min: int = Field(ge=0, le=0xFFFF)
-    source_port_max: int = Field(ge=0, le=0xFFFF)
-    destination_ip: str | None = None
-    destination_prefix_length: int = Field(ge=0, le=32)
-    destination_port_min: int = Field(ge=0, le=0xFFFF)
-    destination_port_max: int = Field(ge=0, le=0xFFFF)
-    protocol_number: int = Field(ge=0, le=0xFF)
-    dscp: int | None = Field(default=None, ge=0, le=63)
-    redirect_enabled: bool
+    source_mac_mask: _StrictStr = Field(pattern=r"(?i)^(?:[0-9a-f]{2}:){5}[0-9a-f]{2}$")
+    destination_mac: _StrictStr | None = Field(
+        default=None, pattern=r"(?i)^(?:[0-9a-f]{2}:){5}[0-9a-f]{2}$"
+    )
+    destination_mac_mask: _StrictStr = Field(pattern=r"(?i)^(?:[0-9a-f]{2}:){5}[0-9a-f]{2}$")
+    ether_type: _StrictInt = Field(ge=0, le=0xFFFF)
+    vlan_tag: Annotated[AclVlanTagMode, BeforeValidator(_validate_string_enum)]
+    vlan_id_min: _StrictInt = Field(ge=0, le=4095)
+    vlan_id_max: _StrictInt = Field(ge=0, le=4095)
+    vlan_priority: _StrictInt | None = Field(default=None, ge=0, le=7)
+    source_ip: _StrictStr | None = None
+    source_prefix_length: _StrictInt = Field(ge=0, le=32)
+    source_port_min: _StrictInt = Field(ge=0, le=0xFFFF)
+    source_port_max: _StrictInt = Field(ge=0, le=0xFFFF)
+    destination_ip: _StrictStr | None = None
+    destination_prefix_length: _StrictInt = Field(ge=0, le=32)
+    destination_port_min: _StrictInt = Field(ge=0, le=0xFFFF)
+    destination_port_max: _StrictInt = Field(ge=0, le=0xFFFF)
+    protocol_number: _StrictInt = Field(ge=0, le=0xFF)
+    dscp: _StrictInt | None = Field(default=None, ge=0, le=63)
+    redirect_enabled: _StrictBool
     redirect_port_numbers: _PortNumbers
-    drop: bool
-    mirror: bool
-    ingress_rate_limit_bps: int | None = Field(default=None, ge=1, le=0xFFFFFFFF)
-    set_vlan_id: int | None = Field(default=None, ge=1, le=4095)
-    set_vlan_priority: int | None = Field(default=None, ge=0, le=7)
+    drop: _StrictBool
+    mirror: _StrictBool
+    ingress_rate_limit_bps: _StrictInt | None = Field(default=None, ge=1, le=0xFFFFFFFF)
+    set_vlan_id: _StrictInt | None = Field(default=None, ge=1, le=4095)
+    set_vlan_priority: _StrictInt | None = Field(default=None, ge=0, le=7)
 
     @field_validator("source_ip", "destination_ip")
     @classmethod
@@ -611,17 +638,15 @@ class HostEntryType(StrEnum):
     DYNAMIC = "dynamic"
 
 
-class HostEntry(BaseModel):
+class HostEntry(_DesiredStateModel):
     """Device-independent static or dynamically learned forwarding entry."""
 
-    model_config = ConfigDict(frozen=True)
-
-    entry_type: HostEntryType
-    mac_address: str = Field(pattern=r"(?i)^(?:[0-9a-f]{2}:){5}[0-9a-f]{2}$")
-    vlan_id: int | None = Field(default=None, ge=1, le=4095)
-    port_numbers: tuple[int, ...]
-    drop: bool = False
-    mirror: bool = False
+    entry_type: Annotated[HostEntryType, BeforeValidator(_validate_string_enum)]
+    mac_address: _StrictStr = Field(pattern=r"(?i)^(?:[0-9a-f]{2}:){5}[0-9a-f]{2}$")
+    vlan_id: _StrictInt | None = Field(default=None, ge=1, le=4095)
+    port_numbers: tuple[_StrictInt, ...]
+    drop: _StrictBool = False
+    mirror: _StrictBool = False
 
     @field_validator("mac_address")
     @classmethod
@@ -703,23 +728,19 @@ class RstpInfo(BaseModel):
     ports: tuple[RstpPortInfo, ...]
 
 
-class RstpPortEnableUpdate(BaseModel):
+class RstpPortEnableUpdate(_DesiredStateModel):
     """Desired RSTP enabled state for one non-management port."""
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    number: int = Field(ge=1)
-    enabled: bool
+    number: _StrictInt = Field(ge=1)
+    enabled: _StrictBool
 
 
-class RstpBridgeUpdate(BaseModel):
+class RstpBridgeUpdate(_DesiredStateModel):
     """Desired bridge changes, preserving values omitted as ``None``."""
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    bridge_priority: int | None = Field(default=None, ge=0, le=0xF000, multiple_of=0x1000)
-    cost_mode: RstpCostMode | None = None
-    forward_reserved_multicast: bool | None = None
+    bridge_priority: _StrictInt | None = Field(default=None, ge=0, le=0xF000, multiple_of=0x1000)
+    cost_mode: Annotated[RstpCostMode, BeforeValidator(_validate_string_enum)] | None = None
+    forward_reserved_multicast: _StrictBool | None = None
 
     @model_validator(mode="after")
     def validate_non_empty_update(self) -> Self:
@@ -743,13 +764,26 @@ class SnmpInfo(BaseModel):
     location: str = Field(max_length=64)
 
 
-class SnmpMetadataUpdate(BaseModel):
+class SnmpMetadataUpdate(_DesiredStateModel):
     """Desired SNMP metadata, preserving fields omitted as ``None``."""
 
-    model_config = ConfigDict(frozen=True)
+    contact: _StrictStr | None = None
+    location: _StrictStr | None = None
 
-    contact: str | None = None
-    location: str | None = None
+
+class SnmpConfigurationUpdate(_DesiredStateModel):
+    """Desired SNMP service configuration, preserving fields omitted as ``None``."""
+
+    enabled: _StrictBool | None = None
+    community: _StrictSecretStr | None = Field(default=None, exclude=True)
+    contact: _StrictStr | None = None
+    location: _StrictStr | None = None
+
+    @model_validator(mode="after")
+    def validate_non_empty_update(self) -> Self:
+        if all(value is None for value in self.__dict__.values()):
+            raise ValueError("at least one SNMP configuration change is required")
+        return self
 
 
 class VlanMode(StrEnum):
@@ -799,17 +833,15 @@ class PortVlanInfo(BaseModel):
     egress: VlanEgressMode
 
 
-class PortVlanPolicyUpdate(BaseModel):
+class PortVlanPolicyUpdate(_DesiredStateModel):
     """Desired VLAN policy changes for one non-management Ethernet port."""
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    number: int = Field(ge=1)
-    mode: VlanMode | None = None
-    receive: VlanReceiveMode | None = None
-    default_vlan_id: int | None = Field(default=None, ge=1, le=4095)
-    force_vlan_id: bool | None = None
-    egress: VlanEgressMode | None = None
+    number: _StrictInt = Field(ge=1)
+    mode: Annotated[VlanMode, BeforeValidator(_validate_string_enum)] | None = None
+    receive: Annotated[VlanReceiveMode, BeforeValidator(_validate_string_enum)] | None = None
+    default_vlan_id: _StrictInt | None = Field(default=None, ge=1, le=4095)
+    force_vlan_id: _StrictBool | None = None
+    egress: Annotated[VlanEgressMode, BeforeValidator(_validate_string_enum)] | None = None
 
     @model_validator(mode="after")
     def validate_non_empty_update(self) -> Self:
@@ -824,24 +856,20 @@ class PortVlanPolicyUpdate(BaseModel):
         return self
 
 
-class VlanPortMembership(BaseModel):
+class VlanPortMembership(_DesiredStateModel):
     """Port membership and egress behavior in one VLAN table entry."""
 
-    model_config = ConfigDict(frozen=True)
-
-    port_number: int = Field(ge=1)
-    mode: VlanMembershipMode
+    port_number: _StrictInt = Field(ge=1)
+    mode: Annotated[VlanMembershipMode, BeforeValidator(_validate_string_enum)]
 
 
-class VlanInfo(BaseModel):
+class VlanInfo(_DesiredStateModel):
     """Device-independent configured VLAN table entry."""
 
-    model_config = ConfigDict(frozen=True)
-
-    table_position: int | None = Field(default=None, ge=0, exclude=True)
-    vlan_id: int = Field(ge=1, le=4095)
-    independent_learning: bool
-    igmp_snooping: bool
+    table_position: _StrictInt | None = Field(default=None, ge=0, exclude=True)
+    vlan_id: _StrictInt = Field(ge=1, le=4095)
+    independent_learning: _StrictBool
+    igmp_snooping: _StrictBool
     ports: tuple[VlanPortMembership, ...]
 
     @model_validator(mode="after")

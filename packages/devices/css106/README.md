@@ -26,24 +26,30 @@ are hardware-validated; populated decoding is covered by UI-derived sanitized
 fixtures. See the repository's `docs/css106-2.19-read-coverage.md` for the exact
 field-level matrix and remaining validation limits.
 
-Guarded device-name, port-name, Ethernet port-configuration, and SNMP
-contact/location writes are supported on the exact RB260GS firmware/build listed
+Guarded device-name, port-name, Ethernet port-configuration, and complete SNMP
+configuration writes are supported on the exact RB260GS firmware/build listed
 above. The adapter revalidates device identity, reads current state, skips no-op
 changes, sends one `text/plain` POST, and verifies the full relevant writable
 state through a fresh read. Device and port names are limited to 16 printable
-ASCII characters; SNMP contact and location are limited to 64. Port writes are
+Unicode UTF-16 code units; SNMP text is limited to 64. Writes reject controls,
+NUL, and unpaired surrogates; supplementary characters use the UI's CESU-8 wire
+representation. Reads truncate bytes at NUL, combine valid CESU-8 surrogate
+pairs, and reject unpaired surrogates or controls before the terminator. Port writes are
 restricted to ports 1-5 and never modify the port-6 SFP management path. Active
 ports cannot be disabled or have negotiation changed. Auto negotiation preserves
 the dormant forced speed/duplex fields; forced mode supports 10/100 Mbps and
 full/half duplex. The complete `/link.b` body contains only `en`, `nm`, `an`,
 `spdc`, `dpxc`, and `fct`, preserving every unrelated value. Device-name writes
 use the complete system object described below. The complete SNMP body is
-ordered `en`, `com`, `ci`, `loc` and preserves the raw enabled and community
-fields.
+ordered `en`, `com`, `ci`, `loc`; omitted fields preserve their raw values.
+Community write input is secret-bearing and is excluded from desired-model
+serialization and CLI/Ansible write results. `SnmpInfo` and read frontends
+intentionally retain the established configured-community value.
 
 Administrator password rotation is exposed separately through
-`admin_password_write`. The desired password must be ASCII and at most 15
-characters; the current connection password may be non-ASCII and is limited to
+`admin_password_write`. The desired password may contain any 15 or fewer
+JavaScript UTF-16 code units in `U+0000..U+007F`, including controls and DEL;
+the current connection password may be non-ASCII and is limited to
 15 JavaScript UTF-16 code units. Empty passwords are valid. The adapter
 reproduces the SwOS 2.19 UI transform and posts only its lowercase hexadecimal
 result to `/!pwd.b` using the current credentials. Non-ASCII current code units
@@ -103,7 +109,9 @@ The profile also advertises guarded per-port RSTP enable, bridge-global RSTP,
 forwarding lock, lock-on-first, egress-rate, matrix, and mirroring writes. CLI
 plans carry an expected configuration; the adapter rechecks it from fresh
 `/sys.b` plus `/rstp.b` or `/fwd.b` reads and rejects stale plans before POST.
-RSTP posts the complete `ena` group. Forwarding posts `fp1` through `fp6`,
+RSTP posts the complete `ena` group. Per-port enable and bridge priority/cost
+changes are rejected while the freshly read effective `frmc` value is enabled;
+changing `frmc` itself remains available. Forwarding posts `fp1` through `fp6`,
 `lck`, `lckf`, `imr`, `omr`, `mrto`, and `or`, preserving every omitted value
 and verifying that complete group after the write. Port 6's RSTP bit, `fp6`, and
 every destination relationship involving port 6 cannot change. Port 6 is
@@ -140,7 +148,8 @@ accepted, with the table bounded by the 2048-entry forwarding database.
 ACL replacement is implemented with the same baseline, serialization, and
 readback guards. `/acl.b` rows preserve the firmware's complete 26-field order
 and 32-rule limit. Rules are numbered consecutively and any rule whose ingress
-includes management port 6 is rejected. Redirecting traffic to port 6 remains
+includes management port 6 is rejected. Blank source/destination MAC matches
+omit `smac`/`dmac`, matching the UI serializer. Redirecting traffic to port 6 remains
 representable. The exact RB260GS profile advertises `acl_write`.
 
 The separately gated hardware tests exercise conservative representative paths,

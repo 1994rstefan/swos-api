@@ -1,6 +1,6 @@
 # Ansible integration
 
-`swos-ansible` 0.2.0 is an independently buildable Python distribution that
+`swos-ansible` 0.3.0 is an independently buildable Python distribution that
 installs the `swos.api` Ansible collection. It depends on `swos-core`, but not on
 a concrete device package or `ansible-core`. Install `ansible-core`,
 `swos-ansible`, and the required `swos-device-*` plugin into the same
@@ -24,6 +24,7 @@ never imports a device adapter or issues direct HTTP requests.
 | `swos.api.device_name` | Set or clear the device name |
 | `swos.api.port_name` | Set or clear an Ethernet port 1-5 name |
 | `swos.api.port_configuration` | Manage enabled, negotiation, speed/duplex, and flow control on ports 1-5 |
+| `swos.api.snmp_configuration` | Manage complete SNMP service state with secret input and redacted write results |
 | `swos.api.snmp_metadata` | Manage SNMP contact and location while preserving service/community fields |
 | `swos.api.static_hosts` | Declare the complete ordered static-host table for ports 1-5 |
 | `swos.api.rstp_port` | Manage per-port RSTP enable state on ports 1-5 |
@@ -40,15 +41,18 @@ never imports a device adapter or issues direct HTTP requests.
 Static hosts are declarative: `hosts` is the complete desired static table and
 an empty list removes every static entry. Dynamically learned entries are
 excluded from both the desired table and the optimistic-concurrency baseline.
-The table is limited to 2048 entries. Device and port names are printable ASCII
-up to 16 characters; SNMP contact and location are printable ASCII up to 64
-characters.
+The table is limited to 2048 entries. Device and port names are printable
+Unicode up to 16 UTF-16 code units; SNMP text is limited to 64 units. Controls,
+NUL, and unpaired surrogates are rejected.
 
 ## Connection and safety
 
 Every module accepts `url`, `username`, `password`, `timeout`, and
 `validate_certs`. The connection `password` and `admin_password.new_password`
-are marked `no_log`; no module result contains either secret. Using task-level
+and `snmp_configuration.community` are marked `no_log`; no write result contains
+these write inputs. SNMP configuration results expose only
+`community_configured`, while normalized SNMP facts intentionally expose the
+configured community. Using task-level
 `no_log: true` for password rotation provides additional protection around
 controller callbacks and third-party plugins. Device model and firmware are
 detected by installed plugins rather than selected by a module option.
@@ -86,3 +90,8 @@ failed result with `msg` plus an `error` object containing stable `type` and
 `message` fields. Parser failures are emitted directly by `AnsibleModule` and
 therefore do not include the collection's `error` object. Core domain and
 firmware errors remain machine-readable without leaking connection secrets.
+
+The replacement administrator password is validated exactly like the UI/core
+transform: at most 15 JavaScript UTF-16 code units, each in
+`U+0000..U+007F`. ASCII controls, NUL, and DEL are valid; non-ASCII code units
+are rejected.

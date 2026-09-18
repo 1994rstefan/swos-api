@@ -50,6 +50,7 @@ from swos_core.models import (
     RstpRole,
     RstpState,
     SfpInfo,
+    SnmpConfigurationUpdate,
     SnmpInfo,
     SnmpMetadataUpdate,
     SystemConfigurationUpdate,
@@ -83,10 +84,10 @@ UPTIME_TICKS_PER_SECOND = 100
 MAX_VLAN_ENTRIES = 250
 MAX_ACL_RULES = 32
 MAX_STATIC_HOSTS = 2048
-MAX_DEVICE_NAME_BYTES = 16
-MAX_PORT_NAME_BYTES = 16
-MAX_SNMP_METADATA_BYTES = 64
-MAX_ADMIN_PASSWORD_BYTES = 15
+MAX_DEVICE_NAME_UNITS = 16
+MAX_PORT_NAME_UNITS = 16
+MAX_SNMP_TEXT_UNITS = 64
+MAX_ADMIN_PASSWORD_UNITS = 15
 
 EnumValue = TypeVar("EnumValue", bound=StrEnum)
 
@@ -400,9 +401,9 @@ def encode_system_configuration_update(
 
 
 def validate_device_name(name: str) -> bytes:
-    """Validate and encode a device name accepted by tested CSS106 firmware."""
+    """Validate and CESU-8 encode a terminal-safe CSS106 device name."""
 
-    return _validate_printable_ascii(name, "device names", MAX_DEVICE_NAME_BYTES)
+    return _validate_ui_text(name, "device names", MAX_DEVICE_NAME_UNITS)
 
 
 def encode_password_update(update: PasswordUpdate, current_password: SecretStr) -> bytes:
@@ -599,9 +600,9 @@ def encode_port_configuration_update(
 
 
 def validate_port_name(name: str) -> bytes:
-    """Validate and encode a port name accepted by tested CSS106 firmware."""
+    """Validate and CESU-8 encode a terminal-safe CSS106 port name."""
 
-    return _validate_printable_ascii(name, "port names", MAX_PORT_NAME_BYTES)
+    return _validate_ui_text(name, "port names", MAX_PORT_NAME_UNITS)
 
 
 def port_statistics_from_payload(
@@ -962,27 +963,55 @@ def snmp_write_state_from_payload(data: dict[str, SwOSValue]) -> SnmpWriteState:
 def encode_snmp_metadata_update(
     data: dict[str, SwOSValue], update: SnmpMetadataUpdate
 ) -> tuple[bytes, SnmpWriteState]:
-    """Encode a complete SNMP write while preserving service and community fields."""
+    """Encode a metadata-only compatibility update through the complete SNMP group."""
+
+    return encode_snmp_configuration_update(
+        data,
+        SnmpConfigurationUpdate(contact=update.contact, location=update.location),
+    )
+
+
+def encode_snmp_configuration_update(
+    data: dict[str, SwOSValue], update: SnmpConfigurationUpdate
+) -> tuple[bytes, SnmpWriteState]:
+    """Encode every writable SNMP field while preserving omitted values."""
 
     state = snmp_write_state_from_payload(data)
+    community = (
+        state.raw_community
+        if update.community is None
+        else validate_snmp_text(update.community.get_secret_value(), "community").hex()
+    )
     contact = (
         state.raw_contact
         if update.contact is None
-        else validate_snmp_metadata(update.contact, "contact").hex()
+        else validate_snmp_text(update.contact, "contact").hex()
     )
     location = (
         state.raw_location
         if update.location is None
-        else validate_snmp_metadata(update.location, "location").hex()
+        else validate_snmp_text(update.location, "location").hex()
     )
-    desired = replace(state, raw_contact=contact, raw_location=location)
+    desired = replace(
+        state,
+        enabled=state.enabled if update.enabled is None else int(update.enabled),
+        raw_community=community,
+        raw_contact=contact,
+        raw_location=location,
+    )
     return _serialize_snmp_write_state(desired), desired
 
 
 def validate_snmp_metadata(value: str, field: str) -> bytes:
-    """Validate and encode writable CSS106 SNMP metadata."""
+    """Compatibility validator for writable CSS106 SNMP text."""
 
-    return _validate_printable_ascii(value, f"SNMP {field}", MAX_SNMP_METADATA_BYTES)
+    return validate_snmp_text(value, field)
+
+
+def validate_snmp_text(value: str, field: str) -> bytes:
+    """Validate and CESU-8 encode terminal-safe writable CSS106 SNMP text."""
+
+    return _validate_ui_text(value, f"SNMP {field}", MAX_SNMP_TEXT_UNITS)
 
 
 def sfp_from_payload(data: dict[str, SwOSValue]) -> SfpInfo:
@@ -1236,9 +1265,9 @@ def acl_rules_from_payload(rows: list[SwOSValue], identity: DeviceIdentity) -> t
                 AclRule(
                     number=row_index + 1,
                     ingress_port_numbers=_selected_ports(row, "frm", port_count),
-                    source_mac=_mac_address(row, "smac"),
+                    source_mac=_optional_mac_address(row, "smac"),
                     source_mac_mask=_wire_mac_address(row, "smsk"),
-                    destination_mac=_mac_address(row, "dmac"),
+                    destination_mac=_optional_mac_address(row, "dmac"),
                     destination_mac_mask=_wire_mac_address(row, "dmsk"),
                     ether_type=_bounded_integer(row, "et", minimum=0, maximum=0xFFFF),
                     vlan_tag=tag_modes[tag_index],
@@ -1308,29 +1337,39 @@ def encode_acl_rules(rules: tuple[AclRule, ...], identity: DeviceIdentity) -> by
         )
         vlan_tag = tag_modes.index(rule.vlan_tag)
         rate = 0 if rule.ingress_rate_limit_bps is None else rule.ingress_rate_limit_bps
-        rows.append(
-            f"{{frm:0x{_port_mask(rule.ingress_port_numbers):02x},"
-            f"smac:'{_wire_optional_mac(rule.source_mac)}',"
-            f"smsk:'{rule.source_mac_mask.replace(':', '').lower()}',"
-            f"dmac:'{_wire_optional_mac(rule.destination_mac)}',"
-            f"dmsk:'{rule.destination_mac_mask.replace(':', '').lower()}',"
-            f"et:0x{rule.ether_type:04x},vlan:0x{vlan_tag:02x},"
-            f"vidl:0x{rule.vlan_id_min:04x},vidh:0x{rule.vlan_id_max:04x},"
-            f"prio:0x{8 if rule.vlan_priority is None else rule.vlan_priority:02x},"
-            f"sip:0x{_wire_ip(rule.source_ip):08x},sipm:0x{rule.source_prefix_length:02x},"
-            f"sptl:0x{rule.source_port_min:04x},spth:0x{rule.source_port_max:04x},"
-            f"dip:0x{_wire_ip(rule.destination_ip):08x},"
-            f"dipm:0x{rule.destination_prefix_length:02x},"
-            f"dptl:0x{rule.destination_port_min:04x},dpth:0x{rule.destination_port_max:04x},"
-            f"prot:0x{rule.protocol_number:02x},"
-            f"dscp:0x{64 if rule.dscp is None else rule.dscp:02x},"
-            f"snde:0x{int(rule.redirect_enabled):02x},"
-            f"snd:0x{_port_mask(rule.redirect_port_numbers):02x},"
-            f"mirr:0x{int(rule.mirror):02x},"
-            f"rate:0x{rate:08x},"
-            f"svid:0x{0 if rule.set_vlan_id is None else rule.set_vlan_id:04x},"
-            f"spri:0x{8 if rule.set_vlan_priority is None else rule.set_vlan_priority:02x}}}"
+        fields = [f"frm:0x{_port_mask(rule.ingress_port_numbers):02x}"]
+        if rule.source_mac is not None:
+            fields.append(f"smac:'{_wire_optional_mac(rule.source_mac)}'")
+        fields.extend((f"smsk:'{rule.source_mac_mask.replace(':', '').lower()}'",))
+        if rule.destination_mac is not None:
+            fields.append(f"dmac:'{_wire_optional_mac(rule.destination_mac)}'")
+        fields.extend(
+            (
+                f"dmsk:'{rule.destination_mac_mask.replace(':', '').lower()}'",
+                f"et:0x{rule.ether_type:04x}",
+                f"vlan:0x{vlan_tag:02x}",
+                f"vidl:0x{rule.vlan_id_min:04x}",
+                f"vidh:0x{rule.vlan_id_max:04x}",
+                f"prio:0x{8 if rule.vlan_priority is None else rule.vlan_priority:02x}",
+                f"sip:0x{_wire_ip(rule.source_ip):08x}",
+                f"sipm:0x{rule.source_prefix_length:02x}",
+                f"sptl:0x{rule.source_port_min:04x}",
+                f"spth:0x{rule.source_port_max:04x}",
+                f"dip:0x{_wire_ip(rule.destination_ip):08x}",
+                f"dipm:0x{rule.destination_prefix_length:02x}",
+                f"dptl:0x{rule.destination_port_min:04x}",
+                f"dpth:0x{rule.destination_port_max:04x}",
+                f"prot:0x{rule.protocol_number:02x}",
+                f"dscp:0x{64 if rule.dscp is None else rule.dscp:02x}",
+                f"snde:0x{int(rule.redirect_enabled):02x}",
+                f"snd:0x{_port_mask(rule.redirect_port_numbers):02x}",
+                f"mirr:0x{int(rule.mirror):02x}",
+                f"rate:0x{rate:08x}",
+                f"svid:0x{0 if rule.set_vlan_id is None else rule.set_vlan_id:04x}",
+                f"spri:0x{8 if rule.set_vlan_priority is None else rule.set_vlan_priority:02x}",
+            )
         )
+        rows.append("{" + ",".join(fields) + "}")
     return f"[{','.join(rows)}]".encode("ascii")
 
 
@@ -1706,16 +1745,25 @@ def _validate_forwarding_write_safety(state: ForwardingWriteState) -> None:
         )
 
 
-def _validate_printable_ascii(value: str, label: str, maximum_bytes: int) -> bytes:
-    try:
-        encoded = value.encode("ascii")
-    except UnicodeEncodeError as exc:
-        raise InvalidOperationError(f"CSS106 {label} must contain printable ASCII only") from exc
-    if any(byte < 0x20 or byte > 0x7E for byte in encoded):
-        raise InvalidOperationError(f"CSS106 {label} must contain printable ASCII only")
-    if len(encoded) > maximum_bytes:
-        raise InvalidOperationError(f"CSS106 {label} cannot exceed {maximum_bytes} characters")
-    return encoded
+def _validate_ui_text(value: str, label: str, maximum_units: int) -> bytes:
+    if any(not character.isprintable() for character in value):
+        raise InvalidOperationError(
+            f"CSS106 {label} must contain printable Unicode without controls or surrogates"
+        )
+    units = _utf16_units(value)
+    if len(units) > maximum_units:
+        raise InvalidOperationError(
+            f"CSS106 {label} cannot exceed {maximum_units} UTF-16 code units"
+        )
+    return b"".join(chr(unit).encode("utf-8", errors="surrogatepass") for unit in units)
+
+
+def _utf16_units(value: str) -> tuple[int, ...]:
+    encoded = value.encode("utf-16-le", errors="surrogatepass")
+    return tuple(
+        int.from_bytes(encoded[index : index + 2], byteorder="little")
+        for index in range(0, len(encoded), 2)
+    )
 
 
 def _validate_current_password(secret: SecretStr) -> tuple[int, ...]:
@@ -1724,24 +1772,26 @@ def _validate_current_password(secret: SecretStr) -> tuple[int, ...]:
         int.from_bytes(encoded[index : index + 2], byteorder="little")
         for index in range(0, len(encoded), 2)
     )
-    if len(units) > MAX_ADMIN_PASSWORD_BYTES:
+    if len(units) > MAX_ADMIN_PASSWORD_UNITS:
         raise InvalidOperationError(
             "CSS106 current administrator password cannot exceed "
-            f"{MAX_ADMIN_PASSWORD_BYTES} UTF-16 code units"
+            f"{MAX_ADMIN_PASSWORD_UNITS} UTF-16 code units"
         )
     return units
 
 
 def _validate_new_password(secret: SecretStr) -> tuple[int, ...]:
-    try:
-        encoded = secret.get_secret_value().encode("ascii")
-    except UnicodeEncodeError as exc:
-        raise InvalidOperationError("CSS106 new administrator password must be ASCII") from exc
-    if len(encoded) > MAX_ADMIN_PASSWORD_BYTES:
+    units = _utf16_units(secret.get_secret_value())
+    if len(units) > MAX_ADMIN_PASSWORD_UNITS:
         raise InvalidOperationError(
-            f"CSS106 new administrator password cannot exceed {MAX_ADMIN_PASSWORD_BYTES} characters"
+            "CSS106 new administrator password cannot exceed "
+            f"{MAX_ADMIN_PASSWORD_UNITS} UTF-16 code units"
         )
-    return tuple(encoded)
+    if any(unit > 0x7F for unit in units):
+        raise InvalidOperationError(
+            "CSS106 new administrator password code units must be in U+0000..U+007F"
+        )
+    return units
 
 
 def _selected_ports(data: dict[str, SwOSValue], field: str, port_count: int) -> tuple[int, ...]:
@@ -1799,7 +1849,7 @@ def _optical_power_dbm(value: int) -> float | None:
 
 def _integer(data: dict[str, SwOSValue], field: str) -> int:
     value = data.get(field)
-    if not isinstance(value, int):
+    if type(value) is not int:
         raise ProtocolError(f"CSS106 field {field!r} must be an integer")
     return value
 
@@ -1918,13 +1968,35 @@ def _optional_hex_text(data: dict[str, SwOSValue], field: str) -> str | None:
 
 def _decode_hex_text(value: str, field: str) -> str:
     try:
-        decoded = bytes.fromhex(value).decode("utf-8")
+        raw = bytes.fromhex(value).partition(b"\0")[0]
+        code_units = raw.decode("utf-8", errors="surrogatepass")
     except (UnicodeDecodeError, ValueError) as exc:
-        raise ProtocolError(f"CSS106 field {field!r} is not valid hex-encoded UTF-8") from exc
-    decoded = decoded.partition("\0")[0]
+        raise ProtocolError(f"CSS106 field {field!r} is not valid hex-encoded UI text") from exc
+    decoded_parts: list[str] = []
+    index = 0
+    while index < len(code_units):
+        unit = ord(code_units[index])
+        if 0xD800 <= unit <= 0xDBFF:
+            if index + 1 >= len(code_units):
+                raise ProtocolError(f"CSS106 field {field!r} contains an unpaired surrogate")
+            low = ord(code_units[index + 1])
+            if not 0xDC00 <= low <= 0xDFFF:
+                raise ProtocolError(f"CSS106 field {field!r} contains an unpaired surrogate")
+            decoded_parts.append(chr(0x10000 + ((unit - 0xD800) << 10) + low - 0xDC00))
+            index += 2
+            continue
+        if 0xDC00 <= unit <= 0xDFFF:
+            raise ProtocolError(f"CSS106 field {field!r} contains an unpaired surrogate")
+        decoded_parts.append(code_units[index])
+        index += 1
+    decoded = "".join(decoded_parts)
     if any(category(character).startswith("C") for character in decoded):
         raise ProtocolError(f"CSS106 field {field!r} contains control characters")
     return decoded
+
+
+def _optional_mac_address(data: dict[str, SwOSValue], field: str) -> str | None:
+    return None if field not in data else _mac_address(data, field)
 
 
 def _ip_address(data: dict[str, SwOSValue], field: str) -> str | None:

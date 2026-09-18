@@ -6,6 +6,7 @@ import json
 import sys
 from enum import StrEnum
 from typing import Any
+from unicodedata import category
 
 from rich.console import Console
 
@@ -29,7 +30,7 @@ class OutputRenderer:
 
         payload = {"ok": True, "data": data}
         if self.output_format is OutputFormat.HUMAN:
-            Console(file=sys.stdout, highlight=False).print(human, markup=False)
+            Console(file=sys.stdout, highlight=False).print(_terminal_safe(human), markup=False)
             return
         self._write_json(payload)
 
@@ -38,7 +39,7 @@ class OutputRenderer:
 
         if self.output_format is OutputFormat.HUMAN:
             Console(file=sys.stderr, highlight=False, style="bold red").print(
-                message,
+                _terminal_safe(message),
                 markup=False,
             )
             return
@@ -50,3 +51,12 @@ class OutputRenderer:
         else:
             rendered = json.dumps(payload, ensure_ascii=False, indent=2)
         sys.stdout.write(rendered + "\n")
+
+
+def _terminal_safe(value: str) -> str:
+    """Remove terminal-active controls while preserving intentional line breaks."""
+
+    return "".join(
+        character if character == "\n" or not category(character).startswith("C") else "\ufffd"
+        for character in value
+    )

@@ -20,12 +20,16 @@ Device packages are discovered through Python entry points and declare the exact
 model and firmware combinations they support.
 
 See [the architecture documentation](docs/architecture.md) for details.
+The independently derived
+[CSS106 2.19 UI function matrix](docs/css106-2.19-ui-function-matrix.md) and its
+[machine-readable manifest](docs/css106-2.19-ui-manifest.json) define field-level
+read/write, validation, scaling, and frontend coverage.
 
 ## Ansible
 
-`swos-ansible` 0.2.0 installs the `swos.api` collection into Python's
-`ansible_collections` namespace. Its 16 modules provide normalized facts plus
-check-mode-safe modules for names, ports, SNMP metadata, static hosts, RSTP,
+`swos-ansible` 0.3.0 installs the `swos.api` collection into Python's
+`ansible_collections` namespace. Its 17 modules provide normalized facts plus
+check-mode-safe modules for names, ports, complete SNMP configuration, static hosts, RSTP,
 forwarding, VLAN policy and tables, ACL rules, complete system configuration,
 and administrator password rotation.
 
@@ -114,6 +118,7 @@ swosctl rstp configure-bridge --bridge-priority 36864 --device office
 swosctl forwarding configure-matrix 5 --destination-port 1 --device office
 swosctl forwarding configure-mirroring 5 --ingress on --target-port 4 --device office
 swosctl snmp show --device office
+swosctl snmp configure --enabled on --community-env SNMP_COMMUNITY --device office
 swosctl snmp metadata set --contact "Network Operations" --device office
 swosctl snmp metadata set --location "" --device office
 swosctl vlan ports --device office
@@ -172,19 +177,21 @@ Currently supported:
 
 | Device | Product code | Firmware | Build | Operations |
 | --- | --- | --- | --- | --- |
-| RB260GS | `CSS106-5G-1S` | `2.19` | `0x6a181cd5` | Complete local reads; guarded password, system, port, VLAN, RSTP, forwarding, ACL, name, SNMP metadata, and static-host writes |
+| RB260GS | `CSS106-5G-1S` | `2.19` | `0x6a181cd5` | Complete practical local reads; guarded password, system, port, VLAN, RSTP, forwarding, ACL, name, complete SNMP, and static-host writes |
 
 The supported read surface includes system, management, health, port
 configuration/state, complete statistics, SFP diagnostics, forwarding, port
 lock, mirroring, bandwidth limits, VLANs, hosts, RSTP, SNMP, learned IGMP
 groups, and ACL rules. See the
 [CSS106 2.19 read-coverage matrix](docs/css106-2.19-read-coverage.md).
-Device/port-name, port-configuration, SNMP contact/location, and static-host
+Device/port-name, port-configuration, complete SNMP configuration, and static-host
 table writes use read-before-write, skip no-op POSTs, and verify the complete
 relevant writable state after the change. Static-host mutations also require the
 fresh adapter state to match the caller's expected baseline. Static-host targets
 are limited to Ethernet ports 1-5; port 6 is reserved for SFP management. SNMP
-writes preserve the raw enabled and community fields read from the device.
+community write values are accepted only through secret-bearing interfaces and
+are redacted from CLI and Ansible write results. Normalized core reads, CLI
+`snmp show`, and Ansible SNMP facts intentionally expose the configured value.
 
 Per-port RSTP enable, bridge-global RSTP, forwarding lock, lock-on-first,
 egress-rate, matrix, and mirroring writes are exposed. They require the

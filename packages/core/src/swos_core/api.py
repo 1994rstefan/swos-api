@@ -29,6 +29,7 @@ from swos_core.models import (
     RstpPortEnableUpdate,
     SafetyWarning,
     SfpInfo,
+    SnmpConfigurationUpdate,
     SnmpInfo,
     SnmpMetadataUpdate,
     SystemConfigurationUpdate,
@@ -185,8 +186,18 @@ class DeviceAdapter(Protocol):
 
         ...
 
+    def set_snmp_configuration(self, update: SnmpConfigurationUpdate) -> OperationResult[SnmpInfo]:
+        """Set and verify complete SNMP service configuration."""
+
+        ...
+
     def validate_snmp_metadata(self, update: SnmpMetadataUpdate) -> None:
         """Validate an SNMP metadata update without writing to the device."""
+
+        ...
+
+    def validate_snmp_configuration(self, update: SnmpConfigurationUpdate) -> None:
+        """Validate a complete SNMP service update without writing."""
 
         ...
 
@@ -634,11 +645,31 @@ class SwOSDevice:
             warnings=warnings,
         )
 
+    def set_snmp_configuration(self, update: SnmpConfigurationUpdate) -> OperationResult[SnmpInfo]:
+        """Set SNMP service configuration after write safety and capability checks."""
+
+        warnings = self._authorize_write("snmp_configuration_write")
+        result = self._adapter.set_snmp_configuration(update)
+        return OperationResult[SnmpInfo](
+            changed=result.changed,
+            value=result.value,
+            warnings=warnings + result.warnings,
+        )
+
     def validate_snmp_metadata(self, update: SnmpMetadataUpdate) -> tuple[SafetyWarning, ...]:
         """Validate SNMP metadata under write policy without changing it."""
 
         warnings = self._authorize_write("snmp_metadata_write")
         self._adapter.validate_snmp_metadata(update)
+        return warnings
+
+    def validate_snmp_configuration(
+        self, update: SnmpConfigurationUpdate
+    ) -> tuple[SafetyWarning, ...]:
+        """Validate SNMP service configuration under write policy."""
+
+        warnings = self._authorize_write("snmp_configuration_write")
+        self._adapter.validate_snmp_configuration(update)
         return warnings
 
     def set_rstp_port_enabled(

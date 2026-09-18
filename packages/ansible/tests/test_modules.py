@@ -17,6 +17,7 @@ NEW_MODULES = {
     "rstp_bridge": "rstp_bridge",
     "forwarding_matrix": "forwarding_matrix",
     "forwarding_mirroring": "forwarding_mirroring",
+    "snmp_configuration": "snmp_configuration",
 }
 
 
@@ -77,10 +78,19 @@ def test_both_password_inputs_are_no_log() -> None:
     assert cast(Mock, run_module).call_args.args[1]["new_password"]["no_log"] is True
 
 
+def test_snmp_community_is_no_log() -> None:
+    module = _module("snmp_configuration")
+    with patch.object(module, "run_module") as run_module:
+        module.main()
+
+    assert cast(Mock, run_module).call_args.args[1]["community"]["no_log"] is True
+
+
 @pytest.mark.parametrize("name", NEW_MODULES)
 def test_new_module_documentation_and_examples_declare_version(name: str) -> None:
     module = _module(name)
-    assert 'version_added: "0.2.0"' in module.DOCUMENTATION
+    expected = "0.3.0" if name == "snmp_configuration" else "0.2.0"
+    assert f'version_added: "{expected}"' in module.DOCUMENTATION
     assert f"swos.api.{name}:" in module.EXAMPLES
 
 

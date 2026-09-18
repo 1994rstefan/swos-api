@@ -27,6 +27,8 @@ swosctl port rename 1 Uplink --device office
 swosctl port configure 5 --state enabled --flow-control on --device office
 swosctl port configure 5 --negotiation auto --device office
 swosctl port configure 5 --negotiation forced --speed-bps 100000000 --duplex full --device office
+swosctl snmp configure --enabled on --community-env SNMP_COMMUNITY --device office
+printf '%s\n' "$SNMP_COMMUNITY" | swosctl snmp configure --community-stdin --device office
 swosctl snmp metadata set --contact "Network Operations" --device office
 swosctl snmp metadata set --location "" --device office
 swosctl host add --mac 02:00:00:00:00:05 --vlan 10 --port 5 --device office
@@ -48,9 +50,13 @@ swosctl vlan remove 10 --device office
 swosctl -o json port rename 1 Uplink --device office
 ```
 
-Omitted SNMP metadata options preserve their current values. Passing an empty
-string explicitly clears the selected field. Write commands do not prompt for
-confirmation; firmware write authorization is enforced by `swos-core`.
+Omitted SNMP options preserve their current values. Passing an empty string
+explicitly clears the selected text field or community. `snmp configure` accepts
+community values only through `--community-env NAME` or `--community-stdin`;
+there is no plaintext community argument. SNMP write results report only whether
+a community is configured, while the read-only `snmp show` command intentionally
+returns the configured community. Write commands do not prompt for confirmation;
+firmware write authorization is enforced by `swos-core`.
 
 `system password set` requires exactly one secure, noninteractive source:
 `--new-password-env NAME` or `--new-password-stdin`. There is no command-line
@@ -103,6 +109,9 @@ destinations and mirror sources/targets accept only ports 1-5; a matrix row's
 existing port-6 relationship is preserved automatically. Omitting every
 `--destination-port` explicitly clears all Ethernet destinations while still
 preserving that port-6 relationship.
+RSTP port-enable and bridge priority/cost changes are rejected while the fresh
+effective Forward Reserved Multicast state is enabled. Changing that setting
+itself remains available, and unchanged disabled controls may be included.
 
 Bridge-global, forwarding-matrix/mirroring, ACL-table, and VLAN-table commands
 can disrupt switching or management and may require a manual factory reset if a
@@ -128,3 +137,7 @@ management path and cannot be renamed or configured. Forced negotiation requires
 both `--speed-bps` (exactly `10000000` or `100000000`) and `--duplex`; auto
 negotiation preserves the dormant forced speed and duplex. Omitted options
 preserve their current values, and an update with no options is rejected.
+
+Writable names and SNMP text accept printable Unicode with firmware-compatible
+UTF-16 code-unit limits. Human-readable output escapes terminal control bytes;
+JSON output continues to use the standard JSON escaping rules.

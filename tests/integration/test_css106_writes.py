@@ -7,6 +7,7 @@ from typing import Literal, TypeVar
 from urllib.parse import urlsplit, urlunsplit
 
 import pytest
+from pydantic import SecretStr
 from swos_core import (
     AclRule,
     AclVlanTagMode,
@@ -25,6 +26,7 @@ from swos_core import (
     OperationResult,
     PluginRegistry,
     PortConfigurationUpdate,
+    PortInfo,
     PortNameUpdate,
     PortVlanInfo,
     PortVlanPolicyUpdate,
@@ -32,7 +34,8 @@ from swos_core import (
     RstpCostMode,
     RstpInfo,
     RstpPortEnableUpdate,
-    SnmpMetadataUpdate,
+    SnmpConfigurationUpdate,
+    SnmpInfo,
     SwOSDevice,
     SystemConfigurationUpdate,
     SystemInfo,
@@ -66,25 +69,45 @@ def test_rb260gs_219_port_name_write_and_restore() -> None:
     registry = PluginRegistry.discover()
     identity = registry.probe(connection)
     device = registry.connect(identity, connection, FirmwareSafetyPolicy())
-    port_number = int(os.environ.get("SWOS_INTEGRATION_WRITE_PORT", "5"))
-    assert 1 <= port_number <= 5, "SWOS_INTEGRATION_WRITE_PORT must be an Ethernet port (1-5)"
-    original_port = device.get_ports()[port_number - 1]
+    port_number = 5
+    original = device.get_ports()
+    original_port = original[port_number - 1]
     if original_port.link_up:
         pytest.skip(f"port {port_number} is link-up; refusing destructive port test")
     original_name = original_port.name
-    temporary_name = "SWOS-CLI-TEST" if original_name != "SWOS-CLI-TEST" else "SWOS-CLI-TEMP"
+    temporary_name = _different_text(original_name, "Pört5😀", "Prüf5😀")
+    expected_temporary = tuple(
+        port.model_copy(update={"name": temporary_name}) if port.number == port_number else port
+        for port in original
+    )
     restorable = device.set_port_name(PortNameUpdate(number=port_number, name=original_name))
     assert not restorable.changed
+
+    before_write = device.get_ports()
+    if _port_writable_configuration(before_write) != _port_writable_configuration(original):
+        raise AssertionError("Port configuration changed before mutation; refusing write")
+    if before_write[port_number - 1].link_up:
+        pytest.skip(f"port {port_number} became link-up; refusing destructive port test")
 
     try:
         changed = device.set_port_name(PortNameUpdate(number=port_number, name=temporary_name))
         assert changed.changed
         assert changed.value.name == temporary_name
-        assert device.get_ports()[port_number - 1].name == temporary_name
+        readback = device.get_ports()
+        assert readback[port_number - 1].name == temporary_name
+        assert _port_writable_configuration(readback) == _port_writable_configuration(
+            expected_temporary
+        )
+        assert _port_writable_configuration(readback[5:]) == _port_writable_configuration(
+            original[5:]
+        )
     finally:
-        restored = device.set_port_name(PortNameUpdate(number=port_number, name=original_name))
-        assert restored.value.name == original_name
-        assert device.get_ports()[port_number - 1].name == original_name
+        _restore_port_name(
+            device,
+            original=original,
+            expected_temporary=expected_temporary,
+            port_number=port_number,
+        )
 
 
 @pytest.mark.integration
@@ -134,25 +157,40 @@ def test_rb260gs_219_device_name_write_and_restore() -> None:
     registry = PluginRegistry.discover()
     identity = registry.probe(connection)
     device = registry.connect(identity, connection, FirmwareSafetyPolicy())
-    original_name = device.get_system_info().name
-    temporary_name = "SWOS-API-TEST" if original_name != "SWOS-API-TEST" else "SWOS-API-TEMP"
-    restorable = device.set_device_name(DeviceNameUpdate(name=original_name))
+    original = device.get_system_info()
+    if original.management is None or 6 not in original.management.allowed_port_numbers:
+        pytest.skip("port 6 is not a management allowed port; refusing destructive test")
+    temporary_name = _different_text(original.name, "Täst😀", "Prüf😀")
+    expected_temporary = original.model_copy(update={"name": temporary_name})
+    restorable = device.set_device_name(DeviceNameUpdate(name=original.name))
     assert not restorable.changed
 
     try:
-        changed = device.set_device_name(DeviceNameUpdate(name=temporary_name))
+        changed = device.set_system_configuration(
+            SystemConfigurationUpdate(name=temporary_name),
+            expected_current=original,
+        )
         assert changed.changed
         assert changed.value.name == temporary_name
-        assert device.get_system_info().name == temporary_name
+        assert _system_configuration(changed.value) == _system_configuration(expected_temporary)
+        readback = device.get_system_info()
+        assert readback.name == temporary_name
+        assert _system_configuration(readback) == _system_configuration(expected_temporary)
+        assert readback.management is not None
+        assert readback.management.allowed_port_numbers == original.management.allowed_port_numbers
+        assert 6 in readback.management.allowed_port_numbers
     finally:
-        restored = device.set_device_name(DeviceNameUpdate(name=original_name))
-        assert restored.value.name == original_name
-        assert device.get_system_info().name == original_name
+        _restore_system_configuration(
+            device,
+            original=original,
+            expected_temporary=expected_temporary,
+            update=SystemConfigurationUpdate(name=original.name),
+        )
 
 
 @pytest.mark.integration
 @pytest.mark.destructive
-def test_rb260gs_219_snmp_metadata_write_and_restore() -> None:
+def test_rb260gs_219_snmp_unicode_contact_write_and_restore() -> None:
     connection = DeviceConnection(
         url=os.environ.get("SWOS_INTEGRATION_URL", "http://192.168.88.1"),
         username=os.environ.get("SWOS_INTEGRATION_USERNAME", "admin"),
@@ -162,26 +200,101 @@ def test_rb260gs_219_snmp_metadata_write_and_restore() -> None:
     identity = registry.probe(connection)
     device = registry.connect(identity, connection, FirmwareSafetyPolicy())
     original = device.get_snmp()
-    temporary_contact = "SWOS API TEST" if original.contact != "SWOS API TEST" else "SWOS API TEMP"
-    restorable = device.set_snmp_metadata(
-        SnmpMetadataUpdate(contact=original.contact, location=original.location)
-    )
-    assert not restorable.changed
+    temporary_contact = _different_text(original.contact, "NOC-ä😀", "Ops-ö😀")
+    expected_temporary = original.model_copy(update={"contact": temporary_contact})
+    device.validate_snmp_configuration(SnmpConfigurationUpdate(contact=original.contact))
+    _require_snmp_state(device.get_snmp(), original, "SNMP contact pre-write baseline")
 
     try:
-        changed = device.set_snmp_metadata(SnmpMetadataUpdate(contact=temporary_contact))
+        changed = device.set_snmp_configuration(SnmpConfigurationUpdate(contact=temporary_contact))
         assert changed.changed
         assert changed.value.contact == temporary_contact
-        assert changed.value.location == original.location
-        assert changed.value.community == original.community
-        assert device.get_snmp().contact == temporary_contact
+        _require_snmp_state(changed.value, expected_temporary, "SNMP contact write result")
+        _require_snmp_state(device.get_snmp(), expected_temporary, "SNMP contact core read")
     finally:
-        restored = device.set_snmp_metadata(
-            SnmpMetadataUpdate(contact=original.contact, location=original.location)
+        _restore_snmp_configuration(
+            device,
+            original=original,
+            expected_temporary=expected_temporary,
+            update=SnmpConfigurationUpdate(contact=original.contact),
         )
-        assert restored.value.contact == original.contact
-        assert restored.value.location == original.location
-        assert restored.value.community == original.community
+
+
+@pytest.mark.integration
+@pytest.mark.destructive
+def test_rb260gs_219_snmp_enabled_toggle_and_restore_preserves_text() -> None:
+    connection = DeviceConnection(
+        url=os.environ.get("SWOS_INTEGRATION_URL", "http://192.168.88.1"),
+        username=os.environ.get("SWOS_INTEGRATION_USERNAME", "admin"),
+        password=os.environ.get("SWOS_INTEGRATION_PASSWORD", ""),
+    )
+    registry = PluginRegistry.discover()
+    identity = registry.probe(connection)
+    device = registry.connect(identity, connection, FirmwareSafetyPolicy())
+    original = device.get_snmp()
+    expected_temporary = original.model_copy(update={"enabled": not original.enabled})
+    _require_snmp_state(device.get_snmp(), original, "SNMP enabled pre-write baseline")
+
+    try:
+        changed = device.set_snmp_configuration(
+            SnmpConfigurationUpdate(enabled=not original.enabled)
+        )
+        assert changed.changed
+        assert changed.value.enabled is not original.enabled
+        _require_snmp_state(changed.value, expected_temporary, "SNMP enabled write result")
+        _require_snmp_state(device.get_snmp(), expected_temporary, "SNMP enabled core read")
+    finally:
+        _restore_snmp_configuration(
+            device,
+            original=original,
+            expected_temporary=expected_temporary,
+            update=SnmpConfigurationUpdate(enabled=original.enabled),
+        )
+
+
+@pytest.mark.integration
+@pytest.mark.destructive
+def test_rb260gs_219_snmp_community_write_and_restore_without_secret_output() -> None:
+    connection = DeviceConnection(
+        url=os.environ.get("SWOS_INTEGRATION_URL", "http://192.168.88.1"),
+        username=os.environ.get("SWOS_INTEGRATION_USERNAME", "admin"),
+        password=os.environ.get("SWOS_INTEGRATION_PASSWORD", ""),
+    )
+    registry = PluginRegistry.discover()
+    identity = registry.probe(connection)
+    device = registry.connect(identity, connection, FirmwareSafetyPolicy())
+    original = device.get_snmp()
+    original_community = SecretStr(original.community)
+    temporary_community = SecretStr("HW-privät😀")
+    if original.community == temporary_community.get_secret_value():
+        pytest.skip("SNMP community already has the fixed temporary test value")
+    expected_temporary = original.model_copy(
+        update={"community": temporary_community.get_secret_value()}
+    )
+    device.validate_snmp_configuration(SnmpConfigurationUpdate(community=original_community))
+    _require_snmp_state(device.get_snmp(), original, "SNMP community pre-write baseline")
+
+    try:
+        changed = device.set_snmp_configuration(
+            SnmpConfigurationUpdate(community=temporary_community)
+        )
+        assert changed.changed
+        _require_secret_match(
+            changed.value.community,
+            temporary_community,
+            "SNMP community write result",
+        )
+        _require_snmp_state(changed.value, expected_temporary, "SNMP community write result")
+        readback = device.get_snmp()
+        _require_secret_match(readback.community, temporary_community, "SNMP community core read")
+        _require_snmp_state(readback, expected_temporary, "SNMP community core read")
+    finally:
+        _restore_snmp_configuration(
+            device,
+            original=original,
+            expected_temporary=expected_temporary,
+            update=SnmpConfigurationUpdate(community=original_community),
+        )
 
 
 @pytest.mark.integration
@@ -1023,6 +1136,87 @@ def _cleanup_state(
     raise AssertionError(
         f"{label} is neither the exact original nor expected temporary state; refusing cleanup"
     )
+
+
+def _different_text(original: str, primary: str, alternate: str) -> str:
+    return primary if original != primary else alternate
+
+
+def _port_writable_configuration(ports: tuple[PortInfo, ...]) -> tuple[object, ...]:
+    return tuple(
+        (
+            port.number,
+            port.name,
+            port.enabled,
+            port.auto_negotiation,
+            port.configured_speed_bps,
+            port.configured_full_duplex,
+            port.flow_control,
+        )
+        for port in ports
+    )
+
+
+def _restore_port_name(
+    device: SwOSDevice,
+    *,
+    original: tuple[PortInfo, ...],
+    expected_temporary: tuple[PortInfo, ...],
+    port_number: int,
+) -> None:
+    current = device.get_ports()
+    if (
+        _cleanup_state(
+            _port_writable_configuration(current),
+            original=_port_writable_configuration(original),
+            temporary=_port_writable_configuration(expected_temporary),
+            label="port writable configuration",
+        )
+        == "original"
+    ):
+        return
+    if current[port_number - 1].link_up:
+        raise AssertionError("Port-name cleanup target is link-up; refusing cleanup")
+    restored = device.set_port_name(
+        PortNameUpdate(number=port_number, name=original[port_number - 1].name)
+    )
+    assert restored.value.name == original[port_number - 1].name
+    assert _port_writable_configuration(device.get_ports()) == _port_writable_configuration(
+        original
+    )
+
+
+def _restore_snmp_configuration(
+    device: SwOSDevice,
+    *,
+    original: SnmpInfo,
+    expected_temporary: SnmpInfo,
+    update: SnmpConfigurationUpdate,
+) -> None:
+    current = device.get_snmp()
+    if (
+        _cleanup_state(
+            current,
+            original=original,
+            temporary=expected_temporary,
+            label="SNMP configuration",
+        )
+        == "original"
+    ):
+        return
+    restored = device.set_snmp_configuration(update)
+    _require_snmp_state(restored.value, original, "SNMP restoration result")
+    _require_snmp_state(device.get_snmp(), original, "SNMP restoration core read")
+
+
+def _require_snmp_state(actual: SnmpInfo, expected: SnmpInfo, label: str) -> None:
+    if actual != expected:
+        raise AssertionError(f"{label} did not match the expected complete state")
+
+
+def _require_secret_match(actual: str, expected: SecretStr, label: str) -> None:
+    if actual != expected.get_secret_value():
+        raise AssertionError(f"{label} did not match the expected secret")
 
 
 def _staged_cleanup_state(

@@ -27,7 +27,7 @@ options:
     description: Administrator MAC restriction, or C(unset) to clear it.
     type: str
   name:
-    description: Device name of at most 16 printable ASCII characters.
+    description: Printable Unicode device name of at most 16 UTF-16 code units.
     type: str
   allow_from:
     description: Management source IPv4 address, or C(unset) to clear it.

@@ -45,6 +45,7 @@ from swos_core.models import (
     RstpPortEnableUpdate,
     SafetyWarning,
     SfpInfo,
+    SnmpConfigurationUpdate,
     SnmpInfo,
     SnmpMetadataUpdate,
     SystemConfigurationUpdate,
@@ -70,7 +71,7 @@ from swos_device_css106.protocol import (
     encode_port_vlan_policy_update,
     encode_rstp_bridge_update,
     encode_rstp_port_enable_update,
-    encode_snmp_metadata_update,
+    encode_snmp_configuration_update,
     encode_static_hosts,
     encode_system_configuration_update,
     encode_vlans,
@@ -152,6 +153,7 @@ class CSS106Adapter:
                     "port_name_write",
                     "rstp_bridge_write",
                     "rstp_port_enable_write",
+                    "snmp_configuration_write",
                     "snmp_metadata_write",
                     "static_hosts_write",
                     "system_configuration_write",
@@ -722,10 +724,20 @@ class CSS106Adapter:
     def set_snmp_metadata(self, update: SnmpMetadataUpdate) -> OperationResult[SnmpInfo]:
         """Set SNMP metadata with preserved service settings and full read-back."""
 
-        if update.contact is not None:
-            validate_snmp_metadata(update.contact, "contact")
-        if update.location is not None:
-            validate_snmp_metadata(update.location, "location")
+        if update.contact is None and update.location is None:
+            return OperationResult[SnmpInfo](changed=False, value=self.get_snmp())
+        configuration = SnmpConfigurationUpdate(contact=update.contact, location=update.location)
+        self.validate_snmp_configuration(configuration)
+        return self._set_snmp_configuration(configuration)
+
+    def set_snmp_configuration(self, update: SnmpConfigurationUpdate) -> OperationResult[SnmpInfo]:
+        """Set complete SNMP service state with identity and full read-back guards."""
+
+        self.validate_snmp_configuration(update)
+        return self._set_snmp_configuration(update)
+
+    def _set_snmp_configuration(self, update: SnmpConfigurationUpdate) -> OperationResult[SnmpInfo]:
+        """Apply a validated complete SNMP update."""
 
         with self._transport_factory(self._connection) as transport:
             system_payload = transport.request(
@@ -739,10 +751,21 @@ class CSS106Adapter:
             )
             before_data = parse_payload(before_payload)
             before_info = snmp_from_payload(before_data)
-            content, expected_state = encode_snmp_metadata_update(before_data, update)
+            content, expected_state = encode_snmp_configuration_update(before_data, update)
+            desired_enabled = before_info.enabled if update.enabled is None else update.enabled
+            desired_community = (
+                before_info.community
+                if update.community is None
+                else update.community.get_secret_value()
+            )
             desired_contact = before_info.contact if update.contact is None else update.contact
             desired_location = before_info.location if update.location is None else update.location
-            if before_info.contact == desired_contact and before_info.location == desired_location:
+            if (
+                before_info.enabled == desired_enabled
+                and before_info.community == desired_community
+                and before_info.contact == desired_contact
+                and before_info.location == desired_location
+            ):
                 return OperationResult[SnmpInfo](changed=False, value=before_info)
 
             transport.request(
@@ -760,17 +783,28 @@ class CSS106Adapter:
         if snmp_write_state_from_payload(after_data) != expected_state:
             after_info = snmp_from_payload(after_data)
             if (
-                after_info.enabled != before_info.enabled
-                or after_info.community != before_info.community
+                after_info.enabled != desired_enabled
+                or after_info.community != desired_community
                 or after_info.contact != desired_contact
                 or after_info.location != desired_location
             ):
-                raise ProtocolError("CSS106 SNMP metadata write failed read-back verification")
+                raise ProtocolError("CSS106 SNMP configuration write failed read-back verification")
         return OperationResult[SnmpInfo](changed=True, value=snmp_from_payload(after_data))
 
     def validate_snmp_metadata(self, update: SnmpMetadataUpdate) -> None:
         """Validate SNMP metadata without opening a transport."""
 
+        if update.contact is None and update.location is None:
+            return
+        self.validate_snmp_configuration(
+            SnmpConfigurationUpdate(contact=update.contact, location=update.location)
+        )
+
+    def validate_snmp_configuration(self, update: SnmpConfigurationUpdate) -> None:
+        """Validate complete SNMP service configuration without transport access."""
+
+        if update.community is not None:
+            validate_snmp_metadata(update.community.get_secret_value(), "community")
         if update.contact is not None:
             validate_snmp_metadata(update.contact, "contact")
         if update.location is not None:
@@ -790,6 +824,7 @@ class CSS106Adapter:
                 raise InvalidOperationError(
                     "CSS106 RSTP configuration changed since the expected baseline"
                 )
+            self.validate_rstp_port_enabled(update, current=before)
             before_state = rstp_enable_write_state_from_payload(before_rstp_data, self._identity)
             content, desired = encode_rstp_port_enable_update(
                 before_rstp_data, self._identity, update
@@ -819,7 +854,13 @@ class CSS106Adapter:
         """Validate an RSTP update against a fresh normalized read."""
 
         self._validate_writable_port(update.number)
-        self._require_numbered(current.ports, update.number, "RSTP port")
+        port = next((item for item in current.ports if item.number == update.number), None)
+        if port is None:
+            raise InvalidOperationError(f"RSTP port {update.number} was not returned by the device")
+        if current.forward_reserved_multicast and update.enabled != port.enabled:
+            raise InvalidOperationError(
+                "RSTP per-port enable cannot change while reserved multicast forwarding is enabled"
+            )
 
     def set_rstp_bridge(
         self,
@@ -835,6 +876,7 @@ class CSS106Adapter:
                 raise InvalidOperationError(
                     "CSS106 RSTP configuration changed since the expected baseline"
                 )
+            self.validate_rstp_bridge(update, current=before)
             before_state = rstp_bridge_write_state_from_payload(before_system_data)
             content, desired = encode_rstp_bridge_update(before_system_data, update)
             if desired == before_state:
@@ -861,9 +903,22 @@ class CSS106Adapter:
     ) -> None:
         """Validate bridge configuration against a fresh normalized read."""
 
-        del update
         if not current.ports:
             raise InvalidOperationError("Current CSS106 RSTP configuration is incomplete")
+        effective_forwarding = (
+            current.forward_reserved_multicast
+            if update.forward_reserved_multicast is None
+            else update.forward_reserved_multicast
+        )
+        priority_changes = (
+            update.bridge_priority is not None and update.bridge_priority != current.bridge_priority
+        )
+        cost_changes = update.cost_mode is not None and update.cost_mode != current.cost_mode
+        if effective_forwarding and (priority_changes or cost_changes):
+            raise InvalidOperationError(
+                "RSTP bridge priority and cost mode cannot change while reserved multicast "
+                "forwarding is enabled"
+            )
 
     def set_forwarding_port_policy(
         self,
