@@ -48,12 +48,18 @@ jobs:
         run: |
           python -m build --outdir dist packages/core
           python -m build --outdir dist packages/cli
+          python -m build --outdir dist packages/ansible
           python -m build --outdir dist packages/devices/css106
+      - name: Validate Ansible collection
+        working-directory: packages/ansible/src/ansible_collections/swos/api
+        run: ansible-test sanity --python 3.14
       - name: Validate distributions
         run: twine check dist/*
       - name: Test installed wheels
         run: |
           python -m venv .wheel-venv
           .wheel-venv/bin/python -m pip install dist/*.whl
+          .wheel-venv/bin/python -m pip install "ansible-core>=2.18,<2.22"
           .wheel-venv/bin/swosctl -o json --version
+          .wheel-venv/bin/ansible-doc swos.api.facts >/dev/null
           .wheel-venv/bin/python -c "from swos_core import PluginRegistry; assert PluginRegistry.discover().known_families == ('css106',)"
