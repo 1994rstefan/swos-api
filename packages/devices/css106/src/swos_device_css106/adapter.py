@@ -853,6 +853,18 @@ class CSS106Adapter:
             raise ProtocolError("CSS106 RSTP bridge write failed read-back verification")
         return OperationResult[RstpInfo](changed=True, value=after)
 
+    def validate_rstp_bridge(
+        self,
+        update: RstpBridgeUpdate,
+        *,
+        current: RstpInfo,
+    ) -> None:
+        """Validate bridge configuration against a fresh normalized read."""
+
+        del update
+        if not current.ports:
+            raise InvalidOperationError("Current CSS106 RSTP configuration is incomplete")
+
     def set_forwarding_port_policy(
         self,
         update: ForwardingPortPolicyUpdate,
@@ -897,6 +909,34 @@ class CSS106Adapter:
             lambda data: encode_forwarding_matrix_update(data, self._identity, update),
         )
 
+    def validate_forwarding_matrix(
+        self,
+        update: ForwardingMatrixUpdate,
+        *,
+        current: ForwardingInfo,
+    ) -> None:
+        """Validate one forwarding row against a fresh normalized read."""
+
+        self._validate_forwarding_update_state(current)
+        self._validate_writable_port(update.number)
+        port = next(
+            (item for item in current.ports if item.number == update.number),
+            None,
+        )
+        if port is None:
+            raise InvalidOperationError(
+                f"forwarding port {update.number} was not returned by the device"
+            )
+        known_ports = {item.number for item in current.ports}
+        if tuple(sorted(update.destination_port_numbers)) != update.destination_port_numbers:
+            raise InvalidOperationError("Forwarding destination ports must be in ascending order")
+        if any(number not in known_ports for number in update.destination_port_numbers):
+            raise InvalidOperationError("Forwarding destinations must reference declared ports")
+        if (6 in update.destination_port_numbers) != (6 in port.destination_port_numbers):
+            raise InvalidOperationError(
+                "CSS106 forwarding writes cannot alter a destination relationship involving port 6"
+            )
+
     def set_forwarding_mirroring(
         self,
         update: ForwardingMirroringUpdate,
@@ -909,6 +949,21 @@ class CSS106Adapter:
             expected_current,
             lambda data: encode_forwarding_mirroring_update(data, self._identity, update),
         )
+
+    def validate_forwarding_mirroring(
+        self,
+        update: ForwardingMirroringUpdate,
+        *,
+        current: ForwardingInfo,
+    ) -> None:
+        """Validate mirroring against a fresh normalized read."""
+
+        self._validate_forwarding_update_state(current)
+        self._validate_writable_port(update.source_port_number)
+        self._require_numbered(current.ports, update.source_port_number, "forwarding port")
+        if update.mirror_target_port not in (None, "none"):
+            assert isinstance(update.mirror_target_port, int)
+            self._validate_writable_port(update.mirror_target_port)
 
     def replace_static_hosts(
         self,
@@ -986,6 +1041,11 @@ class CSS106Adapter:
         if after != rules:
             raise ProtocolError("CSS106 ACL write failed full-table read-back verification")
         return OperationResult[tuple[AclRule, ...]](changed=True, value=after)
+
+    def validate_acl_rules(self, rules: tuple[AclRule, ...]) -> None:
+        """Validate a complete ACL table without opening a transport."""
+
+        encode_acl_rules(rules, self._identity)
 
     def set_port_vlan_policy(
         self,
@@ -1081,6 +1141,16 @@ class CSS106Adapter:
             raise ProtocolError("CSS106 VLAN write failed full-table read-back verification")
         return OperationResult[tuple[VlanInfo, ...]](changed=True, value=after)
 
+    def validate_vlans(
+        self,
+        vlans: tuple[VlanInfo, ...],
+        *,
+        current: tuple[VlanInfo, ...],
+    ) -> None:
+        """Validate a complete VLAN table without opening a transport."""
+
+        encode_vlans(vlans, current, self._identity)
+
     def _verify_identity(self, transport: HttpTransport) -> None:
         system_payload = transport.request("GET", "/sys.b", max_response_bytes=MAX_PAYLOAD_BYTES)
         if identity_from_system(parse_payload(system_payload)) != self._identity:
@@ -1092,6 +1162,16 @@ class CSS106Adapter:
         if number < 1 or number > 5:
             raise InvalidOperationError(
                 f"Port {number} does not exist on {self._identity.product_code}"
+            )
+
+    @staticmethod
+    def _validate_forwarding_update_state(current: ForwardingInfo) -> None:
+        management = next((port for port in current.ports if port.number == 6), None)
+        if (
+            management is not None and (management.mirror_ingress or management.mirror_egress)
+        ) or current.mirror_target_port == 6:
+            raise InvalidOperationError(
+                "CSS106 forwarding writes require management port 6 to be absent from mirroring"
             )
 
     @staticmethod

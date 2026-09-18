@@ -421,6 +421,14 @@ class FakeAdapter:
         value = before.model_copy(update=changes)
         return OperationResult[RstpInfo](changed=value != before, value=value)
 
+    def validate_rstp_bridge(
+        self,
+        update: RstpBridgeUpdate,
+        *,
+        current: RstpInfo,
+    ) -> None:
+        del update, current
+
     def set_forwarding_port_policy(
         self,
         update: ForwardingPortPolicyUpdate,
@@ -464,6 +472,14 @@ class FakeAdapter:
         value = before.model_copy(update={"ports": ports})
         return OperationResult[ForwardingInfo](changed=value != before, value=value)
 
+    def validate_forwarding_matrix(
+        self,
+        update: ForwardingMatrixUpdate,
+        *,
+        current: ForwardingInfo,
+    ) -> None:
+        del update, current
+
     def set_forwarding_mirroring(
         self,
         update: ForwardingMirroringUpdate,
@@ -473,6 +489,14 @@ class FakeAdapter:
         before = self.get_forwarding()
         assert expected_current == before
         return OperationResult[ForwardingInfo](changed=False, value=before)
+
+    def validate_forwarding_mirroring(
+        self,
+        update: ForwardingMirroringUpdate,
+        *,
+        current: ForwardingInfo,
+    ) -> None:
+        del update, current
 
     def replace_static_hosts(
         self,
@@ -494,6 +518,9 @@ class FakeAdapter:
     ) -> OperationResult[tuple[AclRule, ...]]:
         del expected_current
         return OperationResult[tuple[AclRule, ...]](changed=True, value=rules)
+
+    def validate_acl_rules(self, rules: tuple[AclRule, ...]) -> None:
+        del rules
 
     def set_port_vlan_policy(
         self,
@@ -526,6 +553,14 @@ class FakeAdapter:
     ) -> OperationResult[tuple[VlanInfo, ...]]:
         assert expected_current == self.get_vlans()
         return OperationResult[tuple[VlanInfo, ...]](changed=vlans != expected_current, value=vlans)
+
+    def validate_vlans(
+        self,
+        vlans: tuple[VlanInfo, ...],
+        *,
+        current: tuple[VlanInfo, ...],
+    ) -> None:
+        del vlans, current
 
 
 class LegacySystemConfigurationAdapter(FakeAdapter):
@@ -735,6 +770,8 @@ def test_policy_bound_device_rejects_unsupported_feature() -> None:
         device.replace_static_hosts((), expected_current=())
     with pytest.raises(UnsupportedFeatureError, match="acl write"):
         device.replace_acl_rules((), expected_current=())
+    with pytest.raises(UnsupportedFeatureError, match="acl write"):
+        device.validate_acl_rules(())
     port_vlans = FakeAdapter(identity()).get_port_vlans()
     with pytest.raises(UnsupportedFeatureError, match="vlan port policy write"):
         device.set_port_vlan_policy(
@@ -744,15 +781,29 @@ def test_policy_bound_device_rejects_unsupported_feature() -> None:
     vlans = FakeAdapter(identity()).get_vlans()
     with pytest.raises(UnsupportedFeatureError, match="vlan table write"):
         device.replace_vlans(vlans, expected_current=vlans)
+    with pytest.raises(UnsupportedFeatureError, match="vlan table write"):
+        device.validate_vlans(vlans, current=vlans)
     rstp = FakeAdapter(identity()).get_rstp()
     with pytest.raises(UnsupportedFeatureError, match="rstp port enable write"):
         device.set_rstp_port_enabled(
             RstpPortEnableUpdate(number=1, enabled=False), expected_current=rstp
         )
+    with pytest.raises(UnsupportedFeatureError, match="rstp bridge write"):
+        device.validate_rstp_bridge(RstpBridgeUpdate(bridge_priority=0x7000), current=rstp)
     forwarding = FakeAdapter(identity()).get_forwarding()
     with pytest.raises(UnsupportedFeatureError, match="forwarding port policy write"):
         device.set_forwarding_port_policy(
             ForwardingPortPolicyUpdate(number=1, lock=True), expected_current=forwarding
+        )
+    with pytest.raises(UnsupportedFeatureError, match="forwarding matrix write"):
+        device.validate_forwarding_matrix(
+            ForwardingMatrixUpdate(number=1, destination_port_numbers=(1,)),
+            current=forwarding,
+        )
+    with pytest.raises(UnsupportedFeatureError, match="forwarding mirroring write"):
+        device.validate_forwarding_mirroring(
+            ForwardingMirroringUpdate(source_port_number=1, mirror_ingress=True),
+            current=forwarding,
         )
 
 
@@ -854,9 +905,17 @@ def test_policy_bound_device_authorizes_and_returns_write_result() -> None:
     )
     assert device.validate_snmp_metadata(SnmpMetadataUpdate(contact="NOC")) == ()
     assert device.validate_static_hosts(()) == ()
+    assert device.validate_acl_rules(()) == ()
     assert (
         device.validate_rstp_port_enabled(
             RstpPortEnableUpdate(number=1, enabled=False),
+            current=device.get_rstp(),
+        )
+        == ()
+    )
+    assert (
+        device.validate_rstp_bridge(
+            RstpBridgeUpdate(bridge_priority=0x7000),
             current=device.get_rstp(),
         )
         == ()
@@ -869,12 +928,27 @@ def test_policy_bound_device_authorizes_and_returns_write_result() -> None:
         == ()
     )
     assert (
+        device.validate_forwarding_matrix(
+            ForwardingMatrixUpdate(number=1, destination_port_numbers=(1,)),
+            current=device.get_forwarding(),
+        )
+        == ()
+    )
+    assert (
+        device.validate_forwarding_mirroring(
+            ForwardingMirroringUpdate(source_port_number=1, mirror_ingress=True),
+            current=device.get_forwarding(),
+        )
+        == ()
+    )
+    assert (
         device.validate_port_vlan_policy(
             PortVlanPolicyUpdate(number=1, force_vlan_id=False),
             current=device.get_port_vlans(),
         )
         == ()
     )
+    assert device.validate_vlans((), current=device.get_vlans()) == ()
 
 
 def test_policy_bound_device_omits_absent_readback_keyword_for_legacy_adapters() -> None:

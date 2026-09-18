@@ -1525,7 +1525,7 @@ wheels = [
 
 [[package]]
 name = "swos-ansible"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "packages/ansible" }
 dependencies = [
     { name = "swos-core" },
@@ -1559,7 +1559,7 @@ requires-dist = [
 
 [[package]]
 name = "swos-core"
-version = "0.12.0"
+version = "0.12.1"
 source = { editable = "packages/core" }
 dependencies = [
     { name = "httpx" },
@@ -1574,7 +1574,7 @@ requires-dist = [
 
 [[package]]
 name = "swos-device-css106"
-version = "2.19.post17"
+version = "2.19.post18"
 source = { editable = "packages/devices/css106" }
 dependencies = [
     { name = "swos-core" },

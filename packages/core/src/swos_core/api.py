@@ -220,6 +220,16 @@ class DeviceAdapter(Protocol):
 
         ...
 
+    def validate_rstp_bridge(
+        self,
+        update: RstpBridgeUpdate,
+        *,
+        current: RstpInfo,
+    ) -> None:
+        """Validate bridge configuration against freshly read state."""
+
+        ...
+
     def set_forwarding_port_policy(
         self,
         update: ForwardingPortPolicyUpdate,
@@ -250,6 +260,16 @@ class DeviceAdapter(Protocol):
 
         ...
 
+    def validate_forwarding_matrix(
+        self,
+        update: ForwardingMatrixUpdate,
+        *,
+        current: ForwardingInfo,
+    ) -> None:
+        """Validate one forwarding matrix row against freshly read state."""
+
+        ...
+
     def set_forwarding_mirroring(
         self,
         update: ForwardingMirroringUpdate,
@@ -257,6 +277,16 @@ class DeviceAdapter(Protocol):
         expected_current: ForwardingInfo,
     ) -> OperationResult[ForwardingInfo]:
         """Set mirroring configuration against an expected baseline."""
+
+        ...
+
+    def validate_forwarding_mirroring(
+        self,
+        update: ForwardingMirroringUpdate,
+        *,
+        current: ForwardingInfo,
+    ) -> None:
+        """Validate mirroring configuration against freshly read state."""
 
         ...
 
@@ -282,6 +312,11 @@ class DeviceAdapter(Protocol):
         expected_current: tuple[AclRule, ...],
     ) -> OperationResult[tuple[AclRule, ...]]:
         """Replace the ACL table if its fresh state matches the expected baseline."""
+
+        ...
+
+    def validate_acl_rules(self, rules: tuple[AclRule, ...]) -> None:
+        """Validate a complete ordered ACL table without writing it."""
 
         ...
 
@@ -312,6 +347,16 @@ class DeviceAdapter(Protocol):
         expected_current: tuple[VlanInfo, ...],
     ) -> OperationResult[tuple[VlanInfo, ...]]:
         """Replace the VLAN table while preserving management-port membership."""
+
+        ...
+
+    def validate_vlans(
+        self,
+        vlans: tuple[VlanInfo, ...],
+        *,
+        current: tuple[VlanInfo, ...],
+    ) -> None:
+        """Validate a complete ordered VLAN table against freshly read state."""
 
         ...
 
@@ -644,6 +689,18 @@ class SwOSDevice:
             warnings=warnings,
         )
 
+    def validate_rstp_bridge(
+        self,
+        update: RstpBridgeUpdate,
+        *,
+        current: RstpInfo,
+    ) -> tuple[SafetyWarning, ...]:
+        """Validate bridge configuration under write policy without changing it."""
+
+        warnings = self._authorize_write("rstp_bridge_write")
+        self._adapter.validate_rstp_bridge(update, current=current)
+        return warnings
+
     def set_forwarding_port_policy(
         self,
         update: ForwardingPortPolicyUpdate,
@@ -692,6 +749,18 @@ class SwOSDevice:
             warnings=warnings,
         )
 
+    def validate_forwarding_matrix(
+        self,
+        update: ForwardingMatrixUpdate,
+        *,
+        current: ForwardingInfo,
+    ) -> tuple[SafetyWarning, ...]:
+        """Validate a matrix row under write policy without changing it."""
+
+        warnings = self._authorize_write("forwarding_matrix_write")
+        self._adapter.validate_forwarding_matrix(update, current=current)
+        return warnings
+
     def set_forwarding_mirroring(
         self,
         update: ForwardingMirroringUpdate,
@@ -709,6 +778,18 @@ class SwOSDevice:
             value=result.value,
             warnings=warnings,
         )
+
+    def validate_forwarding_mirroring(
+        self,
+        update: ForwardingMirroringUpdate,
+        *,
+        current: ForwardingInfo,
+    ) -> tuple[SafetyWarning, ...]:
+        """Validate mirroring under write policy without changing it."""
+
+        warnings = self._authorize_write("forwarding_mirroring_write")
+        self._adapter.validate_forwarding_mirroring(update, current=current)
+        return warnings
 
     def replace_static_hosts(
         self,
@@ -755,6 +836,13 @@ class SwOSDevice:
             value=result.value,
             warnings=warnings,
         )
+
+    def validate_acl_rules(self, rules: tuple[AclRule, ...]) -> tuple[SafetyWarning, ...]:
+        """Validate ACL rules under write policy without changing the table."""
+
+        warnings = self._authorize_write("acl_write")
+        self._adapter.validate_acl_rules(rules)
+        return warnings
 
     def set_port_vlan_policy(
         self,
@@ -803,6 +891,18 @@ class SwOSDevice:
             value=result.value,
             warnings=warnings,
         )
+
+    def validate_vlans(
+        self,
+        vlans: tuple[VlanInfo, ...],
+        *,
+        current: tuple[VlanInfo, ...],
+    ) -> tuple[SafetyWarning, ...]:
+        """Validate VLANs under write policy without changing the table."""
+
+        warnings = self._authorize_write("vlan_table_write")
+        self._adapter.validate_vlans(vlans, current=current)
+        return warnings
 
     def _authorize(self, *, write: bool) -> tuple[SafetyWarning, ...]:
         return enforce_firmware_policy(

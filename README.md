@@ -23,10 +23,11 @@ See [the architecture documentation](docs/architecture.md) for details.
 
 ## Ansible
 
-`swos-ansible` 0.1.0 installs the `swos.api` collection into Python's
-`ansible_collections` namespace. It provides normalized facts and idempotent,
-check-mode-safe modules for hardware-enabled non-credential writes. Password
-rotation is intentionally not exposed through Ansible yet.
+`swos-ansible` 0.2.0 installs the `swos.api` collection into Python's
+`ansible_collections` namespace. Its 16 modules provide normalized facts plus
+check-mode-safe modules for names, ports, SNMP metadata, static hosts, RSTP,
+forwarding, VLAN policy and tables, ACL rules, complete system configuration,
+and administrator password rotation.
 
 ```yaml
 - name: Gather switch facts
@@ -46,7 +47,20 @@ rotation is intentionally not exposed through Ansible yet.
     force_vlan_id: true
     egress: strip
   delegate_to: localhost
+
+- name: Rotate the administrator password
+  swos.api.admin_password:
+    url: http://192.0.2.10
+    password: "{{ vault_swos_old_password }}"
+    new_password: "{{ vault_swos_new_password }}"
+  no_log: true
+  delegate_to: localhost
 ```
+
+Both password inputs are marked `no_log`, and module results never contain a
+password. Because the current password cannot be read for comparison,
+`admin_password` validates and reports `changed: true` in check mode rather
+than claiming same-password idempotence.
 
 See [the Ansible integration documentation](docs/ansible.md) for installation,
 module inventory, safety flags, and result behavior.

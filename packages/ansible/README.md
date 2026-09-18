@@ -36,13 +36,23 @@ modules are available by fully qualified collection name:
 Modules use the controller's Python environment. Run them in a local play or
 use `delegate_to: localhost` as above; no code is installed on the switch.
 
-Every configuration module supports check mode and reports `changed` from a
-fresh normalized read. Grouped writes use that same read as the core API's
-optimistic-concurrency baseline. Exact firmware policy is enforced for both
-normal and check-mode runs. Unknown firmware requires
+Every configuration module supports check mode. Modules with readable desired
+state report `changed` from a fresh normalized read, and grouped writes use that
+same read as the core API's optimistic-concurrency baseline. Exact firmware
+policy is enforced for both normal and check-mode runs. Unknown firmware requires
 `allow_untested_firmware` for facts and
 `allow_untested_firmware_writes` for configuration modules; the latter also
 permits prerequisite reads.
+
+Password equality is intentionally unreadable, so `admin_password` validates
+in check mode and reports `changed: true`. Both the current connection password
+and replacement are marked `no_log`, and no result contains either secret.
+
+System management changes can move the controller to another endpoint. Set
+`readback_url` to the expected endpoint when changing management addressing.
+If reconnect verification fails after the request, device state may be
+uncertain; do not retry blindly, and be prepared to use another reachable
+management address or manually reset the switch.
 
 Common connection options are `url`, `username`, `password`, `timeout`, and
 `validate_certs`. Results expose machine-readable core warnings as
@@ -59,6 +69,13 @@ Available modules:
 - `swos.api.rstp_port`
 - `swos.api.forwarding_port_policy`
 - `swos.api.vlan_port_policy`
+- `swos.api.system_configuration`
+- `swos.api.admin_password`
+- `swos.api.acl_rules`
+- `swos.api.vlan_table`
+- `swos.api.rstp_bridge`
+- `swos.api.forwarding_matrix`
+- `swos.api.forwarding_mirroring`
 
 The Python execution layer is intentionally independent of `ansible-core`, so
 it can be unit tested with a mocked public `SwOSDevice`.

@@ -1,6 +1,6 @@
 # Ansible integration
 
-`swos-ansible` 0.1.0 is an independently buildable Python distribution that
+`swos-ansible` 0.2.0 is an independently buildable Python distribution that
 installs the `swos.api` Ansible collection. It depends on `swos-core`, but not on
 a concrete device package or `ansible-core`. Install `ansible-core`,
 `swos-ansible`, and the required `swos-device-*` plugin into the same
@@ -29,6 +29,13 @@ never imports a device adapter or issues direct HTTP requests.
 | `swos.api.rstp_port` | Manage per-port RSTP enable state on ports 1-5 |
 | `swos.api.forwarding_port_policy` | Manage lock, lock-on-first, and egress rate on ports 1-5 |
 | `swos.api.vlan_port_policy` | Manage mode, receive, default/forced VLAN ID, and egress policy on ports 1-5 |
+| `swos.api.system_configuration` | Manage complete system, management, IGMP, and discovery configuration |
+| `swos.api.admin_password` | Rotate and verify the administrator password without returning secrets |
+| `swos.api.acl_rules` | Declare the complete ordered ACL table |
+| `swos.api.vlan_table` | Declare the complete ordered VLAN table while preserving management-port membership |
+| `swos.api.rstp_bridge` | Manage bridge-global RSTP configuration |
+| `swos.api.forwarding_matrix` | Declare one complete Ethernet forwarding-matrix row |
+| `swos.api.forwarding_mirroring` | Manage source-port mirroring and the global mirror target |
 
 Static hosts are declarative: `hosts` is the complete desired static table and
 an empty list removes every static entry. Dynamically learned entries are
@@ -40,9 +47,11 @@ characters.
 ## Connection and safety
 
 Every module accepts `url`, `username`, `password`, `timeout`, and
-`validate_certs`. Password arguments are marked `no_log` in Ansible. Device
-model and firmware are detected by installed plugins rather than selected by a
-module option.
+`validate_certs`. The connection `password` and `admin_password.new_password`
+are marked `no_log`; no module result contains either secret. Using task-level
+`no_log: true` for password rotation provides additional protection around
+controller callbacks and third-party plugins. Device model and firmware are
+detected by installed plugins rather than selected by a module option.
 
 Exact support records remain authoritative. The policy flags intentionally use
 the same names and semantics as `FirmwareSafetyPolicy`:
@@ -58,17 +67,19 @@ would succeed. Overrides produce human-readable `warnings` and structured
 
 ## Idempotence and check mode
 
-Every configuration module reads normalized current state and computes a
-desired projection. It reports `changed: false` and does not call a write method
-when current state already matches. In check mode it returns projected state but
-never calls a core write method. Public `SwOSDevice.validate_*` methods enforce
-the selected plugin's writable-port, table, active-link, and metadata constraints
-against the freshly read state without issuing a POST.
+Configuration modules read normalized current state and compute a desired
+projection. They report `changed: false` and do not call a write method when
+current state already matches. Administrator password equality is deliberately
+unreadable, so `admin_password` is the exception: check mode validates the
+password and reports `changed: true`, while a normal run always attempts the
+guarded rotation. In check mode no module calls a core write method. Public
+`SwOSDevice.validate_*` methods enforce the selected plugin's writable-port,
+table, active-link, credential, and metadata constraints without issuing a POST.
 
-RSTP, forwarding, static-host, and VLAN modules pass the same fresh read to the
-core API as the expected baseline for guarded writes. The plugin remains
-responsible for preserving immutable endpoint fields, performing verified
-readback, and rejecting concurrent state changes.
+System, ACL, RSTP, forwarding, static-host, and VLAN modules pass the same fresh
+read to the core API as the expected baseline for guarded writes. The plugin
+remains responsible for preserving immutable endpoint fields, performing
+verified readback, and rejecting concurrent state changes.
 
 Failures raised after Ansible has parsed module arguments use Ansible's normal
 failed result with `msg` plus an `error` object containing stable `type` and
