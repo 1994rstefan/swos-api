@@ -52,14 +52,17 @@ module inventory, safety flags, and result behavior.
 
 ## Development setup
 
-Python 3.11 or newer is required.
+Python 3.11 through 3.14 and [uv](https://docs.astral.sh/uv/) 0.12.16 are
+supported for development. The committed universal lock file covers the whole
+workspace and the development tools.
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -r requirements-dev.txt
+uv sync --locked --all-packages
 ```
+
+Workspace packages are installed editable. Published dependency declarations
+remain in each distribution's `pyproject.toml`; local `swos-core` dependencies
+resolve from the workspace during development.
 
 Run the initial CLI:
 
@@ -108,10 +111,15 @@ filter presentation; the core API always returns the complete normalized model.
 Run all local checks:
 
 ```bash
-ruff format --check .
-ruff check .
-mypy
-pytest
+uv lock --check
+uv sync --locked --all-packages
+uv run --no-sync ruff format --check .
+uv run --no-sync ruff check .
+uv run --no-sync mypy
+uv run --no-sync pytest
+uv build --all-packages --out-dir dist
+uv run --no-sync twine check dist/*
+uv run --no-sync --directory packages/ansible/src/ansible_collections/swos/api ansible-test sanity --python 3.11
 ```
 
 ## Configuration
