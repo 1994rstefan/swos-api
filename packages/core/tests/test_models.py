@@ -183,6 +183,28 @@ def test_system_configuration_update_is_typed_normalized_and_non_empty() -> None
         SystemConfigurationUpdate(discovery_protocol_port_numbers=(1, 1))
 
 
+@pytest.mark.parametrize(
+    "address",
+    [
+        "0.0.0.0",
+        "127.0.0.1",
+        "224.0.0.1",
+        "240.0.0.1",
+        "255.255.255.255",
+    ],
+)
+def test_system_configuration_rejects_unusable_static_management_ipv4(address: str) -> None:
+    with pytest.raises(ValidationError, match="usable unicast IPv4"):
+        SystemConfigurationUpdate(static_ip=address)
+
+
+@pytest.mark.parametrize("address", ["10.0.0.1", "192.168.1.1", "169.254.1.1", "192.0.2.10"])
+def test_system_configuration_accepts_private_link_local_and_normal_unicast(
+    address: str,
+) -> None:
+    assert SystemConfigurationUpdate(static_ip=address).static_ip == address
+
+
 def test_port_statistics_reject_negative_counters() -> None:
     with pytest.raises(ValidationError):
         PortStatistics(

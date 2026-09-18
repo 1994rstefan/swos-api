@@ -38,6 +38,31 @@ cleanup attempt restoration; if neither credential works, the test stops
 writing and reports that a manual reset is required without printing either
 credential.
 
+Management address and VLAN reconnect tests have their own third gate:
+
+```bash
+pytest --run-integration --run-destructive --run-management-reconnect -m management_reconnect
+```
+
+The VLAN test additionally requires `SWOS_INTEGRATION_MANAGEMENT_PORT=6`. It sets
+management VLAN from unset to 1 only when port 6 has PVID 1, accepts untagged
+frames, has port-policy egress set to strip tags, and has an explicit VLAN 1
+table membership whose effective egress also strips tags. Empty tables and
+preserve egress therefore skip safely. The test only reads port 6 and never
+changes its policy or membership. The address-mode test changes
+DHCP-with-fallback to static at the same address and restores it.
+
+The optional actual address move requires `SWOS_INTEGRATION_TEMPORARY_IP` and an
+acknowledgement whose value is that same address, for example
+`SWOS_INTEGRATION_TEMPORARY_IP_ACKNOWLEDGED=192.168.88.2`. It is skipped when
+either is absent or when an unauthenticated TCP connection shows that the target
+address is occupied. No HTTP credentials are sent during the vacancy check.
+Cleanup probes both original and temporary URLs, gathers every observation, and
+restores only when every reachable observation is the exact expected temporary
+device state. Any unknown/conflicting observation refuses all writes. If neither
+URL is reachable, cleanup raises the reset-required domain error and performs no
+further write.
+
 The CSS106 write tests change and restore the device name, SNMP metadata, port
 name, flow-control state, RSTP enable, lock, lock-on-first, egress rate, and
 selected system masks in `finally`. The system-mask tests toggle only port 5 in
@@ -59,7 +84,8 @@ disable an Ethernet port, change negotiation, alter forwarding destinations, or
 configure mirroring.
 The VLAN table is never changed by hardware tests, and every VLAN policy test
 asserts that the SFP port-6 policy remains identical. System tests do not change
-address mode, static IP, management VLAN, allow-from policy, or admin MAC.
+address mode, static IP, management VLAN, allow-from policy, or admin MAC unless
+the separately gated management reconnect marker is selected.
 
 Static-host, RSTP, forwarding, VLAN-policy, and system-mask cleanup passes the
 verified post-mutation state as the restore precondition. A concurrent

@@ -36,6 +36,18 @@ full `SystemInfo` baseline and writes a complete preserved device object.
 Clearable address/MAC/VLAN values use the explicit `"unset"` value; `None`
 always means preserve. Adapter operation warnings are retained alongside any
 firmware-policy warning in the public `OperationResult`.
+Static management addresses must be usable unicast IPv4 addresses. Unspecified,
+loopback, multicast, reserved, and limited-broadcast values are rejected;
+ordinary private and IPv4 link-local unicast addresses remain valid.
+
+`set_system_configuration` and `validate_system_configuration` accept an
+optional operation-only `readback_url`; it is intentionally not part of desired
+state. Device adapters use it to reconnect after active management address or
+VLAN changes. A readback URL must be a bare HTTP(S) device base URL without
+userinfo, path, query, or fragment, and must retain the original scheme and
+effective port so credentials cannot be redirected across a transport security
+boundary. Backslashes and non-canonical spellings are rejected so validation and
+transport construction use the same canonical URL.
 
 Network link speeds and rates use bits per second in public models and JSON
 representations.

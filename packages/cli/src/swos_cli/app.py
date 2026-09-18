@@ -506,6 +506,13 @@ def system_configure(
     ctx: typer.Context,
     address_mode: Annotated[AddressMode | None, typer.Option("--address-mode")] = None,
     static_ip: Annotated[str | None, typer.Option("--static-ip")] = None,
+    readback_url: Annotated[
+        str | None,
+        typer.Option(
+            "--readback-url",
+            help="Device base URL to verify after a management address or VLAN change.",
+        ),
+    ] = None,
     unset_static_ip: Annotated[bool, typer.Option("--unset-static-ip")] = False,
     admin_mac: Annotated[str | None, typer.Option("--admin-mac")] = None,
     unset_admin_mac: Annotated[bool, typer.Option("--unset-admin-mac")] = False,
@@ -633,7 +640,11 @@ def system_configure(
     try:
         connected_device = _connect_device(cli_context)
         current = connected_device.get_system_info()
-        result = connected_device.set_system_configuration(update, expected_current=current)
+        result = connected_device.set_system_configuration(
+            update,
+            expected_current=current,
+            readback_url=readback_url,
+        )
     except ConfigurationError as exc:
         renderer.error("configuration_error", str(exc))
         raise typer.Exit(code=2) from exc

@@ -39,6 +39,7 @@ markers = [
   "integration: tests that require a physical SwOS device",
   "destructive: integration tests that modify a device",
   "password_rotation: separately gated administrator password rotation test",
+  "management_reconnect: separately gated management address/VLAN reconnect tests",
 ]
 
 [tool.coverage.run]

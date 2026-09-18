@@ -3,13 +3,20 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from ipaddress import IPv4Address, ip_address
+from time import sleep
+from urllib.parse import urlsplit, urlunsplit
 
-from pydantic import SecretStr
+from pydantic import AnyHttpUrl, SecretStr, TypeAdapter, ValidationError
 from swos_core.errors import (
+    AuthenticationError,
     HttpStatusError,
     InvalidOperationError,
+    ManagementStateUncertainError,
     PasswordUpdateRejectedError,
     ProtocolError,
+    SwOSError,
+    TransportError,
 )
 from swos_core.models import (
     AclRule,
@@ -50,6 +57,7 @@ from swos_device_css106.protocol import (
     MAX_PAYLOAD_BYTES,
     ForwardingWriteState,
     SwOSValue,
+    SystemConfigurationWriteState,
     acl_rules_from_payload,
     dynamic_hosts_from_payload,
     encode_acl_rules,
@@ -93,6 +101,10 @@ from swos_device_css106.protocol import (
     vlan_table_write_state_from_payload,
     vlans_from_payload,
 )
+
+MANAGEMENT_READBACK_ATTEMPTS = 12
+MANAGEMENT_READBACK_DELAY_SECONDS = 1.0
+_HTTP_URL_ADAPTER = TypeAdapter(AnyHttpUrl)
 
 
 class CSS106Adapter:
@@ -487,10 +499,19 @@ class CSS106Adapter:
         update: SystemConfigurationUpdate,
         *,
         expected_current: SystemInfo,
+        readback_url: str | None = None,
     ) -> OperationResult[SystemInfo]:
         """Set the complete system object with baseline and address guards."""
 
-        self.validate_system_configuration(update, current=expected_current)
+        self.validate_system_configuration(
+            update,
+            current=expected_current,
+            readback_url=readback_url,
+        )
+        reconnect_connection: DeviceConnection | None = None
+        desired: SystemConfigurationWriteState | None = None
+        operation_warnings: tuple[SafetyWarning, ...] = ()
+        post_error: SwOSError | None = None
         with self._transport_factory(self._connection) as transport:
             before_data = parse_payload(
                 transport.request("GET", "/sys.b", max_response_bytes=MAX_PAYLOAD_BYTES)
@@ -499,12 +520,23 @@ class CSS106Adapter:
             if reported_identity != self._identity:
                 raise ProtocolError("CSS106 identity changed after device probing")
             before = system_info_from_payload(before_data, reported_identity)
-            self.validate_system_configuration(update, current=before)
+            self.validate_system_configuration(
+                update,
+                current=before,
+                readback_url=readback_url,
+            )
             if _system_writable_configuration(before) != _system_writable_configuration(
                 expected_current
             ):
                 raise InvalidOperationError(
                     "CSS106 system configuration changed since the expected baseline"
+                )
+            if (
+                before.serial_number != expected_current.serial_number
+                or before.mac_address != expected_current.mac_address
+            ):
+                raise InvalidOperationError(
+                    "CSS106 physical identity changed since the expected system baseline"
                 )
             before_state = system_configuration_write_state_from_payload(
                 before_data, self._identity
@@ -515,18 +547,48 @@ class CSS106Adapter:
             if desired == before_state:
                 return OperationResult[SystemInfo](changed=False, value=before)
             operation_warnings = _management_lockout_warnings(update, before)
-
-            transport.request(
-                "POST",
-                "/sys.b",
-                content=content,
-                headers={"Content-Type": "text/plain"},
-                max_response_bytes=MAX_PAYLOAD_BYTES,
+            selected_url = _management_readback_url(
+                update,
+                before,
+                self._connection,
+                readback_url,
             )
-            after_data = parse_payload(
-                transport.request("GET", "/sys.b", max_response_bytes=MAX_PAYLOAD_BYTES)
-            )
+            if selected_url is None:
+                transport.request(
+                    "POST",
+                    "/sys.b",
+                    content=content,
+                    headers={"Content-Type": "text/plain"},
+                    max_response_bytes=MAX_PAYLOAD_BYTES,
+                )
+                after_data = parse_payload(
+                    transport.request("GET", "/sys.b", max_response_bytes=MAX_PAYLOAD_BYTES)
+                )
+            else:
+                reconnect_connection = self._connection.model_copy(update={"url": selected_url})
+                try:
+                    transport.request(
+                        "POST",
+                        "/sys.b",
+                        content=content,
+                        headers={"Content-Type": "text/plain"},
+                        max_response_bytes=MAX_PAYLOAD_BYTES,
+                    )
+                except (AuthenticationError, HttpStatusError, ProtocolError):
+                    raise
+                except TransportError as exc:
+                    post_error = exc
 
+        if reconnect_connection is not None:
+            assert desired is not None
+            return self._poll_system_configuration_readback(
+                reconnect_connection,
+                desired,
+                operation_warnings,
+                original_serial_number=expected_current.serial_number,
+                original_mac_address=expected_current.mac_address,
+                initial_error=post_error,
+            )
         reported_identity = identity_from_system(after_data)
         if reported_identity != self._identity:
             raise ProtocolError("CSS106 identity changed after system-configuration write")
@@ -545,6 +607,7 @@ class CSS106Adapter:
         update: SystemConfigurationUpdate,
         *,
         current: SystemInfo,
+        readback_url: str | None = None,
     ) -> None:
         """Validate system changes against normalized state without transport access."""
 
@@ -556,6 +619,10 @@ class CSS106Adapter:
         igmp = current.igmp
         if management is None or igmp is None or current.independent_vlan_lookup is None:
             raise InvalidOperationError("Current system configuration is incomplete")
+        desired_mode, desired_static_ip, _ = _desired_management_state(update, current)
+        if desired_static_ip is not None:
+            _validate_static_management_ip(desired_static_ip)
+        _management_readback_url(update, current, self._connection, readback_url)
         if update.name is not None:
             validate_device_name(update.name)
         for ports, label in (
@@ -583,41 +650,69 @@ class CSS106Adapter:
             if ports is not None and (6 in ports) != (6 in existing):
                 raise InvalidOperationError("CSS106 system writes cannot change port 6 mask state")
 
-        desired_vlan = (
-            management.allowed_vlan_id
-            if update.allowed_vlan_id is None
-            else None
-            if update.allowed_vlan_id == "unset"
-            else update.allowed_vlan_id
-        )
-        if desired_vlan != management.allowed_vlan_id:
+        if desired_mode is AddressMode.STATIC and desired_static_ip is None:
             raise InvalidOperationError(
-                "CSS106 management VLAN changes are disabled until port 6 continuity can be proven"
+                "CSS106 static address mode requires a configured static IP"
             )
-        desired_mode = update.address_mode or management.address_mode
-        if desired_mode != management.address_mode:
-            raise InvalidOperationError(
-                "CSS106 address-mode changes require reconnect support and are currently disabled"
-            )
-        desired_static_ip = (
-            current.static_ip
-            if update.static_ip is None
-            else None
-            if update.static_ip == "unset"
-            else update.static_ip
-        )
-        if management.address_mode is AddressMode.STATIC and desired_static_ip != current.static_ip:
-            raise InvalidOperationError(
-                "CSS106 active static-IP changes require reconnect support and are currently "
-                "disabled"
-            )
-        if (
-            management.address_mode is AddressMode.DHCP_ONLY
-            and desired_static_ip != current.static_ip
-        ):
+        if desired_mode is AddressMode.DHCP_ONLY and desired_static_ip != current.static_ip:
             raise InvalidOperationError(
                 "CSS106 static-IP staging is allowed only in DHCP-with-fallback mode"
             )
+
+    def _poll_system_configuration_readback(
+        self,
+        connection: DeviceConnection,
+        desired: SystemConfigurationWriteState,
+        warnings: tuple[SafetyWarning, ...],
+        *,
+        original_serial_number: str | None,
+        original_mac_address: str | None,
+        initial_error: SwOSError | None,
+    ) -> OperationResult[SystemInfo]:
+        last_error = initial_error
+        for attempt in range(MANAGEMENT_READBACK_ATTEMPTS):
+            try:
+                with self._transport_factory(connection) as transport:
+                    after_data = parse_payload(
+                        transport.request("GET", "/sys.b", max_response_bytes=MAX_PAYLOAD_BYTES)
+                    )
+                reported_identity = identity_from_system(after_data)
+                if reported_identity != self._identity:
+                    raise ProtocolError("CSS106 identity changed after management-path reconnect")
+                if (
+                    system_configuration_write_state_from_payload(after_data, self._identity)
+                    != desired
+                ):
+                    raise ProtocolError(
+                        "CSS106 management-path write failed complete-object read-back verification"
+                    )
+                verified_info = system_info_from_payload(after_data, reported_identity)
+                if (
+                    verified_info.serial_number != original_serial_number
+                    or verified_info.mac_address != original_mac_address
+                ):
+                    raise ProtocolError(
+                        "CSS106 physical identity changed after management-path reconnect"
+                    )
+            except SwOSError as exc:
+                last_error = exc
+                if attempt + 1 < MANAGEMENT_READBACK_ATTEMPTS:
+                    sleep(MANAGEMENT_READBACK_DELAY_SECONDS)
+                continue
+
+            self._connection = connection
+            return OperationResult[SystemInfo](
+                changed=True,
+                value=verified_info,
+                warnings=warnings,
+            )
+
+        raise ManagementStateUncertainError(
+            "The CSS106 management write was sent, but the selected management URL did not "
+            "return the exact device and complete target state. The device state is uncertain; "
+            "do not retry the write, and perform a manual reset if neither management address "
+            "is reachable."
+        ) from last_error
 
     def set_snmp_metadata(self, update: SnmpMetadataUpdate) -> OperationResult[SnmpInfo]:
         """Set SNMP metadata with preserved service settings and full read-back."""
@@ -1085,6 +1180,180 @@ def _system_writable_configuration(info: SystemInfo) -> tuple[object, ...]:
     )
 
 
+def _desired_management_state(
+    update: SystemConfigurationUpdate,
+    current: SystemInfo,
+) -> tuple[AddressMode, str | None, int | None]:
+    management = current.management
+    if management is None:
+        raise InvalidOperationError("Current system management configuration is incomplete")
+    desired_mode = update.address_mode or management.address_mode
+    desired_static_ip = (
+        current.static_ip
+        if update.static_ip is None
+        else None
+        if update.static_ip == "unset"
+        else update.static_ip
+    )
+    desired_vlan = (
+        management.allowed_vlan_id
+        if update.allowed_vlan_id is None
+        else None
+        if update.allowed_vlan_id == "unset"
+        else update.allowed_vlan_id
+    )
+    return desired_mode, desired_static_ip, desired_vlan
+
+
+def _validate_static_management_ip(value: str) -> None:
+    try:
+        address = IPv4Address(value)
+    except ValueError as exc:
+        raise InvalidOperationError(
+            "CSS106 static management IP must be a usable unicast IPv4 address"
+        ) from exc
+    if (
+        address.is_unspecified
+        or address.is_multicast
+        or address.is_loopback
+        or address.is_reserved
+        or address == IPv4Address("255.255.255.255")
+    ):
+        raise InvalidOperationError(
+            "CSS106 static management IP must be a usable unicast IPv4 address"
+        )
+
+
+def _management_readback_url(
+    update: SystemConfigurationUpdate,
+    current: SystemInfo,
+    connection: DeviceConnection,
+    readback_url: str | None,
+) -> AnyHttpUrl | None:
+    explicit_url = (
+        None
+        if readback_url is None
+        else _validate_readback_url(readback_url, original_url=connection.url)
+    )
+    management = current.management
+    if management is None:
+        raise InvalidOperationError("Current system management configuration is incomplete")
+    desired_mode, desired_static_ip, desired_vlan = _desired_management_state(update, current)
+    mode_changed = desired_mode is not management.address_mode
+    static_ip_changed = desired_static_ip != current.static_ip
+    current_uses_static_ip = management.address_mode is AddressMode.STATIC or (
+        management.address_mode is AddressMode.DHCP_WITH_FALLBACK
+        and current.static_ip is not None
+        and current.current_ip == current.static_ip
+    )
+    active_static_ip_changed = static_ip_changed and current_uses_static_ip
+    vlan_changed = desired_vlan != management.allowed_vlan_id
+    if not (mode_changed or active_static_ip_changed or vlan_changed):
+        return None
+    deterministic_static_target = desired_mode is AddressMode.STATIC or (
+        active_static_ip_changed and desired_static_ip is not None
+    )
+    if deterministic_static_target:
+        if desired_static_ip is None:
+            raise InvalidOperationError(
+                "CSS106 static address mode requires a configured static IP"
+            )
+        derived_url = _replace_url_host(connection.url, desired_static_ip)
+        if explicit_url is not None and explicit_url != derived_url:
+            raise InvalidOperationError(
+                "readback_url must equal the deterministic URL derived from the desired static IP"
+            )
+        return derived_url
+    if explicit_url is not None:
+        return explicit_url
+    if active_static_ip_changed:
+        raise InvalidOperationError(
+            "CSS106 removal of an active DHCP-fallback static IP requires an explicit readback_url"
+        )
+    if mode_changed and not _dhcp_mode_keeps_current_url(current, connection.url):
+        raise InvalidOperationError(
+            "CSS106 DHCP address-mode changes require an explicit readback_url because the "
+            "resulting lease address cannot be inferred safely"
+        )
+    return connection.url
+
+
+def _validate_readback_url(value: str, *, original_url: AnyHttpUrl) -> AnyHttpUrl:
+    if "\\" in value or "%5c" in value.casefold():
+        raise InvalidOperationError("readback_url must not contain a backslash")
+    try:
+        canonical_url = _HTTP_URL_ADAPTER.validate_python(value)
+        canonical_value = str(canonical_url)
+        parsed = urlsplit(canonical_value)
+        parsed_port = parsed.port
+    except (ValidationError, ValueError) as exc:
+        raise InvalidOperationError(
+            "readback_url must be a valid HTTP or HTTPS device base URL"
+        ) from exc
+    if parsed.scheme.casefold() not in {"http", "https"} or parsed.hostname is None:
+        raise InvalidOperationError("readback_url must be a bare HTTP or HTTPS device base URL")
+    if parsed.username is not None or parsed.password is not None:
+        raise InvalidOperationError("readback_url must not contain user information")
+    if (
+        parsed.path not in {"", "/"}
+        or canonical_url.query is not None
+        or canonical_url.fragment is not None
+    ):
+        raise InvalidOperationError("readback_url must not contain a path, query, or fragment")
+    accepted_values = {canonical_value, canonical_value.removesuffix("/")}
+    if value not in accepted_values:
+        raise InvalidOperationError("readback_url must use its canonical bare URL spelling")
+
+    original = urlsplit(str(original_url))
+    if parsed.scheme.casefold() != original.scheme.casefold():
+        raise InvalidOperationError(
+            "readback_url must use the same scheme as the current device URL"
+        )
+    if _effective_port(parsed.scheme, parsed_port) != _effective_port(
+        original.scheme, original.port
+    ):
+        raise InvalidOperationError(
+            "readback_url must use the same explicit or effective port as the current device URL"
+        )
+    return canonical_url
+
+
+def _effective_port(scheme: str, port: int | None) -> int:
+    if port is not None:
+        return port
+    return 443 if scheme.casefold() == "https" else 80
+
+
+def _replace_url_host(url: AnyHttpUrl, host: str) -> AnyHttpUrl:
+    parsed = urlsplit(str(url))
+    bracketed_host = f"[{host}]" if ":" in host and not host.startswith("[") else host
+    netloc = bracketed_host
+    if parsed.port is not None:
+        netloc += f":{parsed.port}"
+    replaced = urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
+    return _HTTP_URL_ADAPTER.validate_python(replaced)
+
+
+def _dhcp_mode_keeps_current_url(current: SystemInfo, url: AnyHttpUrl) -> bool:
+    management = current.management
+    if management is None or current.current_ip is None:
+        return False
+    if management.address_mode is AddressMode.STATIC:
+        return False
+    if (
+        management.address_mode is AddressMode.DHCP_WITH_FALLBACK
+        and current.current_ip == current.static_ip
+    ):
+        return False
+    host = urlsplit(str(url)).hostname
+    if host is None:
+        return False
+    try:
+        return ip_address(host) == ip_address(current.current_ip)
+    except ValueError:
+        return host.casefold() == current.current_ip.casefold()
+
+
 def _management_lockout_warnings(
     update: SystemConfigurationUpdate, before: SystemInfo
 ) -> tuple[SafetyWarning, ...]:
@@ -1131,6 +1400,25 @@ def _management_lockout_warnings(
         after_ports = ",".join(str(number) for number in desired_ports)
         changes.append(f"allowed ports {before_ports} -> {after_ports}")
 
+    desired_mode, desired_static_ip, desired_vlan = _desired_management_state(update, before)
+    if desired_mode is not management.address_mode:
+        changes.append(f"address mode {management.address_mode.value} -> {desired_mode.value}")
+    current_uses_static_ip = management.address_mode is AddressMode.STATIC or (
+        management.address_mode is AddressMode.DHCP_WITH_FALLBACK
+        and before.static_ip is not None
+        and before.current_ip == before.static_ip
+    )
+    if desired_static_ip != before.static_ip and (
+        current_uses_static_ip or desired_mode is AddressMode.STATIC
+    ):
+        changes.append(
+            f"active static IP {before.static_ip or 'unset'} -> {desired_static_ip or 'unset'}"
+        )
+    if desired_vlan != management.allowed_vlan_id:
+        changes.append(
+            f"management VLAN {management.allowed_vlan_id or 'unset'} -> {desired_vlan or 'unset'}"
+        )
+
     if not changes:
         return ()
     return (
@@ -1138,8 +1426,9 @@ def _management_lockout_warnings(
             code="management_lockout_risk",
             message=(
                 f"Management access changed ({'; '.join(changes)}). This explicitly authorized "
-                "write can lock out the caller. Same-URL readback is attempted, but connectivity "
-                "loss leaves the outcome uncertain and may require a manual factory reset."
+                "write can lock out the caller. Selected-URL readback is attempted, but "
+                "connectivity loss leaves the outcome uncertain and may require a manual factory "
+                "reset."
             ),
         ),
     )

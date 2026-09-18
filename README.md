@@ -75,6 +75,8 @@ swosctl --device office system show
 swosctl system show --device office
 swosctl system rename "Office Switch" --device office
 swosctl system configure --static-ip 192.0.2.10 --device office
+swosctl system configure --address-mode static --static-ip 192.0.2.20 --device office
+swosctl system configure --address-mode dhcp_with_fallback --readback-url http://192.0.2.10 --device office
 swosctl system configure --igmp-snooping on --igmp-version v3 --device office
 swosctl system password set --new-password-env NEW_SWOS_PASSWORD --device office
 swosctl port list --device office

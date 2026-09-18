@@ -18,6 +18,7 @@ Guarded write commands are:
 ```bash
 swosctl system rename "Office Switch" --device office
 swosctl system configure --static-ip 192.0.2.10 --device office
+swosctl system configure --address-mode dhcp_only --readback-url http://192.0.2.20 --device office
 swosctl system configure --igmp-snooping on --igmp-version v3 --device office
 swosctl system configure --allow-port 1 --allow-port 6 --device office
 swosctl system password set --new-password-env NEW_SWOS_PASSWORD --device office
@@ -60,18 +61,29 @@ port options describe the complete desired mask. Use `--unset-static-ip`,
 values, and the `--clear-*-ports` flags for empty non-management masks. The
 command reads and passes a complete `SystemInfo` baseline before writing.
 
-CSS106 currently rejects address-mode changes, active static-IP changes,
-DHCP-only static-IP staging, and management VLAN changes. A static IP may be
-staged only while DHCP with fallback remains active. Every management
-allowed-port mask must include port 6, and no system mask may change port 6's
-existing bit.
+`--readback-url` is an operation parameter for address-mode and management VLAN
+changes, not desired state. It accepts only a bare HTTP(S) device base URL with
+the configured scheme and effective port. CSS106 automatically derives a static
+target by replacing the current URL host with the desired static IP. DHCP target
+changes require an explicit URL unless an active DHCP lease is provably already
+the current URL; the client never guesses a lease. When DHCP fallback is active
+at its configured static address, changing that static IP also derives and
+reconnects to the new address. An explicit URL cannot override a deterministic
+static target. DHCP-only static-IP staging
+remains rejected. Every management allowed-port mask must include port 6, and no
+system mask may change port 6's existing bit.
+Unspecified, loopback, multicast, reserved, and limited-broadcast static IPv4
+targets are rejected before connecting; private and link-local unicast targets
+are accepted.
 
 Admin MAC, allow-from network, and allowed-port changes are explicitly
-authorized lockout-capable operations. Their successful result contains a
+authorized lockout-capable operations. Management VLAN and active address
+changes use the same warning. Their successful result contains a
 `management_lockout_risk` warning with before/after values. The client attempts
-same-URL readback, but cannot prove caller reachability and does not treat the
-device's operational IP as the caller source. If connectivity is lost, the
-write outcome is uncertain and recovery may require a manual factory reset.
+selected-URL readback, but cannot prove caller reachability. The old transport
+is closed after the single POST and readback is retried for address/ARP
+transition. Failure returns an uncertain-state/reset-required error without a
+second write.
 
 RSTP and forwarding configuration commands are direct, non-interactive
 read/plan/write operations. They pass the initial read as a precondition, so an

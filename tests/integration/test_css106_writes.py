@@ -1,8 +1,13 @@
 import os
+import sys
+from ipaddress import IPv4Address
+from socket import create_connection
 from typing import Literal
+from urllib.parse import urlsplit, urlunsplit
 
 import pytest
 from swos_core import (
+    AddressMode,
     DeviceConnection,
     DeviceIdentity,
     DeviceNameUpdate,
@@ -10,6 +15,7 @@ from swos_core import (
     HostEntry,
     HostEntryType,
     IgmpInfo,
+    ManagementStateUncertainError,
     OperationResult,
     PluginRegistry,
     PortConfigurationUpdate,
@@ -23,6 +29,19 @@ from swos_core import (
     SystemInfo,
     SystemManagementInfo,
     VlanEgressMode,
+    VlanInfo,
+    VlanMembershipMode,
+    VlanMode,
+    VlanPortMembership,
+    VlanReceiveMode,
+)
+from swos_core.errors import (
+    AuthenticationError,
+    DeviceDetectionError,
+    HttpStatusError,
+    ProtocolError,
+    SwOSError,
+    TransportError,
 )
 from swos_core.safety import FirmwareSafetyPolicy
 
@@ -478,6 +497,347 @@ def test_rb260gs_219_port_5_management_allowed_write_and_restore() -> None:
         )
 
 
+@pytest.mark.integration
+@pytest.mark.destructive
+@pytest.mark.management_reconnect
+def test_rb260gs_219_management_vlan_one_reconnect_and_restore() -> None:
+    if os.environ.get("SWOS_INTEGRATION_MANAGEMENT_PORT") != "6":
+        pytest.skip("SWOS_INTEGRATION_MANAGEMENT_PORT=6 is required")
+    connection = _integration_connection()
+    registry = PluginRegistry.discover()
+    identity = registry.probe(connection)
+    device = registry.connect(identity, connection, FirmwareSafetyPolicy())
+    original = device.get_system_info()
+    assert original.management is not None
+    if original.management.allowed_vlan_id is not None:
+        pytest.skip("management VLAN is not unset; refusing management reconnect test")
+    port6 = next(port for port in device.get_port_vlans() if port.number == 6)
+    vlans = device.get_vlans()
+    if not _port6_has_untagged_vlan_one_path(port6, vlans):
+        pytest.skip("port 6 does not have a proven untagged VLAN 1 ingress and egress path")
+    expected_temporary = original.model_copy(
+        update={"management": original.management.model_copy(update={"allowed_vlan_id": 1})}
+    )
+
+    try:
+        changed = device.set_system_configuration(
+            SystemConfigurationUpdate(allowed_vlan_id=1), expected_current=original
+        )
+        assert changed.changed
+        assert _system_configuration(changed.value) == _system_configuration(expected_temporary)
+        assert any(warning.code == "management_lockout_risk" for warning in changed.warnings)
+    finally:
+        _restore_management_reconnect(
+            registry,
+            identity=identity,
+            original_connection=connection,
+            temporary_url=str(connection.url),
+            original=original,
+            expected_temporary=expected_temporary,
+            update=SystemConfigurationUpdate(allowed_vlan_id="unset"),
+        )
+
+
+@pytest.mark.integration
+@pytest.mark.destructive
+@pytest.mark.management_reconnect
+def test_rb260gs_219_dhcp_fallback_to_same_ip_static_and_restore() -> None:
+    connection = _integration_connection()
+    registry = PluginRegistry.discover()
+    identity = registry.probe(connection)
+    device = registry.connect(identity, connection, FirmwareSafetyPolicy())
+    original = device.get_system_info()
+    assert original.management is not None
+    if original.management.address_mode is not AddressMode.DHCP_WITH_FALLBACK:
+        pytest.skip("address mode is not DHCP with fallback")
+    if original.static_ip is None or urlsplit(str(connection.url)).hostname != original.static_ip:
+        pytest.skip("configured static IP is not the current integration URL host")
+    expected_temporary = original.model_copy(
+        update={
+            "management": original.management.model_copy(
+                update={"address_mode": AddressMode.STATIC}
+            )
+        }
+    )
+
+    try:
+        changed = device.set_system_configuration(
+            SystemConfigurationUpdate(address_mode="static"), expected_current=original
+        )
+        assert changed.changed
+        assert _system_configuration(changed.value) == _system_configuration(expected_temporary)
+    finally:
+        _restore_management_reconnect(
+            registry,
+            identity=identity,
+            original_connection=connection,
+            temporary_url=str(connection.url),
+            original=original,
+            expected_temporary=expected_temporary,
+            update=SystemConfigurationUpdate(address_mode="dhcp_with_fallback"),
+        )
+
+
+@pytest.mark.integration
+@pytest.mark.destructive
+@pytest.mark.management_reconnect
+def test_rb260gs_219_static_ip_move_and_restore() -> None:
+    temporary_value = os.environ.get("SWOS_INTEGRATION_TEMPORARY_IP")
+    if temporary_value is None:
+        pytest.skip("SWOS_INTEGRATION_TEMPORARY_IP is not set")
+    temporary_ip = str(IPv4Address(temporary_value))
+    if os.environ.get("SWOS_INTEGRATION_TEMPORARY_IP_ACKNOWLEDGED") != temporary_ip:
+        pytest.skip("SWOS_INTEGRATION_TEMPORARY_IP_ACKNOWLEDGED must equal the temporary IP")
+    connection = _integration_connection()
+    temporary_url = _url_with_host(str(connection.url), temporary_ip)
+    if temporary_url == str(connection.url):
+        pytest.skip("temporary IP matches the integration URL")
+
+    registry = PluginRegistry.discover()
+    identity = registry.probe(connection)
+    if _tcp_endpoint_responds(temporary_url, timeout=connection.timeout):
+        pytest.skip("temporary IP already accepts a TCP connection")
+
+    device = registry.connect(identity, connection, FirmwareSafetyPolicy())
+    original = device.get_system_info()
+    assert original.management is not None
+    expected_temporary = original.model_copy(
+        update={
+            "static_ip": temporary_ip,
+            "management": original.management.model_copy(
+                update={"address_mode": AddressMode.STATIC}
+            ),
+        }
+    )
+    restore_static_ip: str | Literal["unset"] = original.static_ip or "unset"
+
+    try:
+        changed = device.set_system_configuration(
+            SystemConfigurationUpdate(address_mode="static", static_ip=temporary_ip),
+            expected_current=original,
+        )
+        assert changed.changed
+        assert _system_configuration(changed.value) == _system_configuration(expected_temporary)
+        assert _system_configuration(device.get_system_info()) == _system_configuration(
+            expected_temporary
+        )
+    finally:
+        _restore_management_reconnect(
+            registry,
+            identity=identity,
+            original_connection=connection,
+            temporary_url=temporary_url,
+            original=original,
+            expected_temporary=expected_temporary,
+            update=SystemConfigurationUpdate(
+                address_mode=original.management.address_mode,
+                static_ip=restore_static_ip,
+            ),
+        )
+
+
+def _integration_connection() -> DeviceConnection:
+    return DeviceConnection(
+        url=os.environ.get("SWOS_INTEGRATION_URL", "http://192.168.88.1"),
+        username=os.environ.get("SWOS_INTEGRATION_USERNAME", "admin"),
+        password=os.environ.get("SWOS_INTEGRATION_PASSWORD", ""),
+    )
+
+
+def _port6_has_untagged_vlan_one_path(
+    port6: PortVlanInfo,
+    vlans: tuple[VlanInfo, ...],
+) -> bool:
+    if (
+        port6.number != 6
+        or port6.default_vlan_id != 1
+        or port6.receive is VlanReceiveMode.TAGGED_ONLY
+        or port6.egress is not VlanEgressMode.STRIP
+    ):
+        return False
+    vlan1 = next((vlan for vlan in vlans if vlan.vlan_id == 1), None)
+    if vlan1 is None:
+        return False
+    membership = next((port for port in vlan1.ports if port.port_number == 6), None)
+    return membership is not None and membership.mode is VlanMembershipMode.STRIP
+
+
+def test_management_vlan_gate_requires_definite_untagged_port6_path() -> None:
+    port6 = PortVlanInfo(
+        number=6,
+        mode=VlanMode.OPTIONAL,
+        receive=VlanReceiveMode.ANY,
+        default_vlan_id=1,
+        force_vlan_id=False,
+        egress=VlanEgressMode.STRIP,
+    )
+    vlan1 = VlanInfo(
+        vlan_id=1,
+        independent_learning=False,
+        igmp_snooping=False,
+        ports=(VlanPortMembership(port_number=6, mode=VlanMembershipMode.STRIP),),
+    )
+
+    assert _port6_has_untagged_vlan_one_path(port6, (vlan1,))
+    assert not _port6_has_untagged_vlan_one_path(
+        port6.model_copy(update={"egress": VlanEgressMode.PRESERVE}), (vlan1,)
+    )
+    assert not _port6_has_untagged_vlan_one_path(port6, ())
+    assert not _port6_has_untagged_vlan_one_path(
+        port6,
+        (
+            vlan1.model_copy(
+                update={
+                    "ports": (VlanPortMembership(port_number=6, mode=VlanMembershipMode.PRESERVE),)
+                }
+            ),
+        ),
+    )
+    assert not _port6_has_untagged_vlan_one_path(
+        port6.model_copy(update={"receive": VlanReceiveMode.TAGGED_ONLY}), (vlan1,)
+    )
+
+
+def _connection_at(connection: DeviceConnection, url: str) -> DeviceConnection:
+    return DeviceConnection(
+        url=url,
+        username=connection.username,
+        password=connection.password,
+        timeout=connection.timeout,
+        verify_tls=connection.verify_tls,
+    )
+
+
+def _url_with_host(url: str, host: str) -> str:
+    parsed = urlsplit(url)
+    bracketed_host = f"[{host}]" if ":" in host else host
+    netloc = bracketed_host if parsed.port is None else f"{bracketed_host}:{parsed.port}"
+    return urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
+
+
+def _tcp_endpoint_responds(url: str, *, timeout: float) -> bool:
+    parsed = urlsplit(url)
+    if parsed.hostname is None:
+        raise ValueError("temporary URL has no host")
+    port = parsed.port or (443 if parsed.scheme.casefold() == "https" else 80)
+    try:
+        with create_connection((parsed.hostname, port), timeout=min(timeout, 2.0)):
+            return True
+    except OSError:
+        return False
+
+
+def test_temporary_ip_occupancy_check_uses_only_tcp(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    calls: list[tuple[tuple[str, int], float]] = []
+
+    class OpenSocket:
+        def __enter__(self) -> "OpenSocket":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            pass
+
+    def connect(address: tuple[str, int], timeout: float) -> OpenSocket:
+        calls.append((address, timeout))
+        return OpenSocket()
+
+    monkeypatch.setattr(sys.modules[__name__], "create_connection", connect)
+
+    assert _tcp_endpoint_responds("https://192.0.2.10/", timeout=10.0)
+    assert calls == [(("192.0.2.10", 443), 2.0)]
+
+
+def test_temporary_ip_occupancy_check_accepts_only_connection_refusal(
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    def refuse(address: tuple[str, int], timeout: float) -> None:
+        del address, timeout
+        raise ConnectionRefusedError
+
+    monkeypatch.setattr(sys.modules[__name__], "create_connection", refuse)
+
+    assert not _tcp_endpoint_responds("http://192.0.2.10:8080/", timeout=1.0)
+
+
+def _restore_management_reconnect(
+    registry: PluginRegistry,
+    *,
+    identity: DeviceIdentity,
+    original_connection: DeviceConnection,
+    temporary_url: str,
+    original: SystemInfo,
+    expected_temporary: SystemInfo,
+    update: SystemConfigurationUpdate,
+) -> None:
+    observations: list[tuple[str, SwOSDevice | None, SystemInfo | None]] = []
+    candidate_urls = dict.fromkeys((str(original_connection.url), temporary_url))
+    for url in candidate_urls:
+        connection = _connection_at(original_connection, url)
+        try:
+            detected = registry.probe(connection)
+        except (AuthenticationError, HttpStatusError, ProtocolError, DeviceDetectionError):
+            observations.append(("unknown", None, None))
+            continue
+        except TransportError:
+            observations.append(("unreachable", None, None))
+            continue
+        except SwOSError:
+            observations.append(("unknown", None, None))
+            continue
+        if detected != identity:
+            observations.append(("conflict", None, None))
+            continue
+        try:
+            candidate = registry.connect(detected, connection, FirmwareSafetyPolicy())
+            info = candidate.get_system_info()
+        except (AuthenticationError, HttpStatusError, ProtocolError, DeviceDetectionError):
+            observations.append(("unknown", None, None))
+            continue
+        except TransportError:
+            observations.append(("unreachable", None, None))
+            continue
+        except SwOSError:
+            observations.append(("unknown", None, None))
+            continue
+        if info.serial_number != original.serial_number or info.mac_address != original.mac_address:
+            observations.append(("conflict", candidate, info))
+            continue
+        if _system_configuration(info) == _system_configuration(original):
+            observations.append(("original", candidate, info))
+        elif _system_configuration(info) == _system_configuration(expected_temporary):
+            observations.append(("temporary", candidate, info))
+        else:
+            observations.append(("unknown", candidate, info))
+
+    observed_states = {state for state, _, _ in observations if state != "unreachable"}
+    if not observed_states:
+        raise ManagementStateUncertainError(
+            "Neither the original nor temporary management URL reaches the exact expected device; "
+            "no cleanup write was attempted and a manual reset is required."
+        )
+    if "unknown" in observed_states or "conflict" in observed_states:
+        raise AssertionError(
+            "A management URL returned an unknown device or configuration; refusing cleanup"
+        )
+    if observed_states == {"original"}:
+        return
+    if observed_states != {"temporary"}:
+        raise AssertionError(
+            "Management URLs returned conflicting original and temporary states; refusing cleanup"
+        )
+
+    _, candidate, current = next(
+        observation for observation in observations if observation[0] == "temporary"
+    )
+    assert candidate is not None and current is not None
+    restored = candidate.set_system_configuration(
+        update,
+        expected_current=current,
+        readback_url=str(original_connection.url),
+    )
+    assert _system_configuration(restored.value) == _system_configuration(original)
+
+
 def _toggle_port(ports: tuple[int, ...], port_number: int) -> tuple[int, ...]:
     if port_number in ports:
         return tuple(number for number in ports if number != port_number)
@@ -729,7 +1089,9 @@ class _SystemCleanupDevice:
         update: SystemConfigurationUpdate,
         *,
         expected_current: SystemInfo,
+        readback_url: str | None = None,
     ) -> OperationResult[SystemInfo]:
+        del readback_url
         assert _system_configuration(self.current) == _system_configuration(expected_current)
         self.writes.append((update, expected_current))
         self.current = self.original
@@ -815,3 +1177,138 @@ def test_system_cleanup_refuses_unknown_configuration_without_write() -> None:
         )
 
     assert device.writes == []
+
+
+class _ReconnectCleanupDevice:
+    def __init__(self, current: SystemInfo, restored: SystemInfo) -> None:
+        self.current = current
+        self.restored = restored
+        self.writes: list[tuple[SystemConfigurationUpdate, SystemInfo, str | None]] = []
+
+    def get_system_info(self) -> SystemInfo:
+        return self.current
+
+    def set_system_configuration(
+        self,
+        update: SystemConfigurationUpdate,
+        *,
+        expected_current: SystemInfo,
+        readback_url: str | None = None,
+    ) -> OperationResult[SystemInfo]:
+        self.writes.append((update, expected_current, readback_url))
+        self.current = self.restored
+        return OperationResult(changed=True, value=self.restored)
+
+
+class _ReconnectCleanupRegistry:
+    def __init__(
+        self,
+        identity: DeviceIdentity,
+        devices: dict[str, _ReconnectCleanupDevice],
+    ) -> None:
+        self.identity = identity
+        self.devices = devices
+
+    def probe(self, connection: DeviceConnection) -> DeviceIdentity:
+        if str(connection.url) not in self.devices:
+            raise TransportError("unreachable")
+        return self.identity
+
+    def connect(
+        self,
+        identity: DeviceIdentity,
+        connection: DeviceConnection,
+        policy: FirmwareSafetyPolicy,
+    ) -> _ReconnectCleanupDevice:
+        del identity, policy
+        return self.devices[str(connection.url)]
+
+
+def test_management_reconnect_cleanup_restores_only_exact_temporary_state() -> None:
+    original, temporary = _system_cleanup_states()
+    connection = DeviceConnection(url="http://192.0.2.1")
+    temporary_url = "http://192.0.2.2/"
+    device = _ReconnectCleanupDevice(temporary, original)
+    registry = _ReconnectCleanupRegistry(original.identity, {temporary_url: device})
+    update = SystemConfigurationUpdate(
+        discovery_protocol_port_numbers=original.discovery_protocol_port_numbers
+    )
+
+    _restore_management_reconnect(  # type: ignore[arg-type]
+        registry,
+        identity=original.identity,
+        original_connection=connection,
+        temporary_url=temporary_url,
+        original=original,
+        expected_temporary=temporary,
+        update=update,
+    )
+
+    assert device.writes == [(update, temporary, "http://192.0.2.1/")]
+
+
+def test_management_reconnect_cleanup_refuses_unknown_state_without_write() -> None:
+    original, temporary = _system_cleanup_states()
+    unknown = temporary.model_copy(update={"name": "unexpected"})
+    connection = DeviceConnection(url="http://192.0.2.1")
+    device = _ReconnectCleanupDevice(unknown, original)
+    registry = _ReconnectCleanupRegistry(original.identity, {str(connection.url): device})
+
+    with pytest.raises(AssertionError, match="refusing cleanup"):
+        _restore_management_reconnect(  # type: ignore[arg-type]
+            registry,
+            identity=original.identity,
+            original_connection=connection,
+            temporary_url="http://192.0.2.2/",
+            original=original,
+            expected_temporary=temporary,
+            update=SystemConfigurationUpdate(name=original.name),
+        )
+
+    assert device.writes == []
+
+
+def test_management_reconnect_cleanup_refuses_conflicting_observations_without_write() -> None:
+    original, temporary = _system_cleanup_states()
+    connection = DeviceConnection(url="http://192.0.2.1")
+    temporary_url = "http://192.0.2.2/"
+    original_device = _ReconnectCleanupDevice(original, original)
+    temporary_device = _ReconnectCleanupDevice(temporary, original)
+    registry = _ReconnectCleanupRegistry(
+        original.identity,
+        {
+            str(connection.url): original_device,
+            temporary_url: temporary_device,
+        },
+    )
+
+    with pytest.raises(AssertionError, match=r"conflicting.*refusing cleanup"):
+        _restore_management_reconnect(  # type: ignore[arg-type]
+            registry,
+            identity=original.identity,
+            original_connection=connection,
+            temporary_url=temporary_url,
+            original=original,
+            expected_temporary=temporary,
+            update=SystemConfigurationUpdate(name=original.name),
+        )
+
+    assert original_device.writes == []
+    assert temporary_device.writes == []
+
+
+def test_management_reconnect_cleanup_requires_reset_when_neither_url_responds() -> None:
+    original, temporary = _system_cleanup_states()
+    connection = DeviceConnection(url="http://192.0.2.1")
+    registry = _ReconnectCleanupRegistry(original.identity, {})
+
+    with pytest.raises(ManagementStateUncertainError, match="manual reset is required"):
+        _restore_management_reconnect(  # type: ignore[arg-type]
+            registry,
+            identity=original.identity,
+            original_connection=connection,
+            temporary_url="http://192.0.2.2/",
+            original=original,
+            expected_temporary=temporary,
+            update=SystemConfigurationUpdate(name=original.name),
+        )

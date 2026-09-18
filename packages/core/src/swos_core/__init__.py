@@ -3,7 +3,12 @@
 from importlib.metadata import PackageNotFoundError, version
 
 from swos_core.api import DeviceAdapter, SwOSDevice
-from swos_core.errors import DeviceDetectionError, InvalidOperationError, UnsupportedFeatureError
+from swos_core.errors import (
+    DeviceDetectionError,
+    InvalidOperationError,
+    ManagementStateUncertainError,
+    UnsupportedFeatureError,
+)
 from swos_core.models import (
     AclRule,
     AclVlanTagMode,
@@ -92,6 +97,7 @@ __all__ = [
     "IgmpInfo",
     "IgmpVersion",
     "InvalidOperationError",
+    "ManagementStateUncertainError",
     "OperationResult",
     "PacketSizeStatistics",
     "PasswordUpdate",

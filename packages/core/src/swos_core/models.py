@@ -184,9 +184,25 @@ class SystemConfigurationUpdate(BaseModel):
     igmp_version: IgmpVersion | None = None
     discovery_protocol_port_numbers: _PortNumbers | None = None
 
-    @field_validator("static_ip", "allow_from")
+    @field_validator("static_ip")
     @classmethod
-    def normalize_optional_ip(cls, value: str | None) -> str | None:
+    def normalize_static_ip(cls, value: str | None) -> str | None:
+        if value is None or value == "unset":
+            return value
+        address = IPv4Address(value)
+        if (
+            address.is_unspecified
+            or address.is_multicast
+            or address.is_loopback
+            or address.is_reserved
+            or address == IPv4Address("255.255.255.255")
+        ):
+            raise ValueError("static management IP must be a usable unicast IPv4 address")
+        return str(address)
+
+    @field_validator("allow_from")
+    @classmethod
+    def normalize_allow_from(cls, value: str | None) -> str | None:
         if value is None or value == "unset":
             return value
         return str(IPv4Address(value))

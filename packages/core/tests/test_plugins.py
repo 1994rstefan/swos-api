@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from typing import ClassVar
+
 import pytest
-from swos_core.api import DeviceAdapter
+from swos_core.api import DeviceAdapter, SwOSDevice
 from swos_core.errors import (
     DeviceDetectionError,
     DuplicateDevicePluginError,
@@ -86,6 +88,9 @@ class FakePlugin:
 
 
 class FakeAdapter:
+    system_readback_urls: ClassVar[list[str | None]] = []
+    validated_system_readback_urls: ClassVar[list[str | None]] = []
+
     def __init__(self, device_identity: DeviceIdentity) -> None:
         self._identity = device_identity
 
@@ -334,7 +339,9 @@ class FakeAdapter:
         update: SystemConfigurationUpdate,
         *,
         expected_current: SystemInfo,
+        readback_url: str | None = None,
     ) -> OperationResult[SystemInfo]:
+        self.system_readback_urls.append(readback_url)
         assert expected_current == self.get_system_info()
         changes = {} if update.name is None else {"name": update.name}
         value = expected_current.model_copy(update=changes)
@@ -354,8 +361,10 @@ class FakeAdapter:
         update: SystemConfigurationUpdate,
         *,
         current: SystemInfo,
+        readback_url: str | None = None,
     ) -> None:
         del update
+        self.validated_system_readback_urls.append(readback_url)
         assert current == self.get_system_info()
 
     def set_snmp_metadata(self, update: SnmpMetadataUpdate) -> OperationResult[SnmpInfo]:
@@ -517,6 +526,31 @@ class FakeAdapter:
     ) -> OperationResult[tuple[VlanInfo, ...]]:
         assert expected_current == self.get_vlans()
         return OperationResult[tuple[VlanInfo, ...]](changed=vlans != expected_current, value=vlans)
+
+
+class LegacySystemConfigurationAdapter(FakeAdapter):
+    """Adapter implementing the pre-readback optional-keyword contract."""
+
+    system_calls: ClassVar[int] = 0
+    validation_calls: ClassVar[int] = 0
+
+    def set_system_configuration(  # type: ignore[override]
+        self,
+        update: SystemConfigurationUpdate,
+        *,
+        expected_current: SystemInfo,
+    ) -> OperationResult[SystemInfo]:
+        type(self).system_calls += 1
+        return super().set_system_configuration(update, expected_current=expected_current)
+
+    def validate_system_configuration(  # type: ignore[override]
+        self,
+        update: SystemConfigurationUpdate,
+        *,
+        current: SystemInfo,
+    ) -> None:
+        type(self).validation_calls += 1
+        super().validate_system_configuration(update, current=current)
 
 
 def identity(version: str = "2.19") -> DeviceIdentity:
@@ -723,6 +757,8 @@ def test_policy_bound_device_rejects_unsupported_feature() -> None:
 
 
 def test_policy_bound_device_authorizes_and_returns_write_result() -> None:
+    FakeAdapter.system_readback_urls.clear()
+    FakeAdapter.validated_system_readback_urls.clear()
     device = PluginRegistry([FakePlugin()]).connect(
         identity(),
         DeviceConnection(url="http://192.0.2.1"),
@@ -774,7 +810,9 @@ def test_policy_bound_device_authorizes_and_returns_write_result() -> None:
     password = device.set_admin_password(PasswordUpdate(new_password="new-password"))
     system_before = device.get_system_info()
     system = device.set_system_configuration(
-        SystemConfigurationUpdate(name="Core Switch"), expected_current=system_before
+        SystemConfigurationUpdate(name="Core Switch"),
+        expected_current=system_before,
+        readback_url="http://192.0.2.10",
     )
     metadata = device.set_snmp_metadata(SnmpMetadataUpdate(contact="NOC", location="Rack 1"))
 
@@ -798,10 +836,14 @@ def test_policy_bound_device_authorizes_and_returns_write_result() -> None:
     assert device.validate_admin_password(PasswordUpdate(new_password="new-password")) == ()
     assert (
         device.validate_system_configuration(
-            SystemConfigurationUpdate(name="Core Switch"), current=device.get_system_info()
+            SystemConfigurationUpdate(name="Core Switch"),
+            current=device.get_system_info(),
+            readback_url="http://192.0.2.11",
         )
         == ()
     )
+    assert FakeAdapter.system_readback_urls[0] == "http://192.0.2.10"
+    assert FakeAdapter.validated_system_readback_urls == ["http://192.0.2.11"]
     assert device.validate_port_name(PortNameUpdate(number=1, name="Uplink")) == ()
     assert (
         device.validate_port_configuration(
@@ -833,6 +875,32 @@ def test_policy_bound_device_authorizes_and_returns_write_result() -> None:
         )
         == ()
     )
+
+
+def test_policy_bound_device_omits_absent_readback_keyword_for_legacy_adapters() -> None:
+    LegacySystemConfigurationAdapter.system_calls = 0
+    LegacySystemConfigurationAdapter.validation_calls = 0
+    device_identity = identity()
+    adapter = LegacySystemConfigurationAdapter(device_identity)
+    device = SwOSDevice(
+        adapter,  # type: ignore[arg-type]
+        device_identity,
+        FirmwareSafetyPolicy(),
+        supported=True,
+    )
+    current = adapter.get_system_info()
+
+    result = device.set_system_configuration(
+        SystemConfigurationUpdate(name="Core Switch"), expected_current=current
+    )
+    warnings = device.validate_system_configuration(
+        SystemConfigurationUpdate(name="Core Switch"), current=current
+    )
+
+    assert result.changed
+    assert warnings == ()
+    assert LegacySystemConfigurationAdapter.system_calls == 1
+    assert LegacySystemConfigurationAdapter.validation_calls == 1
 
 
 def test_policy_bound_device_requires_explicit_untested_write_permission() -> None:

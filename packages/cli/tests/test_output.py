@@ -85,6 +85,7 @@ def _detailed_errors() -> PortErrorStatistics:
 
 class FakeDevice:
     password_updates: ClassVar[list[str]] = []
+    system_readback_urls: ClassVar[list[str | None]] = []
 
     def __init__(
         self,
@@ -376,7 +377,9 @@ class FakeDevice:
         update: SystemConfigurationUpdate,
         *,
         expected_current: SystemInfo,
+        readback_url: str | None = None,
     ) -> OperationResult[SystemInfo]:
+        self.system_readback_urls.append(readback_url)
         assert expected_current == self.get_system_info()
         before = expected_current
         management = before.management
@@ -932,6 +935,7 @@ def test_system_password_set_authentication_failure_is_structured_and_secret_fre
 
 
 def test_system_configure_uses_explicit_options_and_full_baseline(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    FakeDevice.system_readback_urls.clear()
     mock_registry(monkeypatch)
 
     result = runner.invoke(
@@ -941,6 +945,8 @@ def test_system_configure_uses_explicit_options_and_full_baseline(monkeypatch) -
             "configure",
             "--static-ip",
             "192.0.2.10",
+            "--readback-url",
+            "http://192.0.2.10",
             "--admin-mac",
             "02:00:00:00:00:05",
             "--name",
@@ -984,6 +990,7 @@ def test_system_configure_uses_explicit_options_and_full_baseline(monkeypatch) -
     assert data["system"]["management"]["allowed_port_numbers"] == [1, 6]
     assert data["system"]["igmp"]["version"] == "v2"
     assert data["warnings"][0]["code"] == "management_lockout_risk"
+    assert FakeDevice.system_readback_urls == ["http://192.0.2.10"]
 
 
 @pytest.mark.parametrize(

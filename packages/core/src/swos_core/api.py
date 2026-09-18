@@ -163,6 +163,7 @@ class DeviceAdapter(Protocol):
         update: SystemConfigurationUpdate,
         *,
         expected_current: SystemInfo,
+        readback_url: str | None = None,
     ) -> OperationResult[SystemInfo]:
         """Set system configuration if fresh state matches the expected baseline."""
 
@@ -173,6 +174,7 @@ class DeviceAdapter(Protocol):
         update: SystemConfigurationUpdate,
         *,
         current: SystemInfo,
+        readback_url: str | None = None,
     ) -> None:
         """Validate system configuration against freshly read state."""
 
@@ -532,14 +534,22 @@ class SwOSDevice:
         update: SystemConfigurationUpdate,
         *,
         expected_current: SystemInfo,
+        readback_url: str | None = None,
     ) -> OperationResult[SystemInfo]:
         """Set system configuration after write safety and capability checks."""
 
         warnings = self._authorize_write("system_configuration_write")
-        result = self._adapter.set_system_configuration(
-            update,
-            expected_current=expected_current,
-        )
+        if readback_url is None:
+            result = self._adapter.set_system_configuration(
+                update,
+                expected_current=expected_current,
+            )
+        else:
+            result = self._adapter.set_system_configuration(
+                update,
+                expected_current=expected_current,
+                readback_url=readback_url,
+            )
         return OperationResult[SystemInfo](
             changed=result.changed,
             value=result.value,
@@ -551,11 +561,19 @@ class SwOSDevice:
         update: SystemConfigurationUpdate,
         *,
         current: SystemInfo,
+        readback_url: str | None = None,
     ) -> tuple[SafetyWarning, ...]:
         """Validate system configuration under write policy without changing it."""
 
         warnings = self._authorize_write("system_configuration_write")
-        self._adapter.validate_system_configuration(update, current=current)
+        if readback_url is None:
+            self._adapter.validate_system_configuration(update, current=current)
+        else:
+            self._adapter.validate_system_configuration(
+                update,
+                current=current,
+                readback_url=readback_url,
+            )
         return warnings
 
     def set_snmp_metadata(self, update: SnmpMetadataUpdate) -> OperationResult[SnmpInfo]:

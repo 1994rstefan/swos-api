@@ -31,6 +31,10 @@ class InvalidOperationError(SwOSError):
     """A requested operation is invalid for the selected device."""
 
 
+class ManagementStateUncertainError(SwOSError):
+    """A management-path write could not be read back safely."""
+
+
 class PasswordUpdateRejectedError(SwOSError):
     """The device rejected an administrator password update."""
 

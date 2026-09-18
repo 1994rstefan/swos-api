@@ -6,8 +6,10 @@ from swos_core.errors import (
     AuthenticationError,
     HttpStatusError,
     InvalidOperationError,
+    ManagementStateUncertainError,
     PasswordUpdateRejectedError,
     ProtocolError,
+    TransportError,
     UnsupportedFirmwareError,
 )
 from swos_core.models import (
@@ -34,6 +36,11 @@ from swos_core.models import (
 from swos_core.plugins import PluginRegistry
 from swos_core.safety import FirmwareSafetyPolicy
 from swos_device_css106 import CSS106Plugin, plugin
+from swos_device_css106.adapter import (
+    MANAGEMENT_READBACK_ATTEMPTS,
+    _replace_url_host,
+    _validate_readback_url,
+)
 from swos_device_css106.protocol import (
     MAX_ACL_RULES,
     MAX_ADMIN_PASSWORD_BYTES,
@@ -104,6 +111,7 @@ class FakeTransport:
         self.response = response if isinstance(response, bytes) else None
         self.requests: list[tuple[str, str]] = []
         self.request_details: list[tuple[str, str, bytes | str | None, dict[str, str] | None]] = []
+        self.closed = False
 
     def request(
         self,
@@ -126,7 +134,10 @@ class FakeTransport:
         return self
 
     def __exit__(self, *args: object) -> None:
-        pass
+        self.close()
+
+    def close(self) -> None:
+        self.closed = True
 
 
 class FailingTransport(FakeTransport):
@@ -147,6 +158,34 @@ class FailingTransport(FakeTransport):
         self.request_details.append((method, path, content, headers))
         assert max_response_bytes == MAX_PAYLOAD_BYTES
         raise self.error
+
+
+class PostFailingTransport(FakeTransport):
+    def __init__(self, response: bytes, error: Exception) -> None:
+        super().__init__(response)
+        self.error = error
+
+    def request(
+        self,
+        method: str,
+        path: str,
+        *,
+        content: bytes | str | None = None,
+        headers: dict[str, str] | None = None,
+        max_response_bytes: int | None = None,
+    ) -> bytes:
+        if method == "POST":
+            self.requests.append((method, path))
+            self.request_details.append((method, path, content, headers))
+            assert max_response_bytes == MAX_PAYLOAD_BYTES
+            raise self.error
+        return super().request(
+            method,
+            path,
+            content=content,
+            headers=headers,
+            max_response_bytes=max_response_bytes,
+        )
 
 
 def fixture_payload() -> bytes:
@@ -187,6 +226,13 @@ def configured_system_payload() -> bytes:
         (b"igve:0x00", b"igve:0x01"),
         (b"pdsc:0x3f", b"pdsc:0x21"),
     )
+    for old, new in replacements:
+        payload = payload.replace(old, new)
+    return payload
+
+
+def system_payload_with(*replacements: tuple[bytes, bytes]) -> bytes:
+    payload = fixture_payload()
     for old, new in replacements:
         payload = payload.replace(old, new)
     return payload
@@ -1389,7 +1435,7 @@ def test_adapter_system_configuration_stale_noop_and_readback_guards() -> None:
         )
 
 
-def test_adapter_rejects_unsafe_system_management_changes_without_transport() -> None:
+def test_adapter_validates_system_masks_and_authorizes_management_reconnects() -> None:
     identity = identity_from_system(parse_payload(fixture_payload()))
     assert identity is not None
     current = system_info_from_payload(parse_payload(fixture_payload()), identity)
@@ -1419,15 +1465,12 @@ def test_adapter_rejects_unsafe_system_management_changes_without_transport() ->
         adapter.validate_system_configuration(
             SystemConfigurationUpdate(igmp_fast_leave_port_numbers=(6,)), current=current
         )
-    with pytest.raises(InvalidOperationError, match="management VLAN changes are disabled"):
-        adapter.validate_system_configuration(
-            SystemConfigurationUpdate(allowed_vlan_id=10), current=current
-        )
-    with pytest.raises(InvalidOperationError, match="address-mode changes"):
-        adapter.validate_system_configuration(
-            SystemConfigurationUpdate(address_mode="static"), current=current
-        )
-
+    adapter.validate_system_configuration(
+        SystemConfigurationUpdate(allowed_vlan_id=10), current=current
+    )
+    adapter.validate_system_configuration(
+        SystemConfigurationUpdate(address_mode="static"), current=current
+    )
     adapter.validate_system_configuration(
         SystemConfigurationUpdate(allowed_vlan_id="unset"), current=current
     )
@@ -1437,30 +1480,470 @@ def test_adapter_rejects_unsafe_system_management_changes_without_transport() ->
     assert transport.requests == []
 
 
-def test_adapter_rejects_active_static_ip_change_until_reconnect_is_supported() -> None:
+@pytest.mark.parametrize(
+    "address",
+    ["0.0.0.0", "127.0.0.1", "224.0.0.1", "240.0.0.1", "255.255.255.255"],
+)
+def test_adapter_rejects_unusable_constructed_static_ip_before_transport(address: str) -> None:
     identity = identity_from_system(parse_payload(fixture_payload()))
     assert identity is not None
     current = system_info_from_payload(parse_payload(fixture_payload()), identity)
-    assert current.management is not None
-    current = current.model_copy(
-        update={
-            "management": current.management.model_copy(update={"address_mode": AddressMode.STATIC})
-        }
-    )
-    transport = FakeTransport(fixture_payload())
-    adapter = CSS106Plugin(transport_factory=lambda connection: transport).create(  # type: ignore[arg-type]
+    connections: list[DeviceConnection] = []
+
+    def factory(connection: DeviceConnection) -> FakeTransport:
+        connections.append(connection)
+        return FakeTransport(fixture_payload())
+
+    adapter = CSS106Plugin(transport_factory=factory).create(  # type: ignore[arg-type]
         identity=identity,
-        connection=DeviceConnection(url="http://192.0.2.1"),
+        connection=DeviceConnection(url="http://192.168.88.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+    update = SystemConfigurationUpdate.model_construct(static_ip=address)
+
+    with pytest.raises(InvalidOperationError, match="usable unicast IPv4"):
+        adapter.set_system_configuration(update, expected_current=current)
+
+    assert connections == []
+
+
+def test_adapter_derives_static_readback_url_and_updates_connection() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    current = system_info_from_payload(parse_payload(fixture_payload()), identity)
+    old_transport = FakeTransport((fixture_payload(), b""))
+    after_payload = system_payload_with(
+        (b"iptp:0x00", b"iptp:0x01"),
+        (b"sip:0x0158a8c0", b"sip:0x0a0200c0"),
+    )
+    readback_transport = FakeTransport(after_payload)
+    later_transport = FakeTransport(after_payload)
+    transports = iter((old_transport, readback_transport, later_transport))
+    connections: list[DeviceConnection] = []
+
+    def factory(connection: DeviceConnection) -> FakeTransport:
+        if connections:
+            assert old_transport.closed
+        connections.append(connection)
+        return next(transports)
+
+    adapter = CSS106Plugin(transport_factory=factory).create(  # type: ignore[arg-type]
+        identity=identity,
+        connection=DeviceConnection(url="http://192.168.88.1:8080"),
         policy=FirmwareSafetyPolicy(),
         support=plugin.support_records()[0],
     )
 
-    with pytest.raises(InvalidOperationError, match="active static-IP changes"):
+    result = adapter.set_system_configuration(
+        SystemConfigurationUpdate(address_mode="static", static_ip="192.0.2.10"),
+        expected_current=current,
+    )
+    later = adapter.get_system_info()
+
+    assert result.changed
+    assert result.value.static_ip == "192.0.2.10"
+    assert later.static_ip == "192.0.2.10"
+    assert [str(connection.url) for connection in connections] == [
+        "http://192.168.88.1:8080/",
+        "http://192.0.2.10:8080/",
+        "http://192.0.2.10:8080/",
+    ]
+    assert old_transport.requests == [("GET", "/sys.b"), ("POST", "/sys.b")]
+    assert readback_transport.requests == [("GET", "/sys.b")]
+
+
+def test_adapter_reconnects_same_ip_address_mode_change() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    current = system_info_from_payload(parse_payload(fixture_payload()), identity)
+    after_payload = system_payload_with((b"iptp:0x00", b"iptp:0x01"))
+    transports = iter((FakeTransport((fixture_payload(), b"")), FakeTransport(after_payload)))
+    urls: list[str] = []
+
+    def factory(connection: DeviceConnection) -> FakeTransport:
+        urls.append(str(connection.url))
+        return next(transports)
+
+    adapter = CSS106Plugin(transport_factory=factory).create(  # type: ignore[arg-type]
+        identity=identity,
+        connection=DeviceConnection(url="http://192.168.88.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+
+    result = adapter.set_system_configuration(
+        SystemConfigurationUpdate(address_mode="static"),
+        expected_current=current,
+        readback_url="http://192.168.88.1",
+    )
+
+    assert result.value.management is not None
+    assert result.value.management.address_mode is AddressMode.STATIC
+    assert urls == ["http://192.168.88.1/", "http://192.168.88.1/"]
+
+
+def test_adapter_reconnects_active_dhcp_fallback_static_ip_change() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    current = system_info_from_payload(parse_payload(fixture_payload()), identity)
+    after_payload = system_payload_with(
+        (b"ip:0x0158a8c0", b"ip:0x0a0200c0"),
+        (b"sip:0x0158a8c0", b"sip:0x0a0200c0"),
+    )
+    transports = iter((FakeTransport((fixture_payload(), b"")), FakeTransport(after_payload)))
+    urls: list[str] = []
+
+    def factory(connection: DeviceConnection) -> FakeTransport:
+        urls.append(str(connection.url))
+        return next(transports)
+
+    adapter = CSS106Plugin(transport_factory=factory).create(  # type: ignore[arg-type]
+        identity=identity,
+        connection=DeviceConnection(url="http://192.168.88.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+
+    result = adapter.set_system_configuration(
+        SystemConfigurationUpdate(static_ip="192.0.2.10"), expected_current=current
+    )
+
+    assert result.value.management is not None
+    assert result.value.management.address_mode is AddressMode.DHCP_WITH_FALLBACK
+    assert result.value.static_ip == "192.0.2.10"
+    assert "active static IP 192.168.88.1 -> 192.0.2.10" in result.warnings[0].message
+    assert urls == ["http://192.168.88.1/", "http://192.0.2.10/"]
+
+
+def test_adapter_static_target_rejects_explicit_url_override_before_transport() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    current = system_info_from_payload(parse_payload(fixture_payload()), identity)
+    connections: list[DeviceConnection] = []
+
+    def factory(connection: DeviceConnection) -> FakeTransport:
+        connections.append(connection)
+        return FakeTransport(fixture_payload())
+
+    adapter = CSS106Plugin(transport_factory=factory).create(  # type: ignore[arg-type]
+        identity=identity,
+        connection=DeviceConnection(url="http://192.168.88.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+
+    with pytest.raises(InvalidOperationError, match="deterministic URL"):
         adapter.set_system_configuration(
-            SystemConfigurationUpdate(static_ip="192.0.2.10"), expected_current=current
+            SystemConfigurationUpdate(address_mode="static"),
+            expected_current=current,
+            readback_url="http://192.0.2.10",
         )
 
-    assert transport.requests == []
+    assert connections == []
+
+
+def test_adapter_requires_explicit_dhcp_readback_and_uses_it() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    static_payload = system_payload_with((b"iptp:0x00", b"iptp:0x01"))
+    current = system_info_from_payload(parse_payload(static_payload), identity)
+    transports = iter((FakeTransport((static_payload, b"")), FakeTransport(fixture_payload())))
+    urls: list[str] = []
+
+    def factory(connection: DeviceConnection) -> FakeTransport:
+        urls.append(str(connection.url))
+        return next(transports)
+
+    adapter = CSS106Plugin(transport_factory=factory).create(  # type: ignore[arg-type]
+        identity=identity,
+        connection=DeviceConnection(url="http://192.168.88.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+    with pytest.raises(InvalidOperationError, match="explicit readback_url"):
+        adapter.validate_system_configuration(
+            SystemConfigurationUpdate(address_mode="dhcp_with_fallback"), current=current
+        )
+
+    result = adapter.set_system_configuration(
+        SystemConfigurationUpdate(address_mode="dhcp_with_fallback"),
+        expected_current=current,
+        readback_url="http://192.168.88.1",
+    )
+
+    assert result.value.management is not None
+    assert result.value.management.address_mode is AddressMode.DHCP_WITH_FALLBACK
+    assert urls == ["http://192.168.88.1/", "http://192.168.88.1/"]
+
+
+def test_adapter_management_vlan_reconnect_warns_and_reads_current_url() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    current = system_info_from_payload(parse_payload(fixture_payload()), identity)
+    after_payload = system_payload_with((b"avln:0x0000", b"avln:0x01"))
+    transports = iter((FakeTransport((fixture_payload(), b"")), FakeTransport(after_payload)))
+    urls: list[str] = []
+
+    def factory(connection: DeviceConnection) -> FakeTransport:
+        urls.append(str(connection.url))
+        return next(transports)
+
+    adapter = CSS106Plugin(transport_factory=factory).create(  # type: ignore[arg-type]
+        identity=identity,
+        connection=DeviceConnection(url="http://192.168.88.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+
+    result = adapter.set_system_configuration(
+        SystemConfigurationUpdate(allowed_vlan_id=1), expected_current=current
+    )
+
+    assert result.value.management is not None
+    assert result.value.management.allowed_vlan_id == 1
+    assert result.warnings[0].code == "management_lockout_risk"
+    assert "management VLAN unset -> 1" in result.warnings[0].message
+    assert urls == ["http://192.168.88.1/", "http://192.168.88.1/"]
+
+
+def test_adapter_management_readback_retries_without_another_write(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    current = system_info_from_payload(parse_payload(fixture_payload()), identity)
+    after_payload = system_payload_with((b"iptp:0x00", b"iptp:0x01"))
+    old_transport = FakeTransport((fixture_payload(), b""))
+    transports = iter(
+        (
+            old_transport,
+            FailingTransport(TransportError("ARP transition")),
+            FailingTransport(TransportError("ARP transition")),
+            FakeTransport(after_payload),
+        )
+    )
+    sleeps: list[float] = []
+    monkeypatch.setattr("swos_device_css106.adapter.sleep", sleeps.append)
+    adapter = CSS106Plugin(transport_factory=lambda connection: next(transports)).create(  # type: ignore[arg-type]
+        identity=identity,
+        connection=DeviceConnection(url="http://192.168.88.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+
+    result = adapter.set_system_configuration(
+        SystemConfigurationUpdate(address_mode="static"), expected_current=current
+    )
+
+    assert result.changed
+    assert old_transport.requests.count(("POST", "/sys.b")) == 1
+    assert sleeps == [1.0, 1.0]
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        AuthenticationError("rejected"),
+        HttpStatusError(500),
+        ProtocolError("invalid response"),
+    ],
+)
+def test_adapter_propagates_definitive_post_failure_without_polling(error: Exception) -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    current = system_info_from_payload(parse_payload(fixture_payload()), identity)
+    transport = PostFailingTransport(fixture_payload(), error)
+    connections: list[DeviceConnection] = []
+
+    def factory(connection: DeviceConnection) -> FakeTransport:
+        connections.append(connection)
+        return transport
+
+    adapter = CSS106Plugin(transport_factory=factory).create(  # type: ignore[arg-type]
+        identity=identity,
+        connection=DeviceConnection(url="http://192.168.88.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+
+    with pytest.raises(type(error)):
+        adapter.set_system_configuration(
+            SystemConfigurationUpdate(address_mode="static"), expected_current=current
+        )
+
+    assert connections == [DeviceConnection(url="http://192.168.88.1")]
+    assert transport.requests == [("GET", "/sys.b"), ("POST", "/sys.b")]
+
+
+def test_adapter_polls_after_ambiguous_post_transport_loss() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    current = system_info_from_payload(parse_payload(fixture_payload()), identity)
+    after_payload = system_payload_with((b"iptp:0x00", b"iptp:0x01"))
+    transports = iter(
+        (
+            PostFailingTransport(fixture_payload(), TransportError("response lost")),
+            FakeTransport(after_payload),
+        )
+    )
+    adapter = CSS106Plugin(transport_factory=lambda connection: next(transports)).create(  # type: ignore[arg-type]
+        identity=identity,
+        connection=DeviceConnection(url="http://192.168.88.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+
+    result = adapter.set_system_configuration(
+        SystemConfigurationUpdate(address_mode="static"), expected_current=current
+    )
+
+    assert result.changed
+
+
+@pytest.mark.parametrize(
+    "identity_replacement",
+    [
+        (b"sid:'5445535431323334'", b"sid:'5445535439393939'"),
+        (b"mac:'020000000001'", b"mac:'020000000099'"),
+    ],
+)
+def test_adapter_rejects_changed_physical_identity_before_connection_swap(
+    identity_replacement: tuple[bytes, bytes], monkeypatch
+) -> None:  # type: ignore[no-untyped-def]
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    current = system_info_from_payload(parse_payload(fixture_payload()), identity)
+    after_payload = system_payload_with(
+        (b"iptp:0x00", b"iptp:0x01"),
+        (b"sip:0x0158a8c0", b"sip:0x0a0200c0"),
+        identity_replacement,
+    )
+    old_transport = FakeTransport((fixture_payload(), b""))
+    changed_identity_transport = FakeTransport(after_payload)
+    calls = 0
+
+    def factory(connection: DeviceConnection) -> FakeTransport:
+        nonlocal calls
+        calls += 1
+        return old_transport if calls == 1 else changed_identity_transport
+
+    monkeypatch.setattr("swos_device_css106.adapter.sleep", lambda seconds: None)
+    adapter = CSS106Plugin(transport_factory=factory).create(  # type: ignore[arg-type]
+        identity=identity,
+        connection=DeviceConnection(url="http://192.168.88.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+
+    with pytest.raises(ManagementStateUncertainError) as error:
+        adapter.set_system_configuration(
+            SystemConfigurationUpdate(address_mode="static", static_ip="192.0.2.10"),
+            expected_current=current,
+        )
+
+    assert isinstance(error.value.__cause__, ProtocolError)
+    assert "physical identity changed" in str(error.value.__cause__)
+    assert str(adapter._connection.url) == "http://192.168.88.1/"
+
+
+def test_adapter_management_readback_failure_is_uncertain_and_keeps_connection(
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    current = system_info_from_payload(parse_payload(fixture_payload()), identity)
+    old_transport = FakeTransport((fixture_payload(), b""))
+    transports = iter(
+        (
+            old_transport,
+            *(
+                FailingTransport(TransportError("unreachable"))
+                for _ in range(MANAGEMENT_READBACK_ATTEMPTS)
+            ),
+        )
+    )
+    connections: list[DeviceConnection] = []
+
+    def factory(connection: DeviceConnection) -> FakeTransport:
+        connections.append(connection)
+        return next(transports)
+
+    monkeypatch.setattr("swos_device_css106.adapter.sleep", lambda seconds: None)
+    adapter = CSS106Plugin(transport_factory=factory).create(  # type: ignore[arg-type]
+        identity=identity,
+        connection=DeviceConnection(url="http://192.168.88.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+
+    with pytest.raises(ManagementStateUncertainError, match=r"do not retry.*manual reset"):
+        adapter.set_system_configuration(
+            SystemConfigurationUpdate(address_mode="static", static_ip="192.0.2.10"),
+            expected_current=current,
+        )
+
+    assert old_transport.requests.count(("POST", "/sys.b")) == 1
+    assert str(adapter._connection.url) == "http://192.168.88.1/"
+    assert len(connections) == MANAGEMENT_READBACK_ATTEMPTS + 1
+
+
+@pytest.mark.parametrize(
+    "readback_url",
+    [
+        "https://192.0.2.10",
+        "http://192.0.2.10:8080",
+        "http://user:do-not-leak@192.0.2.10",
+        "http://192.0.2.10/device",
+        "http://192.0.2.10?target=device",
+        "http://192.0.2.10?",
+        "http://192.0.2.10#device",
+        "http://192.0.2.10#",
+        "http://192.0.2.10\\@198.51.100.10",
+        "http://192.0.2.10%5C@198.51.100.10",
+        "HTTP://192.0.2.10",
+        " http://192.0.2.10 ",
+    ],
+)
+def test_adapter_rejects_unsafe_readback_url_before_transport(readback_url: str) -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    current = system_info_from_payload(parse_payload(fixture_payload()), identity)
+    connections: list[DeviceConnection] = []
+
+    def factory(connection: DeviceConnection) -> FakeTransport:
+        connections.append(connection)
+        return FakeTransport(fixture_payload())
+
+    adapter = CSS106Plugin(transport_factory=factory).create(  # type: ignore[arg-type]
+        identity=identity,
+        connection=DeviceConnection(url="http://192.168.88.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+
+    with pytest.raises(InvalidOperationError) as error:
+        adapter.set_system_configuration(
+            SystemConfigurationUpdate(allowed_vlan_id=1),
+            expected_current=current,
+            readback_url=readback_url,
+        )
+
+    assert "do-not-leak" not in str(error.value)
+    assert connections == []
+
+
+def test_readback_url_validation_returns_the_validated_canonical_bare_url() -> None:
+    original = DeviceConnection(url="http://192.0.2.1").url
+
+    validated = _validate_readback_url("http://192.0.2.10", original_url=original)
+
+    assert str(validated) == "http://192.0.2.10/"
+    assert validated.host == "192.0.2.10"
+
+
+def test_static_readback_url_replacement_brackets_ipv6_and_preserves_port() -> None:
+    original = DeviceConnection(url="https://192.0.2.1:8443").url
+
+    assert str(_replace_url_host(original, "2001:db8::10")) == "https://[2001:db8::10]:8443/"
 
 
 def test_adapter_rejects_static_ip_staging_in_dhcp_only_mode() -> None:
