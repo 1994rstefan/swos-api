@@ -99,15 +99,15 @@ protocol POST failures propagate immediately; only ambiguous request loss
 enters polling. Failed polling issues no second write and raises an
 uncertain-state error that may require a manual factory reset.
 
-The profile also advertises guarded per-port RSTP enable and forwarding lock,
-lock-on-first, and egress-rate writes for ports 1-5. CLI plans carry an expected
-configuration; the adapter rechecks it from fresh `/sys.b` plus `/rstp.b` or
-`/fwd.b` reads and rejects stale plans before POST. RSTP posts the complete
-`ena` group. Forwarding posts `fp1` through `fp6`, `lck`, `lckf`, `imr`, `omr`,
-`mrto`, and `or`, preserving every omitted value and verifying that complete
-group after the write. Port 6's RSTP bit, `fp6`, and every destination
-relationship involving port 6 cannot change. Port 6 is rejected as a mirror
-source or target.
+The profile also advertises guarded per-port RSTP enable, bridge-global RSTP,
+forwarding lock, lock-on-first, egress-rate, matrix, and mirroring writes. CLI
+plans carry an expected configuration; the adapter rechecks it from fresh
+`/sys.b` plus `/rstp.b` or `/fwd.b` reads and rejects stale plans before POST.
+RSTP posts the complete `ena` group. Forwarding posts `fp1` through `fp6`,
+`lck`, `lckf`, `imr`, `omr`, `mrto`, and `or`, preserving every omitted value
+and verifying that complete group after the write. Port 6's RSTP bit, `fp6`, and
+every destination relationship involving port 6 cannot change. Port 6 is
+rejected as a mirror source or target.
 
 Guarded per-port VLAN policy writes are advertised for ports 1-5. They post the
 complete ordered `/fwd.b` VLAN group `vlan`, `vlni`, `dvid`, `fvid`, `vlnh`
@@ -118,15 +118,16 @@ Complete `/vlan.b` replacement validates and posts ordered `vid`, `ivl`, `igmp`,
 `prt` rows. Every desired table must preserve management port 6's effective
 membership for every VLAN ID versus the mandatory expected baseline. The
 adapter rejects stale plans and verifies the complete table after POST. The
-`vlan_table_write` capability is deliberately not advertised pending hardware
-validation. Internal write-state parsing preserves wire row order, so readback
-with reordered rows is rejected even though public `get_vlans()` output remains
-sorted by VLAN ID.
+`vlan_table_write` capability is advertised for the exact RB260GS profile.
+Each normalized row retains its raw table position for baseline equality and
+re-encoding while excluding that position from JSON. Readback with reordered
+rows is rejected even though public `get_vlans()` output remains sorted by VLAN
+ID. Existing positioned rows retain raw order and new unpositioned rows append.
 
 Bridge-global (`prio`, `cost`, `frmc`), forwarding-matrix, and mirroring
 serialization use the same identity, baseline, no-op, complete-group, and
-readback guards, but their independent capabilities remain disabled pending
-hardware validation.
+readback guards. Their independent capabilities are advertised for the exact
+RB260GS profile.
 
 Complete static-host table replacement is also guarded on that exact device
 identity. It validates row limits and the complete desired table before
@@ -140,9 +141,15 @@ ACL replacement is implemented with the same baseline, serialization, and
 readback guards. `/acl.b` rows preserve the firmware's complete 26-field order
 and 32-rule limit. Rules are numbered consecutively and any rule whose ingress
 includes management port 6 is rejected. Redirecting traffic to port 6 remains
-representable. The plugin deliberately does not advertise `acl_write`: no
-truly no-effect rule on a link-down port 5 has yet been proven and restored on
-hardware.
+representable. The exact RB260GS profile advertises `acl_write`.
+
+The separately gated hardware tests exercise conservative representative paths,
+not every fixture-backed field combination: an action-free ACL rule on down port
+5; two p5-only VLAN rows created in an initially empty table; each RSTP bridge
+field in an independent cycle while Ethernet ports 1-5 are down and the active
+management path is port 6; one matrix destination removal; and ingress/egress
+mirroring from down port 5 to down port 4 in separate cycles. Fixture tests
+continue to cover full serialization combinations and all port-6 invariants.
 
 SwOS does not expose a revision token or compare-and-swap operation. Table
 writes detect changes between the CLI read and the adapter's fresh read, but

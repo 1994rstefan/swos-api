@@ -412,6 +412,15 @@ def test_vlan_models_validate_values_and_unique_ports() -> None:
     update = PortVlanPolicyUpdate(number=5, receive="untagged_only", force_vlan_id=False)
     assert update.receive.value == "untagged_only"
     assert update.force_vlan_id is False
+    vlan = VlanInfo(
+        table_position=2,
+        vlan_id=10,
+        independent_learning=True,
+        igmp_snooping=False,
+        ports=(VlanPortMembership(port_number=1, mode="strip"),),
+    )
+    assert vlan.table_position == 2
+    assert "table_position" not in vlan.model_dump(mode="json")
     with pytest.raises(ValidationError, match="at least one"):
         PortVlanPolicyUpdate(number=5)
     with pytest.raises(ValidationError):

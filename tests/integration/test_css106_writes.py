@@ -3,15 +3,20 @@ import socket
 import sys
 from ipaddress import IPv4Address, IPv4Network
 from socket import create_connection
-from typing import Literal
+from typing import Literal, TypeVar
 from urllib.parse import urlsplit, urlunsplit
 
 import pytest
 from swos_core import (
+    AclRule,
+    AclVlanTagMode,
     AddressMode,
     DeviceConnection,
     DeviceIdentity,
     DeviceNameUpdate,
+    ForwardingInfo,
+    ForwardingMatrixUpdate,
+    ForwardingMirroringUpdate,
     ForwardingPortPolicyUpdate,
     HostEntry,
     HostEntryType,
@@ -23,6 +28,9 @@ from swos_core import (
     PortNameUpdate,
     PortVlanInfo,
     PortVlanPolicyUpdate,
+    RstpBridgeUpdate,
+    RstpCostMode,
+    RstpInfo,
     RstpPortEnableUpdate,
     SnmpMetadataUpdate,
     SwOSDevice,
@@ -362,6 +370,249 @@ def test_rb260gs_219_port_5_egress_rate_write_and_restore() -> None:
                 expected_current=changed.value,
             )
             assert restored.value.ports[port_number - 1].egress_rate_limit_bps == original_rate
+
+
+@pytest.mark.integration
+@pytest.mark.destructive
+@pytest.mark.high_risk_tables
+def test_rb260gs_219_acl_port_5_no_action_rule_and_restore_exact_table() -> None:
+    device = _integration_device()
+    if next(port for port in device.get_ports() if port.number == 5).link_up:
+        pytest.skip("port 5 is link-up; refusing high-risk ACL test")
+    original = device.get_acl_rules()
+    if len(original) >= 32:
+        pytest.skip("ACL table is full")
+    if any(6 in rule.ingress_port_numbers for rule in original):
+        pytest.skip("ACL table contains protected port-6 ingress and cannot be round-tripped")
+    temporary_rule = AclRule(
+        number=len(original) + 1,
+        ingress_port_numbers=(5,),
+        source_mac=None,
+        source_mac_mask="00:00:00:00:00:00",
+        destination_mac=None,
+        destination_mac_mask="00:00:00:00:00:00",
+        ether_type=0,
+        vlan_tag=AclVlanTagMode.ANY,
+        vlan_id_min=0,
+        vlan_id_max=4095,
+        source_prefix_length=0,
+        source_port_min=0,
+        source_port_max=0xFFFF,
+        destination_prefix_length=0,
+        destination_port_min=0,
+        destination_port_max=0xFFFF,
+        protocol_number=0,
+        redirect_enabled=False,
+        redirect_port_numbers=(),
+        drop=False,
+        mirror=False,
+    )
+    expected_temporary = (*original, temporary_rule)
+
+    try:
+        if next(port for port in device.get_ports() if port.number == 5).link_up:
+            pytest.fail("port 5 became link-up immediately before the ACL write")
+        changed = device.replace_acl_rules(expected_temporary, expected_current=original)
+        assert changed.changed
+        assert changed.value == expected_temporary
+    finally:
+        _restore_acl_table(device, original=original, expected_temporary=expected_temporary)
+
+
+@pytest.mark.integration
+@pytest.mark.destructive
+@pytest.mark.high_risk_tables
+def test_rb260gs_219_vlan_4094_port_5_row_and_restore_exact_ordered_table() -> None:
+    device = _integration_device()
+    if next(port for port in device.get_ports() if port.number == 5).link_up:
+        pytest.skip("port 5 is link-up; refusing high-risk VLAN-table test")
+    original = device.get_vlans()
+    if original:
+        pytest.skip("VLAN table is not empty; refusing high-risk ordered-table test")
+    first_vlan = VlanInfo(
+        table_position=0,
+        vlan_id=4094,
+        independent_learning=False,
+        igmp_snooping=False,
+        ports=tuple(
+            VlanPortMembership(
+                port_number=number,
+                mode=(
+                    VlanMembershipMode.PRESERVE if number == 5 else VlanMembershipMode.NOT_MEMBER
+                ),
+            )
+            for number in range(1, 7)
+        ),
+    )
+    second_vlan = first_vlan.model_copy(update={"table_position": 1, "vlan_id": 4093})
+    expected_first = (first_vlan,)
+    expected_second = (second_vlan, first_vlan)
+    assert _port_6_vlan_membership(original) == _port_6_vlan_membership(expected_first)
+    assert _port_6_vlan_membership(original) == _port_6_vlan_membership(expected_second)
+
+    try:
+        if next(port for port in device.get_ports() if port.number == 5).link_up:
+            pytest.fail("port 5 became link-up immediately before the first VLAN write")
+        first = device.replace_vlans(expected_first, expected_current=original)
+        assert first.changed
+        assert first.value == expected_first
+
+        if next(port for port in device.get_ports() if port.number == 5).link_up:
+            pytest.fail("port 5 became link-up immediately before the second VLAN write")
+        second = device.replace_vlans(expected_second, expected_current=first.value)
+        assert second.changed
+        assert second.value == expected_second
+        assert [vlan.vlan_id for vlan in second.value] == [4093, 4094]
+        assert [vlan.table_position for vlan in second.value] == [1, 0]
+    finally:
+        _restore_vlan_table(
+            device,
+            original=original,
+            expected_temporaries=(expected_first, expected_second),
+        )
+
+
+@pytest.mark.integration
+@pytest.mark.destructive
+@pytest.mark.high_risk_tables
+def test_rb260gs_219_rstp_bridge_priority_and_restore() -> None:
+    device, original = _isolated_rstp_device()
+    temporary_priority = _temporary_bridge_priority(original.bridge_priority)
+    _run_rstp_bridge_cycle(
+        device,
+        original=original,
+        update=RstpBridgeUpdate(bridge_priority=temporary_priority),
+        expected_temporary=original.model_copy(update={"bridge_priority": temporary_priority}),
+        restore=RstpBridgeUpdate(bridge_priority=original.bridge_priority),
+    )
+
+
+@pytest.mark.integration
+@pytest.mark.destructive
+@pytest.mark.high_risk_tables
+def test_rb260gs_219_rstp_bridge_cost_mode_and_restore() -> None:
+    device, original = _isolated_rstp_device()
+    temporary_cost = (
+        RstpCostMode.LONG if original.cost_mode is RstpCostMode.SHORT else RstpCostMode.SHORT
+    )
+    _run_rstp_bridge_cycle(
+        device,
+        original=original,
+        update=RstpBridgeUpdate(cost_mode=temporary_cost),
+        expected_temporary=original.model_copy(update={"cost_mode": temporary_cost}),
+        restore=RstpBridgeUpdate(cost_mode=original.cost_mode),
+    )
+
+
+@pytest.mark.integration
+@pytest.mark.destructive
+@pytest.mark.high_risk_tables
+def test_rb260gs_219_rstp_bridge_reserved_multicast_and_restore() -> None:
+    device, original = _isolated_rstp_device()
+    temporary_forwarding = not original.forward_reserved_multicast
+    _run_rstp_bridge_cycle(
+        device,
+        original=original,
+        update=RstpBridgeUpdate(forward_reserved_multicast=temporary_forwarding),
+        expected_temporary=original.model_copy(
+            update={"forward_reserved_multicast": temporary_forwarding}
+        ),
+        restore=RstpBridgeUpdate(forward_reserved_multicast=original.forward_reserved_multicast),
+    )
+
+
+@pytest.mark.integration
+@pytest.mark.destructive
+@pytest.mark.high_risk_tables
+def test_rb260gs_219_forwarding_matrix_port_5_and_restore() -> None:
+    device = _integration_device()
+    if next(port for port in device.get_ports() if port.number == 5).link_up:
+        pytest.skip("port 5 is link-up; refusing high-risk forwarding-matrix test")
+    original = device.get_forwarding()
+    source = next(port for port in original.ports if port.number == 5)
+    removable = tuple(port for port in source.destination_port_numbers if port != 6)
+    if not removable:
+        pytest.skip("source port 5 has no non-port-6 forwarding destination to remove")
+    temporary_destinations = tuple(
+        port for port in source.destination_port_numbers if port != removable[0]
+    )
+    expected_temporary = original.model_copy(
+        update={
+            "ports": tuple(
+                port.model_copy(update={"destination_port_numbers": temporary_destinations})
+                if port.number == 5
+                else port
+                for port in original.ports
+            )
+        }
+    )
+    _assert_port_6_forwarding_unchanged(original, expected_temporary)
+
+    try:
+        _require_ethernet_ports_down(device, (5,), "forwarding matrix", skip=False)
+        changed = device.set_forwarding_matrix(
+            ForwardingMatrixUpdate(
+                number=5,
+                destination_port_numbers=temporary_destinations,
+            ),
+            expected_current=original,
+        )
+        assert changed.changed
+        assert changed.value == expected_temporary
+    finally:
+        _restore_forwarding_matrix(
+            device,
+            original=original,
+            expected_temporary=expected_temporary,
+        )
+
+
+@pytest.mark.integration
+@pytest.mark.destructive
+@pytest.mark.high_risk_tables
+@pytest.mark.parametrize("direction", ["ingress", "egress"])
+def test_rb260gs_219_mirroring_port_5_to_port_4_and_restore(direction: str) -> None:
+    device = _integration_device()
+    ports = device.get_ports()
+    port_4 = next(port for port in ports if port.number == 4)
+    port_5 = next(port for port in ports if port.number == 5)
+    if port_4.link_up or port_5.link_up:
+        pytest.skip("ports 4 and 5 must both be link-down for high-risk mirroring test")
+    original = device.get_forwarding()
+    if original.mirror_target_port is not None or any(
+        port.mirror_ingress or port.mirror_egress for port in original.ports
+    ):
+        pytest.skip("mirroring is already configured; refusing to alter active mirror policy")
+    expected_temporary = original.model_copy(
+        update={
+            "mirror_target_port": 4,
+            "ports": tuple(
+                port.model_copy(update={f"mirror_{direction}": True}) if port.number == 5 else port
+                for port in original.ports
+            ),
+        }
+    )
+    _assert_port_6_forwarding_unchanged(original, expected_temporary)
+
+    try:
+        _require_mirroring_links_down(device, skip=False)
+        changed = device.set_forwarding_mirroring(
+            ForwardingMirroringUpdate(
+                source_port_number=5,
+                mirror_ingress=True if direction == "ingress" else None,
+                mirror_egress=True if direction == "egress" else None,
+                mirror_target_port=4,
+            ),
+            expected_current=original,
+        )
+        assert changed.changed
+        assert changed.value == expected_temporary
+    finally:
+        _restore_forwarding_mirroring(
+            device,
+            original=original,
+            expected_temporary=expected_temporary,
+        )
 
 
 @pytest.mark.integration
@@ -746,6 +997,374 @@ def test_rb260gs_219_static_ip_move_and_restore() -> None:
                 static_ip=restore_static_ip,
             ),
         )
+
+
+_CleanupState = TypeVar("_CleanupState")
+
+
+def _integration_device() -> SwOSDevice:
+    connection = _integration_connection()
+    registry = PluginRegistry.discover()
+    identity = registry.probe(connection)
+    return registry.connect(identity, connection, FirmwareSafetyPolicy())
+
+
+def _cleanup_state(
+    current: _CleanupState,
+    *,
+    original: _CleanupState,
+    temporary: _CleanupState,
+    label: str,
+) -> Literal["original", "temporary"]:
+    if current == original:
+        return "original"
+    if current == temporary:
+        return "temporary"
+    raise AssertionError(
+        f"{label} is neither the exact original nor expected temporary state; refusing cleanup"
+    )
+
+
+def _staged_cleanup_state(
+    current: _CleanupState,
+    *,
+    original: _CleanupState,
+    temporaries: tuple[_CleanupState, ...],
+    label: str,
+) -> Literal["original", "temporary"]:
+    if current == original:
+        return "original"
+    if current in temporaries:
+        return "temporary"
+    raise AssertionError(
+        f"{label} is neither the exact original nor an expected temporary state; refusing cleanup"
+    )
+
+
+def _restore_acl_table(
+    device: SwOSDevice,
+    *,
+    original: tuple[AclRule, ...],
+    expected_temporary: tuple[AclRule, ...],
+) -> None:
+    current = device.get_acl_rules()
+    if (
+        _cleanup_state(
+            current,
+            original=original,
+            temporary=expected_temporary,
+            label="ACL table",
+        )
+        == "original"
+    ):
+        return
+    _require_ethernet_ports_down(device, (5,), "ACL cleanup", skip=False)
+    restored = device.replace_acl_rules(original, expected_current=current)
+    assert restored.value == original
+    assert device.get_acl_rules() == original
+
+
+def _restore_vlan_table(
+    device: SwOSDevice,
+    *,
+    original: tuple[VlanInfo, ...],
+    expected_temporaries: tuple[tuple[VlanInfo, ...], ...],
+) -> None:
+    current = device.get_vlans()
+    if (
+        _staged_cleanup_state(
+            current,
+            original=original,
+            temporaries=expected_temporaries,
+            label="ordered VLAN table",
+        )
+        == "original"
+    ):
+        return
+    _require_ethernet_ports_down(device, (5,), "VLAN cleanup", skip=False)
+    restored = device.replace_vlans(original, expected_current=current)
+    assert restored.value == original
+    assert device.get_vlans() == original
+
+
+def _rstp_writable_configuration(info: RstpInfo) -> tuple[object, ...]:
+    return (
+        info.bridge_priority,
+        info.cost_mode,
+        info.forward_reserved_multicast,
+        tuple(
+            (
+                port.number,
+                port.enabled,
+                port.protocol,
+                port.configured_path_cost,
+                port.point_to_point,
+                port.edge,
+            )
+            for port in info.ports
+        ),
+    )
+
+
+def _restore_rstp_bridge(
+    device: SwOSDevice,
+    *,
+    original: RstpInfo,
+    expected_temporary: RstpInfo,
+    restore: RstpBridgeUpdate,
+) -> None:
+    current = device.get_rstp()
+    if (
+        _cleanup_state(
+            _rstp_writable_configuration(current),
+            original=_rstp_writable_configuration(original),
+            temporary=_rstp_writable_configuration(expected_temporary),
+            label="RSTP writable configuration",
+        )
+        == "original"
+    ):
+        return
+    _require_rstp_isolation(device, skip=False)
+    restored = device.set_rstp_bridge(restore, expected_current=current)
+    assert _rstp_writable_configuration(restored.value) == _rstp_writable_configuration(original)
+    assert _rstp_writable_configuration(device.get_rstp()) == _rstp_writable_configuration(original)
+
+
+def _restore_forwarding_matrix(
+    device: SwOSDevice,
+    *,
+    original: ForwardingInfo,
+    expected_temporary: ForwardingInfo,
+) -> None:
+    current = device.get_forwarding()
+    if (
+        _cleanup_state(
+            current,
+            original=original,
+            temporary=expected_temporary,
+            label="forwarding configuration",
+        )
+        == "original"
+    ):
+        return
+    original_source = next(port for port in original.ports if port.number == 5)
+    _require_ethernet_ports_down(device, (5,), "forwarding matrix cleanup", skip=False)
+    restored = device.set_forwarding_matrix(
+        ForwardingMatrixUpdate(
+            number=5,
+            destination_port_numbers=original_source.destination_port_numbers,
+        ),
+        expected_current=current,
+    )
+    assert restored.value == original
+    assert device.get_forwarding() == original
+
+
+def _restore_forwarding_mirroring(
+    device: SwOSDevice,
+    *,
+    original: ForwardingInfo,
+    expected_temporary: ForwardingInfo,
+) -> None:
+    current = device.get_forwarding()
+    if (
+        _cleanup_state(
+            current,
+            original=original,
+            temporary=expected_temporary,
+            label="forwarding configuration",
+        )
+        == "original"
+    ):
+        return
+    original_source = next(port for port in original.ports if port.number == 5)
+    _require_mirroring_links_down(device, skip=False)
+    restored = device.set_forwarding_mirroring(
+        ForwardingMirroringUpdate(
+            source_port_number=5,
+            mirror_ingress=original_source.mirror_ingress,
+            mirror_egress=original_source.mirror_egress,
+            mirror_target_port=original.mirror_target_port or "none",
+        ),
+        expected_current=current,
+    )
+    assert restored.value == original
+    assert device.get_forwarding() == original
+
+
+def _require_ethernet_ports_down(
+    device: SwOSDevice,
+    port_numbers: tuple[int, ...],
+    label: str,
+    *,
+    skip: bool,
+) -> None:
+    ports = {port.number: port for port in device.get_ports()}
+    up = tuple(number for number in port_numbers if ports[number].link_up)
+    if not up:
+        return
+    message = f"{label} requires link-down Ethernet ports: {','.join(map(str, up))}"
+    if skip:
+        pytest.skip(message)
+    raise AssertionError(message)
+
+
+def _require_rstp_isolation(device: SwOSDevice, *, skip: bool) -> None:
+    if os.environ.get("SWOS_INTEGRATION_MANAGEMENT_PORT") != "6":
+        message = "RSTP bridge tests require SWOS_INTEGRATION_MANAGEMENT_PORT=6"
+        if skip:
+            pytest.skip(message)
+        raise AssertionError(message)
+    ports = {port.number: port for port in device.get_ports()}
+    isolated = all(not ports[number].link_up for number in range(1, 6)) and ports[6].link_up
+    if isolated:
+        return
+    message = "RSTP bridge tests require Ethernet ports 1-5 down and management port 6 up"
+    if skip:
+        pytest.skip(message)
+    raise AssertionError(message)
+
+
+def _isolated_rstp_device() -> tuple[SwOSDevice, RstpInfo]:
+    device = _integration_device()
+    system = device.get_system_info()
+    if system.management is None or 6 not in system.management.allowed_port_numbers:
+        pytest.skip("port 6 is not an explicitly management-allowed port")
+    original = device.get_rstp()
+    if (
+        system.mac_address is None
+        or original.root_bridge_priority != original.bridge_priority
+        or original.root_bridge_mac.casefold() != system.mac_address.casefold()
+    ):
+        pytest.skip("device is not the directly observed RSTP root bridge")
+    _require_rstp_isolation(device, skip=True)
+    return device, original
+
+
+def _run_rstp_bridge_cycle(
+    device: SwOSDevice,
+    *,
+    original: RstpInfo,
+    update: RstpBridgeUpdate,
+    expected_temporary: RstpInfo,
+    restore: RstpBridgeUpdate,
+) -> None:
+    try:
+        _require_rstp_isolation(device, skip=False)
+        changed = device.set_rstp_bridge(update, expected_current=original)
+        assert changed.changed
+        assert _rstp_writable_configuration(changed.value) == _rstp_writable_configuration(
+            expected_temporary
+        )
+    finally:
+        _restore_rstp_bridge(
+            device,
+            original=original,
+            expected_temporary=expected_temporary,
+            restore=restore,
+        )
+
+
+def _require_mirroring_links_down(device: SwOSDevice, *, skip: bool) -> None:
+    _require_ethernet_ports_down(device, (4, 5), "mirroring", skip=skip)
+
+
+def _port_6_vlan_membership(vlans: tuple[VlanInfo, ...]) -> dict[int, VlanMembershipMode]:
+    return {
+        vlan.vlan_id: vlan.ports[5].mode
+        for vlan in vlans
+        if vlan.ports[5].mode is not VlanMembershipMode.NOT_MEMBER
+    }
+
+
+def _port_6_forwarding_relationships(info: ForwardingInfo) -> tuple[object, ...]:
+    port_6 = next(port for port in info.ports if port.number == 6)
+    return (
+        port_6,
+        tuple((port.number, 6 in port.destination_port_numbers) for port in info.ports),
+        info.mirror_target_port == 6,
+    )
+
+
+def _assert_port_6_forwarding_unchanged(
+    original: ForwardingInfo, temporary: ForwardingInfo
+) -> None:
+    assert _port_6_forwarding_relationships(temporary) == _port_6_forwarding_relationships(original)
+
+
+def _temporary_bridge_priority(priority: int) -> int:
+    if priority == 0x8000:
+        return 0x9000
+    return priority + 0x1000 if priority < 0xF000 else priority - 0x1000
+
+
+def test_high_risk_cleanup_state_accepts_only_exact_original_or_temporary() -> None:
+    assert (
+        _cleanup_state("before", original="before", temporary="during", label="table") == "original"
+    )
+    assert (
+        _cleanup_state("during", original="before", temporary="during", label="table")
+        == "temporary"
+    )
+    with pytest.raises(AssertionError, match=r"neither the exact original.*refusing cleanup"):
+        _cleanup_state("other", original="before", temporary="during", label="table")
+
+    assert (
+        _staged_cleanup_state(
+            "first", original="before", temporaries=("first", "second"), label="table"
+        )
+        == "temporary"
+    )
+    with pytest.raises(AssertionError, match=r"nor an expected temporary.*refusing cleanup"):
+        _staged_cleanup_state(
+            "other", original="before", temporaries=("first", "second"), label="table"
+        )
+
+
+@pytest.mark.parametrize(
+    ("priority", "temporary"),
+    [(0x8000, 0x9000), (0x7000, 0x8000), (0xF000, 0xE000)],
+)
+def test_temporary_bridge_priority_uses_one_safe_step(priority: int, temporary: int) -> None:
+    assert _temporary_bridge_priority(priority) == temporary
+
+
+class _LinkState:
+    def __init__(self, number: int, link_up: bool) -> None:
+        self.number = number
+        self.link_up = link_up
+
+
+class _TopologyDevice:
+    def __init__(self, up_ports: tuple[int, ...]) -> None:
+        self.up_ports = up_ports
+
+    def get_ports(self) -> tuple[_LinkState, ...]:
+        return tuple(_LinkState(number, number in self.up_ports) for number in range(1, 7))
+
+
+def test_rstp_isolation_requires_only_explicit_management_port_up(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SWOS_INTEGRATION_MANAGEMENT_PORT", "6")
+    isolated = _TopologyDevice((6,))
+
+    _require_rstp_isolation(isolated, skip=False)  # type: ignore[arg-type]
+
+    with pytest.raises(AssertionError, match="Ethernet ports 1-5 down"):
+        _require_rstp_isolation(_TopologyDevice((1, 6)), skip=False)  # type: ignore[arg-type]
+    with pytest.raises(AssertionError, match="management port 6 up"):
+        _require_rstp_isolation(_TopologyDevice(()), skip=False)  # type: ignore[arg-type]
+    monkeypatch.delenv("SWOS_INTEGRATION_MANAGEMENT_PORT")
+    with pytest.raises(AssertionError, match="MANAGEMENT_PORT=6"):
+        _require_rstp_isolation(isolated, skip=False)  # type: ignore[arg-type]
+
+
+def test_mirroring_link_gate_requires_ports_4_and_5_down() -> None:
+    _require_mirroring_links_down(_TopologyDevice((6,)), skip=False)  # type: ignore[arg-type]
+
+    with pytest.raises(AssertionError, match="4,5"):
+        _require_mirroring_links_down(_TopologyDevice((4, 5, 6)), skip=False)  # type: ignore[arg-type]
 
 
 def _integration_connection() -> DeviceConnection:

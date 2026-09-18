@@ -25,6 +25,9 @@ ACL tables. `PasswordUpdate` stores its value as `SecretStr` and excludes it fro
 all model serialization.
 Static-host writes reuse `HostEntry` but reject dynamic entries. `None` preserves
 an omitted field where supported; explicit `"unlimited"` clears an egress rate.
+`VlanInfo.table_position` retains raw table order for equality and stale-baseline
+checks while remaining excluded from JSON serialization; public VLAN tuples
+remain sorted by VLAN ID.
 
 Whole-table replacement plus RSTP and forwarding mutation requires an
 `expected_current` baseline. The adapter compares that baseline with its fresh

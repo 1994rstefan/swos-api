@@ -838,6 +838,7 @@ class VlanInfo(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
+    table_position: int | None = Field(default=None, ge=0, exclude=True)
     vlan_id: int = Field(ge=1, le=4095)
     independent_learning: bool
     igmp_snooping: bool

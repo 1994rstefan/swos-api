@@ -378,12 +378,13 @@ def test_probe_and_adapter_normalize_system_data() -> None:
     assert adapter.capabilities.supports("admin_password_write")
     assert adapter.capabilities.supports("rstp_port_enable_write")
     assert adapter.capabilities.supports("forwarding_port_policy_write")
-    assert not adapter.capabilities.supports("rstp_bridge_write")
-    assert not adapter.capabilities.supports("forwarding_matrix_write")
-    assert not adapter.capabilities.supports("forwarding_mirroring_write")
+    assert adapter.capabilities.supports("rstp_bridge_write")
+    assert adapter.capabilities.supports("forwarding_matrix_write")
+    assert adapter.capabilities.supports("forwarding_mirroring_write")
     assert adapter.capabilities.supports("static_hosts_write")
     assert adapter.capabilities.supports("system_configuration_write")
-    assert not adapter.capabilities.supports("acl_write")
+    assert adapter.capabilities.supports("acl_write")
+    assert adapter.capabilities.supports("vlan_table_write")
     assert transport.requests == [("GET", "/sys.b"), ("GET", "/sys.b")]
 
 
@@ -2094,7 +2095,10 @@ def test_shared_decoder_model_gates_rb260gsp_health_and_poe_fields() -> None:
     assert not adapter.capabilities.supports("port_configuration_write")
     assert not adapter.capabilities.supports("device_name_write")
     assert not adapter.capabilities.supports("rstp_port_enable_write")
+    assert not adapter.capabilities.supports("rstp_bridge_write")
     assert not adapter.capabilities.supports("forwarding_port_policy_write")
+    assert not adapter.capabilities.supports("forwarding_matrix_write")
+    assert not adapter.capabilities.supports("forwarding_mirroring_write")
     assert not adapter.capabilities.supports("vlan_port_policy_write")
     assert not adapter.capabilities.supports("vlan_table_write")
     assert not adapter.capabilities.supports("snmp_metadata_write")
@@ -2954,7 +2958,7 @@ def test_rstp_precondition_distinguishes_wire_flags_with_same_normalized_type() 
     assert transport.requests == [("GET", "/sys.b"), ("GET", "/rstp.b")]
 
 
-def test_adapter_bridge_write_is_complete_and_verified_but_not_advertised() -> None:
+def test_adapter_bridge_write_is_complete_verified_and_advertised() -> None:
     identity = identity_from_system(parse_payload(fixture_payload()))
     assert identity is not None
     before = rstp_from_payloads(
@@ -2986,7 +2990,7 @@ def test_adapter_bridge_write_is_complete_and_verified_but_not_advertised() -> N
     assert result.changed
     assert result.value.bridge_priority == 0x9000
     assert transport.request_details[2][2] == b"{prio:0x9000,cost:0x00,frmc:0x00}"
-    assert not adapter.capabilities.supports("rstp_bridge_write")
+    assert adapter.capabilities.supports("rstp_bridge_write")
 
 
 def test_rstp_decoder_handles_all_combined_states_and_rejects_roles() -> None:
@@ -3533,6 +3537,8 @@ def test_vlan_write_state_preserves_wire_order_while_public_read_stays_sorted() 
 
     assert [row.vlan_id for row in state.rows] == [20, 10]
     assert [vlan.vlan_id for vlan in public] == [10, 20]
+    assert [vlan.table_position for vlan in public] == [1, 0]
+    assert all("table_position" not in vlan.model_dump(mode="json") for vlan in public)
 
 
 def test_vlan_decoders_reject_invalid_values() -> None:
@@ -3574,10 +3580,10 @@ def test_vlan_table_encoder_posts_complete_rows_and_preserves_port_6() -> None:
     content = encode_vlans(desired, before, identity)
 
     assert content == (
-        b"[{vid:0x000a,ivl:0x01,igmp:0x01,"
-        b"prt:[0x00,0x01,0x03,0x03,0x03,0x02]},"
-        b"{vid:0x0014,ivl:0x01,igmp:0x00,"
-        b"prt:[0x00,0x03,0x01,0x01,0x03,0x02]}]"
+        b"[{vid:0x0014,ivl:0x01,igmp:0x00,"
+        b"prt:[0x00,0x03,0x01,0x01,0x03,0x02]},"
+        b"{vid:0x000a,ivl:0x01,igmp:0x01,"
+        b"prt:[0x00,0x01,0x03,0x03,0x03,0x02]}]"
     )
 
     changed_port_6 = list(desired[0].ports)
@@ -3602,6 +3608,27 @@ def test_vlan_table_encoder_posts_complete_rows_and_preserves_port_6() -> None:
         encode_vlans((*desired, added), before, identity)
     with pytest.raises(InvalidOperationError, match="management port 6 membership"):
         encode_vlans((before[1],), before, identity)
+
+    appended = added.model_copy(
+        update={
+            "ports": tuple(
+                port.model_copy(update={"mode": VlanMembershipMode.NOT_MEMBER})
+                if port.port_number == 6
+                else port
+                for port in added.ports
+            )
+        }
+    )
+    appended_content = encode_vlans((*desired, appended), before, identity)
+    assert appended_content.index(b"vid:0x0014") < appended_content.index(b"vid:0x000a")
+    assert appended_content.index(b"vid:0x000a") < appended_content.index(b"vid:0x001e")
+
+    duplicate_position = (
+        desired[0].model_copy(update={"table_position": 0}),
+        desired[1].model_copy(update={"table_position": 0}),
+    )
+    with pytest.raises(InvalidOperationError, match="table positions must be unique"):
+        encode_vlans(duplicate_position, before, identity)
 
 
 def test_adapter_replaces_vlan_table_with_identity_stale_noop_and_readback_guards() -> None:
@@ -3660,6 +3687,26 @@ def test_adapter_replaces_vlan_table_with_identity_stale_noop_and_readback_guard
         stale_adapter.replace_vlans(desired, expected_current=stale)
     assert stale_transport.requests == [("GET", "/sys.b"), ("GET", "/vlan.b")]
 
+    stale_order_transport = FakeTransport((fixture_payload(), vlan_fixture_payload()))
+    stale_order_adapter = CSS106Plugin(
+        transport_factory=lambda connection: stale_order_transport  # type: ignore[arg-type]
+    ).create(
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+    stale_order = tuple(
+        vlan.model_copy(update={"table_position": 1 - (vlan.table_position or 0)})
+        for vlan in before
+    )
+    assert [vlan.model_dump(mode="json") for vlan in stale_order] == [
+        vlan.model_dump(mode="json") for vlan in before
+    ]
+    with pytest.raises(InvalidOperationError, match="changed since the expected baseline"):
+        stale_order_adapter.replace_vlans(desired, expected_current=stale_order)
+    assert stale_order_transport.requests == [("GET", "/sys.b"), ("GET", "/vlan.b")]
+
     mismatch_transport = FakeTransport(
         (fixture_payload(), vlan_fixture_payload(), b"", vlan_fixture_payload())
     )
@@ -3687,7 +3734,11 @@ def test_adapter_replaces_vlan_table_with_identity_stale_noop_and_readback_guard
         policy=FirmwareSafetyPolicy(),
         support=plugin.support_records()[0],
     )
-    assert vlans_from_payload(parse_table_payload(reordered_payload), identity) == desired
+    reordered = vlans_from_payload(parse_table_payload(reordered_payload), identity)
+    assert [vlan.model_dump(mode="json") for vlan in reordered] == [
+        vlan.model_dump(mode="json") for vlan in desired
+    ]
+    assert reordered != desired
     with pytest.raises(ProtocolError, match="full-table read-back"):
         reordered_adapter.replace_vlans(desired, expected_current=before)
 

@@ -31,10 +31,17 @@ swosctl snmp metadata set --contact "Network Operations" --device office
 swosctl snmp metadata set --location "" --device office
 swosctl host add --mac 02:00:00:00:00:05 --vlan 10 --port 5 --device office
 swosctl host remove --mac 02:00:00:00:00:05 --vlan 10 --device office
+swosctl acl add --ingress-port 5 --drop --device office
+swosctl acl remove 1 --device office
 swosctl rstp configure 5 --state disabled --device office
+swosctl rstp configure-bridge --bridge-priority 36864 --device office
+swosctl rstp configure-bridge --cost-mode long --forward-reserved-multicast off --device office
 swosctl forwarding configure 5 --lock on --device office
 swosctl forwarding configure 5 --lock-on-first off --egress-rate-bps 1000000 --device office
 swosctl forwarding configure 5 --egress-unlimited --device office
+swosctl forwarding configure-matrix 5 --destination-port 1 --destination-port 4 --device office
+swosctl forwarding configure-mirroring 5 --ingress on --target-port 4 --device office
+swosctl forwarding configure-mirroring 5 --ingress off --no-target --device office
 swosctl vlan configure-port 5 --egress strip --device office
 swosctl vlan set 10 --igmp-snooping on --port-mode 5=strip --device office
 swosctl vlan remove 10 --device office
@@ -90,14 +97,22 @@ second write.
 RSTP and forwarding configuration commands are direct, non-interactive
 read/plan/write operations. They pass the initial read as a precondition, so an
 intervening configuration change aborts before POST. Only ports 1-5 are accepted.
-The CSS106 profile advertises RSTP enable plus lock, lock-on-first, and egress
-rate; bridge-global, matrix, and mirroring mutation remains unavailable.
+The CSS106 profile advertises RSTP enable and bridge-global configuration plus
+lock, lock-on-first, egress rate, matrix, and mirroring mutation. Matrix
+destinations and mirror sources/targets accept only ports 1-5; a matrix row's
+existing port-6 relationship is preserved automatically. Omitting every
+`--destination-port` explicitly clears all Ethernet destinations while still
+preserving that port-6 relationship.
+
+Bridge-global, forwarding-matrix/mirroring, ACL-table, and VLAN-table commands
+can disrupt switching or management and may require a manual factory reset if a
+device partially applies a write. Commands do not prompt. Inspect current state
+and maintain an independent recovery path before using them.
 
 `vlan configure-port` accepts only ports 1-5 and passes the complete initial
 per-port policy as its write precondition. `vlan set` and `vlan remove` plan a
 full-table replacement without exposing port 6 as an option. CSS106 keeps the
-`vlan_table_write` capability disabled pending hardware validation, so those
-table commands currently fail closed before adapter dispatch on that profile.
+`vlan_table_write` capability advertised for the exact CSS106 profile.
 
 Static-host add updates the exact MAC/VLAN key in place and accepts repeatable
 `--port` options restricted to ports 1-5. CLI table mutations pass their read
@@ -106,8 +121,7 @@ table mutation returns the complete verified table in JSON output.
 
 Typed `acl add` and numbered `acl remove` commands are implemented, including
 repeatable `--ingress-port` and `--redirect-port` options. ACL ingress cannot
-include management port 6. These commands require an `acl_write` capability;
-CSS106 does not currently advertise it pending harmless hardware validation.
+include management port 6. The exact CSS106 profile advertises `acl_write`.
 
 Port configuration writes accept only Ethernet ports 1-5. Port 6 is the SFP
 management path and cannot be renamed or configured. Forced negotiation requires

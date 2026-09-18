@@ -40,6 +40,7 @@ markers = [
   "destructive: integration tests that modify a device",
   "password_rotation: separately gated administrator password rotation test",
   "management_reconnect: separately gated management lockout/reconnect tests",
+  "high_risk_tables: separately gated ACL/VLAN/RSTP-global/matrix/mirroring tests",
 ]
 
 [tool.coverage.run]

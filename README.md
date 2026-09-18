@@ -96,6 +96,9 @@ swosctl igmp list --device office
 swosctl acl list --device office
 swosctl rstp show --device office
 swosctl rstp configure 5 --state enabled --device office
+swosctl rstp configure-bridge --bridge-priority 36864 --device office
+swosctl forwarding configure-matrix 5 --destination-port 1 --device office
+swosctl forwarding configure-mirroring 5 --ingress on --target-port 4 --device office
 swosctl snmp show --device office
 swosctl snmp metadata set --contact "Network Operations" --device office
 swosctl snmp metadata set --location "" --device office
@@ -155,7 +158,7 @@ Currently supported:
 
 | Device | Product code | Firmware | Build | Operations |
 | --- | --- | --- | --- | --- |
-| RB260GS | `CSS106-5G-1S` | `2.19` | `0x6a181cd5` | Complete local reads; guarded password, system, port, per-port VLAN, RSTP enable, forwarding policy, name, SNMP metadata, and static-host writes |
+| RB260GS | `CSS106-5G-1S` | `2.19` | `0x6a181cd5` | Complete local reads; guarded password, system, port, VLAN, RSTP, forwarding, ACL, name, SNMP metadata, and static-host writes |
 
 The supported read surface includes system, management, health, port
 configuration/state, complete statistics, SFP diagnostics, forwarding, port
@@ -169,25 +172,23 @@ fresh adapter state to match the caller's expected baseline. Static-host targets
 are limited to Ethernet ports 1-5; port 6 is reserved for SFP management. SNMP
 writes preserve the raw enabled and community fields read from the device.
 
-Per-port RSTP enable and forwarding lock, lock-on-first, and egress-rate writes
-are exposed for ports 1-5. They require the adapter's fresh configuration to
-match the CLI baseline, preserve the complete endpoint group, skip no-ops, and
-verify complete-group readback. Port 6's RSTP bit, forwarding row, and every
-destination relationship involving port 6 are immutable. Port 6 cannot be a
-mirror source or target. Bridge-global, forwarding-matrix, and mirroring writes
-remain capability-disabled pending dedicated hardware validation.
+Per-port RSTP enable, bridge-global RSTP, forwarding lock, lock-on-first,
+egress-rate, matrix, and mirroring writes are exposed. They require the
+adapter's fresh configuration to match the CLI baseline, preserve the complete
+endpoint group, skip no-ops, and verify complete-group readback. Port 6's RSTP
+bit, forwarding row, and every destination relationship involving port 6 are
+immutable. Port 6 cannot be a mirror source or target.
 
 Per-port VLAN policy writes cover `vlan`, `vlni`, `dvid`, `fvid`, and `vlnh`
 for Ethernet ports 1-5. They require an exact expected baseline, preserve all
 five policy values for management port 6, skip no-ops, and verify complete-group
 readback. Guarded whole-table `/vlan.b` replacement is implemented with the same
 identity, baseline, no-op, and full readback checks. Every desired table must
-preserve port 6 membership for every VLAN ID. The `vlan_table_write` capability
-remains disabled pending dedicated hardware validation.
+preserve port 6 membership for every VLAN ID.
 
-Guarded ACL replacement and typed CLI mutation commands are implemented, but
-the exact CSS106 profile does not advertise `acl_write`. ACL writes remain
-disabled until a no-effect rule can be validated and restored on hardware.
+Guarded ACL replacement and typed CLI mutation commands are exposed. ACL ingress
+is restricted to Ethernet ports 1-5; full-table writes require an exact baseline
+and verify exact ordered readback.
 
 ## License
 

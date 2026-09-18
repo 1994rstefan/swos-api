@@ -1536,7 +1536,7 @@ requires-dist = [{ name = "swos-core", editable = "packages/core" }]
 
 [[package]]
 name = "swos-cli"
-version = "0.11.0"
+version = "0.12.0"
 source = { editable = "packages/cli" }
 dependencies = [
     { name = "platformdirs" },
@@ -1559,7 +1559,7 @@ requires-dist = [
 
 [[package]]
 name = "swos-core"
-version = "0.11.0"
+version = "0.12.0"
 source = { editable = "packages/core" }
 dependencies = [
     { name = "httpx" },
@@ -1574,7 +1574,7 @@ requires-dist = [
 
 [[package]]
 name = "swos-device-css106"
-version = "2.19.post16"
+version = "2.19.post17"
 source = { editable = "packages/devices/css106" }
 dependencies = [
     { name = "swos-core" },

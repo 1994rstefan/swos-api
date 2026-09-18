@@ -44,6 +44,19 @@ Management lockout and reconnect tests have their own third gate:
 pytest --run-integration --run-destructive --run-management-reconnect -m management_reconnect
 ```
 
+ACL/VLAN table, bridge-global RSTP, forwarding-matrix, and mirroring tests have
+a different third gate and must be selected explicitly:
+
+```bash
+pytest --run-integration --run-destructive --run-high-risk-tables -m high_risk_tables
+```
+
+These tests can corrupt global switch tables or interrupt management and may
+require a manual factory reset if the device rejects, partially applies, or
+cannot restore a write. Do not run them on a production switch. The extra flag
+does not weaken any link-state, root-bridge, management-port, baseline, or
+cleanup check.
+
 The admin-MAC test runs only when the override is unset, sets it to the exact
 physical system MAC, verifies the reboot through same-URL reconnect and exact
 full-state readback, and clears the override through the same guarded reconnect.
@@ -96,11 +109,10 @@ overwrite any third state. Port tests run only after confirming that their
 target is link-down.
 Each test changes one setting at a time. The name test uses Ethernet port 5 by default;
 select another Ethernet port (1-5 only) with `SWOS_INTEGRATION_WRITE_PORT`.
-The configuration, RSTP, and forwarding tests always target down port 5. Port 6
-is the SFP management path and is always rejected. The hardware tests never
-disable an Ethernet port, change negotiation, alter forwarding destinations, or
-configure mirroring.
-The VLAN table is never changed by hardware tests, and every VLAN policy test
+The ordinary configuration, per-port RSTP, and forwarding-policy tests always
+target down port 5. Port 6 is the SFP management path and is always rejected.
+The hardware tests never disable an Ethernet port or change negotiation. Every
+ordinary VLAN policy test
 asserts that the SFP port-6 policy remains identical. System tests do not change
 address mode, static IP, management VLAN, allow-from policy, or admin MAC unless
 the separately gated management reconnect marker is selected.
@@ -109,3 +121,27 @@ Static-host, RSTP, forwarding, VLAN-policy, and system-mask cleanup passes the
 verified post-mutation state as the restore precondition. A concurrent
 configuration change therefore aborts the `finally` cleanup rather than being
 accepted as a new baseline and overwritten.
+
+The separately gated high-risk tests use link-down port 5. ACL appends one rule
+whose only ingress is port 5 and which has no redirect, drop, mirror, rate, or
+rewrite action, then restores the exact table. It rechecks the link immediately
+before each POST, so the temporary rule remains harmless even if link state
+changes unexpectedly. VLAN runs only when the original table is empty. It
+creates VID 4094 first, then performs a second guarded write adding VID 4093
+while proving the first row and raw order remain exact; both rows have only port
+5 membership. Cleanup accepts only the exact first-stage table, exact
+second-stage table, or already-empty original.
+
+Bridge RSTP uses separate reversible cycles for priority (normally 32768 to
+36864), cost mode, and reserved multicast forwarding. Every cycle requires the
+switch to be its directly observed root, `SWOS_INTEGRATION_MANAGEMENT_PORT=6`,
+port 6 link-up and management-allowed, and Ethernet ports 1-5 link-down. The
+full topology is read again immediately before mutation and restoration. Matrix
+testing removes one non-port-6 destination from source port 5. Mirroring runs
+only with ports 4 and 5 down and no existing mirror policy, then tests ingress
+and egress source 5 to target 4 in separate cycles with immediate link rechecks.
+All cleanup paths fresh-read and restore only exact expected temporary state,
+accept an already restored original, and refuse unknown state without another
+write. Every port-6 relationship remains exact throughout. These are
+representative hardware paths; fixture tests cover additional field
+combinations.

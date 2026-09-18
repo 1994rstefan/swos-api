@@ -22,6 +22,8 @@ from swos_core import (
     DeviceNameUpdate,
     ForcedPortNegotiation,
     ForwardingInfo,
+    ForwardingMatrixUpdate,
+    ForwardingMirroringUpdate,
     ForwardingPortPolicyUpdate,
     HostEntry,
     HostEntryType,
@@ -35,6 +37,8 @@ from swos_core import (
     PortInfo,
     PortNameUpdate,
     PortVlanPolicyUpdate,
+    RstpBridgeUpdate,
+    RstpCostMode,
     RstpInfo,
     RstpPortEnableUpdate,
     SnmpInfo,
@@ -1083,6 +1087,120 @@ def forwarding_configure(
     renderer.success(data, human=human)
 
 
+@forwarding_app.command("configure-matrix")
+def forwarding_configure_matrix(
+    ctx: typer.Context,
+    number: Annotated[int, typer.Argument(min=1, max=5, help="Ethernet source port number (1-5).")],
+    destination_port: Annotated[
+        list[int] | None,
+        typer.Option(
+            "--destination-port",
+            min=1,
+            max=5,
+            help=(
+                "Allowed Ethernet destination (repeatable; omit to clear Ethernet destinations; "
+                "port 6 is preserved automatically)."
+            ),
+        ),
+    ] = None,
+) -> None:
+    """Set and verify one complete forwarding-matrix row."""
+
+    if destination_port is not None and len(destination_port) != len(set(destination_port)):
+        raise typer.BadParameter("--destination-port cannot repeat a port")
+    cli_context: CliContext = ctx.ensure_object(CliContext)
+    renderer = OutputRenderer(cli_context.configuration.settings.output)
+    try:
+        connected_device = _connect_device(cli_context)
+        current = connected_device.get_forwarding()
+        current_port = next(port for port in current.ports if port.number == number)
+        destinations = tuple(sorted(destination_port or ()))
+        if 6 in current_port.destination_port_numbers:
+            destinations = (*destinations, 6)
+        result = connected_device.set_forwarding_matrix(
+            ForwardingMatrixUpdate(number=number, destination_port_numbers=destinations),
+            expected_current=current,
+        )
+    except ConfigurationError as exc:
+        renderer.error("configuration_error", str(exc))
+        raise typer.Exit(code=2) from exc
+    except SwOSError as exc:
+        renderer.error(_error_code(exc), str(exc))
+        raise typer.Exit(code=1) from exc
+
+    port = next(port for port in result.value.ports if port.number == number)
+    _render_forwarding_write(
+        renderer,
+        result,
+        human=(
+            f"Port {number} forwarding matrix "
+            f"{'changed' if result.changed else 'already configured; no change required'}.\n"
+            f"Destinations: {_ports(port.destination_port_numbers)}"
+        ),
+    )
+
+
+@forwarding_app.command("configure-mirroring")
+def forwarding_configure_mirroring(
+    ctx: typer.Context,
+    source_port_number: Annotated[
+        int, typer.Argument(min=1, max=5, help="Ethernet mirror source port (1-5).")
+    ],
+    ingress: Annotated[
+        ToggleOption | None, typer.Option("--ingress", help="Set ingress mirroring on or off.")
+    ] = None,
+    egress: Annotated[
+        ToggleOption | None, typer.Option("--egress", help="Set egress mirroring on or off.")
+    ] = None,
+    target_port: Annotated[
+        int | None, typer.Option("--target-port", min=1, max=5, help="Ethernet mirror target.")
+    ] = None,
+    no_target: Annotated[
+        bool, typer.Option("--no-target", help="Clear the mirror target.")
+    ] = False,
+) -> None:
+    """Set and verify mirroring for one source and the global target."""
+
+    if target_port is not None and no_target:
+        raise typer.BadParameter("--target-port cannot be combined with --no-target")
+    if ingress is None and egress is None and target_port is None and not no_target:
+        raise typer.BadParameter("At least one mirroring option is required")
+    target: int | Literal["none"] | None = "none" if no_target else target_port
+    cli_context: CliContext = ctx.ensure_object(CliContext)
+    renderer = OutputRenderer(cli_context.configuration.settings.output)
+    try:
+        connected_device = _connect_device(cli_context)
+        current = connected_device.get_forwarding()
+        result = connected_device.set_forwarding_mirroring(
+            ForwardingMirroringUpdate(
+                source_port_number=source_port_number,
+                mirror_ingress=None if ingress is None else ingress is ToggleOption.ON,
+                mirror_egress=None if egress is None else egress is ToggleOption.ON,
+                mirror_target_port=target,
+            ),
+            expected_current=current,
+        )
+    except ConfigurationError as exc:
+        renderer.error("configuration_error", str(exc))
+        raise typer.Exit(code=2) from exc
+    except SwOSError as exc:
+        renderer.error(_error_code(exc), str(exc))
+        raise typer.Exit(code=1) from exc
+
+    source = next(port for port in result.value.ports if port.number == source_port_number)
+    _render_forwarding_write(
+        renderer,
+        result,
+        human=(
+            f"Port {source_port_number} mirroring "
+            f"{'changed' if result.changed else 'already configured; no change required'}.\n"
+            f"Ingress: {_yes_no(source.mirror_ingress)}\n"
+            f"Egress: {_yes_no(source.mirror_egress)}\n"
+            f"Target: {result.value.mirror_target_port or '-'}"
+        ),
+    )
+
+
 @igmp_app.command("list")
 def igmp_list(ctx: typer.Context) -> None:
     """List dynamically learned multicast groups."""
@@ -1512,6 +1630,72 @@ def rstp_configure(
     renderer.success(data, human=human)
 
 
+@rstp_app.command("configure-bridge")
+def rstp_configure_bridge(
+    ctx: typer.Context,
+    bridge_priority: Annotated[
+        int | None,
+        typer.Option(
+            "--bridge-priority",
+            min=0,
+            max=0xF000,
+            help="Bridge priority (0..61440 in increments of 4096).",
+        ),
+    ] = None,
+    cost_mode: Annotated[RstpCostMode | None, typer.Option("--cost-mode")] = None,
+    forward_reserved_multicast: Annotated[
+        ToggleOption | None,
+        typer.Option("--forward-reserved-multicast", help="Forward reserved multicast on or off."),
+    ] = None,
+) -> None:
+    """Set and verify bridge-global RSTP configuration."""
+
+    if bridge_priority is None and cost_mode is None and forward_reserved_multicast is None:
+        raise typer.BadParameter("At least one RSTP bridge option is required")
+    if bridge_priority is not None and bridge_priority % 0x1000:
+        raise typer.BadParameter("--bridge-priority must be a multiple of 4096")
+    update = RstpBridgeUpdate(
+        bridge_priority=bridge_priority,
+        cost_mode=cost_mode,
+        forward_reserved_multicast=(
+            None
+            if forward_reserved_multicast is None
+            else forward_reserved_multicast is ToggleOption.ON
+        ),
+    )
+    cli_context: CliContext = ctx.ensure_object(CliContext)
+    renderer = OutputRenderer(cli_context.configuration.settings.output)
+    try:
+        connected_device = _connect_device(cli_context)
+        current = connected_device.get_rstp()
+        result = connected_device.set_rstp_bridge(update, expected_current=current)
+    except ConfigurationError as exc:
+        renderer.error("configuration_error", str(exc))
+        raise typer.Exit(code=2) from exc
+    except SwOSError as exc:
+        renderer.error(_error_code(exc), str(exc))
+        raise typer.Exit(code=1) from exc
+
+    data: dict[str, Any] = {
+        "changed": result.changed,
+        "rstp": result.value.model_dump(mode="json"),
+    }
+    if result.warnings:
+        data["warnings"] = [warning.model_dump(mode="json") for warning in result.warnings]
+    action = "changed" if result.changed else "already configured; no change required"
+    human = "\n".join(
+        [
+            f"RSTP bridge configuration {action}.",
+            f"Bridge Priority: 0x{result.value.bridge_priority:04x}",
+            f"Cost Mode: {result.value.cost_mode.value}",
+            f"Forward Reserved Multicast: {_yes_no(result.value.forward_reserved_multicast)}",
+        ]
+    )
+    if result.warnings:
+        human += "\n" + "\n".join(f"Warning: {warning.message}" for warning in result.warnings)
+    renderer.success(data, human=human)
+
+
 @snmp_app.command("show")
 def snmp_show(ctx: typer.Context) -> None:
     """Show normalized SNMP service configuration."""
@@ -1897,6 +2081,22 @@ def _render_host_write(
     if result.warnings:
         message += "\n" + "\n".join(f"Warning: {warning.message}" for warning in result.warnings)
     renderer.success(data, human=message)
+
+
+def _render_forwarding_write(
+    renderer: OutputRenderer,
+    result: OperationResult[ForwardingInfo],
+    *,
+    human: str,
+) -> None:
+    data: dict[str, Any] = {
+        "changed": result.changed,
+        "forwarding": result.value.model_dump(mode="json"),
+    }
+    if result.warnings:
+        data["warnings"] = [warning.model_dump(mode="json") for warning in result.warnings]
+        human += "\n" + "\n".join(f"Warning: {warning.message}" for warning in result.warnings)
+    renderer.success(data, human=human)
 
 
 def _render_acl_write(

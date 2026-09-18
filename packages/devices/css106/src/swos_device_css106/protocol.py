@@ -1436,6 +1436,7 @@ def vlans_from_payload(rows: list[SwOSValue], identity: DeviceIdentity) -> tuple
     try:
         vlans = tuple(
             VlanInfo(
+                table_position=position,
                 vlan_id=row.vlan_id,
                 independent_learning=bool(row.independent_learning),
                 igmp_snooping=bool(row.igmp_snooping),
@@ -1447,7 +1448,7 @@ def vlans_from_payload(rows: list[SwOSValue], identity: DeviceIdentity) -> tuple
                     for index, mode in enumerate(row.port_modes)
                 ),
             )
-            for row in state.rows
+            for position, row in enumerate(state.rows)
         )
     except ValidationError as exc:
         raise ProtocolError("CSS106 VLAN table contains invalid values") from exc
@@ -1514,7 +1515,12 @@ def encode_vlans(
 
     membership_modes = tuple(VlanMembershipMode)
     rows = []
-    for vlan in vlans:
+    positioned = sorted(
+        (vlan for vlan in vlans if vlan.table_position is not None),
+        key=lambda vlan: vlan.table_position if vlan.table_position is not None else -1,
+    )
+    unpositioned = [vlan for vlan in vlans if vlan.table_position is None]
+    for vlan in (*positioned, *unpositioned):
         port_modes = ",".join(f"0x{membership_modes.index(port.mode):02x}" for port in vlan.ports)
         rows.append(
             f"{{vid:0x{vlan.vlan_id:04x},ivl:0x{int(vlan.independent_learning):02x},"
@@ -1666,10 +1672,18 @@ def _validate_vlan_table(vlans: tuple[VlanInfo, ...], port_count: int, label: st
     vlan_ids = tuple(vlan.vlan_id for vlan in vlans)
     if vlan_ids != tuple(sorted(set(vlan_ids))):
         raise InvalidOperationError(f"{label} VLAN IDs must be unique and in ascending order")
+    positions = tuple(vlan.table_position for vlan in vlans if vlan.table_position is not None)
+    if len(positions) != len(set(positions)):
+        raise InvalidOperationError(f"{label} table positions must be unique")
     expected_ports = tuple(range(1, port_count + 1))
     for index, vlan in enumerate(vlans):
         try:
-            validated = VlanInfo.model_validate(vlan.model_dump(mode="python"))
+            validated = VlanInfo.model_validate(
+                {
+                    **vlan.model_dump(mode="python"),
+                    "table_position": vlan.table_position,
+                }
+            )
         except ValidationError as exc:
             raise InvalidOperationError(f"{label} row {index + 1} is invalid: {exc}") from exc
         if validated != vlan:

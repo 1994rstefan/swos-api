@@ -11,6 +11,8 @@ from swos_core.models import (
     DeviceNameUpdate,
     ForcedPortNegotiation,
     ForwardingInfo,
+    ForwardingMatrixUpdate,
+    ForwardingMirroringUpdate,
     ForwardingPortPolicyUpdate,
     HostEntry,
     IgmpGroup,
@@ -28,6 +30,7 @@ from swos_core.models import (
     PortTrafficStatistics,
     PortVlanInfo,
     PortVlanPolicyUpdate,
+    RstpBridgeUpdate,
     RstpInfo,
     RstpPortEnableUpdate,
     RstpPortInfo,
@@ -478,6 +481,16 @@ class FakeDevice:
         value = before.model_copy(update={"ports": ports})
         return OperationResult[RstpInfo](changed=value != before, value=value)
 
+    def set_rstp_bridge(
+        self,
+        update: RstpBridgeUpdate,
+        *,
+        expected_current: RstpInfo,
+    ) -> OperationResult[RstpInfo]:
+        assert expected_current == self.get_rstp()
+        value = expected_current.model_copy(update=update.model_dump(exclude_none=True))
+        return OperationResult[RstpInfo](changed=value != expected_current, value=value)
+
     def set_forwarding_port_policy(
         self,
         update: ForwardingPortPolicyUpdate,
@@ -495,6 +508,46 @@ class FakeDevice:
         )
         value = before.model_copy(update={"ports": ports})
         return OperationResult[ForwardingInfo](changed=value != before, value=value)
+
+    def set_forwarding_matrix(
+        self,
+        update: ForwardingMatrixUpdate,
+        *,
+        expected_current: ForwardingInfo,
+    ) -> OperationResult[ForwardingInfo]:
+        assert expected_current == self.get_forwarding()
+        ports = tuple(
+            port.model_copy(update={"destination_port_numbers": update.destination_port_numbers})
+            if port.number == update.number
+            else port
+            for port in expected_current.ports
+        )
+        value = expected_current.model_copy(update={"ports": ports})
+        return OperationResult[ForwardingInfo](changed=value != expected_current, value=value)
+
+    def set_forwarding_mirroring(
+        self,
+        update: ForwardingMirroringUpdate,
+        *,
+        expected_current: ForwardingInfo,
+    ) -> OperationResult[ForwardingInfo]:
+        assert expected_current == self.get_forwarding()
+        source_changes: dict[str, object] = {}
+        if update.mirror_ingress is not None:
+            source_changes["mirror_ingress"] = update.mirror_ingress
+        if update.mirror_egress is not None:
+            source_changes["mirror_egress"] = update.mirror_egress
+        ports = tuple(
+            port.model_copy(update=source_changes)
+            if port.number == update.source_port_number
+            else port
+            for port in expected_current.ports
+        )
+        target = expected_current.mirror_target_port
+        if update.mirror_target_port is not None:
+            target = None if update.mirror_target_port == "none" else update.mirror_target_port
+        value = expected_current.model_copy(update={"ports": ports, "mirror_target_port": target})
+        return OperationResult[ForwardingInfo](changed=value != expected_current, value=value)
 
     def replace_static_hosts(
         self,
@@ -1373,6 +1426,75 @@ def test_forwarding_configure_is_direct_and_returns_verified_state(monkeypatch) 
     assert "unlimited" in cleared.stdout
 
 
+def test_forwarding_matrix_preserves_port_6_and_returns_verified_state(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    mock_registry(monkeypatch)
+
+    result = runner.invoke(
+        app,
+        [
+            "forwarding",
+            "configure-matrix",
+            "1",
+            "--destination-port",
+            "1",
+            "--url",
+            "http://192.0.2.1",
+            "-ojson",
+        ],
+    )
+
+    assert result.exit_code == 0
+    data = json.loads(result.stdout)["data"]
+    assert data["changed"] is True
+    assert data["forwarding"]["ports"][0]["destination_port_numbers"] == [1, 6]
+
+
+def test_forwarding_matrix_allows_explicit_empty_ethernet_destinations(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    mock_registry(monkeypatch)
+
+    result = runner.invoke(
+        app,
+        [
+            "forwarding",
+            "configure-matrix",
+            "2",
+            "--url",
+            "http://192.0.2.1",
+            "-ojson",
+        ],
+    )
+
+    assert result.exit_code == 0
+    data = json.loads(result.stdout)["data"]
+    assert data["changed"] is True
+    assert data["forwarding"]["ports"][1]["destination_port_numbers"] == [6]
+
+
+def test_forwarding_mirroring_configures_nonmanagement_source_and_target(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    mock_registry(monkeypatch)
+
+    result = runner.invoke(
+        app,
+        [
+            "forwarding",
+            "configure-mirroring",
+            "2",
+            "--ingress",
+            "on",
+            "--target-port",
+            "1",
+            "--url",
+            "http://192.0.2.1",
+            "-ojson",
+        ],
+    )
+
+    assert result.exit_code == 0
+    data = json.loads(result.stdout)["data"]
+    assert data["forwarding"]["ports"][1]["mirror_ingress"] is True
+    assert data["forwarding"]["mirror_target_port"] == 1
+
+
 def test_igmp_list_human_and_json_output(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     mock_registry(monkeypatch)
 
@@ -1606,6 +1728,34 @@ def test_rstp_configure_is_direct_and_returns_verified_state(monkeypatch) -> Non
     assert data["rstp"]["ports"][0]["enabled"] is False
     assert no_op.exit_code == 0
     assert "no change required" in no_op.stdout
+
+
+def test_rstp_bridge_configure_returns_complete_verified_state(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    mock_registry(monkeypatch)
+
+    result = runner.invoke(
+        app,
+        [
+            "rstp",
+            "configure-bridge",
+            "--bridge-priority",
+            "36864",
+            "--cost-mode",
+            "long",
+            "--forward-reserved-multicast",
+            "on",
+            "--url",
+            "http://192.0.2.1",
+            "-ojson",
+        ],
+    )
+
+    assert result.exit_code == 0
+    data = json.loads(result.stdout)["data"]
+    assert data["changed"] is True
+    assert data["rstp"]["bridge_priority"] == 0x9000
+    assert data["rstp"]["cost_mode"] == "long"
+    assert data["rstp"]["forward_reserved_multicast"] is True
 
 
 def test_snmp_show_outputs_community_normally(monkeypatch) -> None:  # type: ignore[no-untyped-def]

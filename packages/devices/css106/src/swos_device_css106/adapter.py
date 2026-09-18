@@ -143,15 +143,20 @@ class CSS106Adapter:
             features.update(
                 {
                     "admin_password_write",
+                    "acl_write",
                     "device_name_write",
+                    "forwarding_matrix_write",
+                    "forwarding_mirroring_write",
+                    "forwarding_port_policy_write",
                     "port_configuration_write",
                     "port_name_write",
-                    "vlan_port_policy_write",
-                    "forwarding_port_policy_write",
+                    "rstp_bridge_write",
                     "rstp_port_enable_write",
                     "snmp_metadata_write",
                     "static_hosts_write",
                     "system_configuration_write",
+                    "vlan_port_policy_write",
+                    "vlan_table_write",
                 }
             )
         return DeviceCapabilities(features=frozenset(features))
