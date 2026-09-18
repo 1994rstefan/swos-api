@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 from swos_core.errors import InvalidOperationError, ProtocolError, UnsupportedFirmwareError
 from swos_core.models import (
+    AddressMode,
     DeviceConnection,
     DeviceNameUpdate,
     ForcedPortNegotiation,
@@ -16,6 +17,7 @@ from swos_core.models import (
     RstpBridgeUpdate,
     RstpPortEnableUpdate,
     SnmpMetadataUpdate,
+    SystemConfigurationUpdate,
     VlanInfo,
     VlanMembershipMode,
     VlanPortMembership,
@@ -36,7 +38,6 @@ from swos_device_css106.protocol import (
     acl_rules_from_payload,
     dynamic_hosts_from_payload,
     encode_acl_rules,
-    encode_device_name_update,
     encode_forwarding_matrix_update,
     encode_forwarding_mirroring_update,
     encode_forwarding_port_policy_update,
@@ -47,6 +48,7 @@ from swos_device_css106.protocol import (
     encode_rstp_port_enable_update,
     encode_snmp_metadata_update,
     encode_static_hosts,
+    encode_system_configuration_update,
     encode_vlans,
     forwarding_from_payload,
     identity_from_system,
@@ -61,12 +63,15 @@ from swos_device_css106.protocol import (
     sfp_from_payload,
     snmp_from_payload,
     static_hosts_from_payload,
+    system_configuration_write_state_from_payload,
     system_info_from_payload,
+    validate_device_name,
     vlan_table_write_state_from_payload,
     vlans_from_payload,
 )
 
 FIXTURE = Path(__file__).parent / "fixtures" / "sys.b"
+SYSTEM_WRITE_FIXTURE = Path(__file__).parent / "fixtures" / "sys_write.b"
 LINK_FIXTURE = Path(__file__).parent / "fixtures" / "link.b"
 STATS_FIXTURE = Path(__file__).parent / "fixtures" / "stats.b"
 FORWARDING_FIXTURE = Path(__file__).parent / "fixtures" / "fwd.b"
@@ -127,7 +132,49 @@ def renamed_link_payload(name: str) -> bytes:
 
 def renamed_system_payload(name: str) -> bytes:
     encoded = name.encode("ascii").hex().encode("ascii")
-    return fixture_payload().replace(b"4f666669636520537769746368", encoded, 1)
+    return (
+        fixture_payload()
+        .replace(b"4f666669636520537769746368", encoded, 1)
+        .replace(b"igmq:0x01", b"igmq:0x00")
+    )
+
+
+def configured_system_payload() -> bytes:
+    payload = fixture_payload()
+    replacements = (
+        (b"sip:0x0158a8c0", b"sip:0x0a0200c0"),
+        (b"amac:'000000000000'", b"amac:'020000000005'"),
+        (b"id:'4f666669636520537769746368'", b"id:'436f726520537769746368'"),
+        (b"alla:0x00000000", b"alla:0x006433c6"),
+        (b"allm:0x00", b"allm:0x18"),
+        (b"allp:0x3f", b"allp:0x23"),
+        (b"ivl:0x00", b"ivl:0x01"),
+        (b"igmp:0x00", b"igmp:0x01"),
+        (b"igmq:0x01", b"igmq:0x00"),
+        (b"igfl:0x00", b"igfl:0x02"),
+        (b"igve:0x00", b"igve:0x01"),
+        (b"pdsc:0x3f", b"pdsc:0x21"),
+    )
+    for old, new in replacements:
+        payload = payload.replace(old, new)
+    return payload
+
+
+def system_configuration_update() -> SystemConfigurationUpdate:
+    return SystemConfigurationUpdate(
+        static_ip="192.0.2.10",
+        admin_mac_address="02:00:00:00:00:05",
+        name="Core Switch",
+        allow_from="198.51.100.0",
+        allow_prefix_length=24,
+        allowed_port_numbers=(1, 2, 6),
+        independent_vlan_lookup=True,
+        igmp_enabled=True,
+        igmp_querier=False,
+        igmp_fast_leave_port_numbers=(2,),
+        igmp_version="v3",
+        discovery_protocol_port_numbers=(1, 6),
+    )
 
 
 def updated_snmp_payload(*, contact: str = "Ops", location: str = "Office") -> bytes:
@@ -256,6 +303,7 @@ def test_probe_and_adapter_normalize_system_data() -> None:
     assert not adapter.capabilities.supports("forwarding_matrix_write")
     assert not adapter.capabilities.supports("forwarding_mirroring_write")
     assert adapter.capabilities.supports("static_hosts_write")
+    assert adapter.capabilities.supports("system_configuration_write")
     assert not adapter.capabilities.supports("acl_write")
     assert transport.requests == [("GET", "/sys.b"), ("GET", "/sys.b")]
 
@@ -424,14 +472,148 @@ def test_link_encoders_reject_management_sfp_port_even_for_constructed_models() 
         )
 
 
-def test_device_name_encoder_emits_exact_sparse_system_write() -> None:
-    content, desired = encode_device_name_update(
+def test_system_configuration_encoder_emits_exact_full_ui_object() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+
+    content, desired = encode_system_configuration_update(
         parse_payload(fixture_payload()),
-        DeviceNameUpdate(name="Core Switch"),
+        identity,
+        system_configuration_update(),
     )
 
-    assert content == b"{id:'436f726520537769746368'}"
-    assert desired.raw_name == "436f726520537769746368"
+    assert content == SYSTEM_WRITE_FIXTURE.read_bytes().strip()
+    assert tuple(parse_payload(content)) == (
+        "iptp",
+        "sip",
+        "amac",
+        "id",
+        "alla",
+        "allm",
+        "allp",
+        "avln",
+        "ivl",
+        "igmp",
+        "igmq",
+        "igfl",
+        "igve",
+        "pdsc",
+    )
+    assert desired.static_ip == 0x0A0200C0
+    assert desired.allow_from == 0x006433C6
+    assert desired.admin_mac == "020000000005"
+    assert desired.igmp_version == 1
+    assert desired.allowed_ports_mask & 0x20
+    assert desired.discovery_protocol_mask & 0x20
+    assert not desired.igmp_fast_leave_mask & 0x20
+
+
+def test_system_configuration_encoder_maps_enums_and_wire_zero_values() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+
+    content, desired = encode_system_configuration_update(
+        parse_payload(fixture_payload()),
+        identity,
+        SystemConfigurationUpdate(
+            address_mode=AddressMode.STATIC,
+            static_ip="unset",
+            admin_mac_address="unset",
+            allow_from="unset",
+            allowed_vlan_id="unset",
+        ),
+    )
+
+    assert content.startswith(b"{iptp:0x01,sip:0x00,amac:'000000000000'")
+    assert b"alla:0x00" in content
+    assert b"avln:0x00" in content
+    assert desired.address_mode == 1
+
+
+def test_system_configuration_uses_ui_minimal_even_width_hex() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    content, _ = encode_system_configuration_update(
+        parse_payload(fixture_payload()),
+        identity,
+        SystemConfigurationUpdate(
+            allow_from="1.0.0.0",
+            allow_prefix_length=1,
+            allowed_vlan_id=256,
+        ),
+    )
+
+    assert b"alla:0x01" in content
+    assert b"allm:0x01" in content
+    assert b"avln:0x0100" in content
+    assert b"alla:0x00000001" not in content
+
+
+def test_system_configuration_forces_querier_off_when_snooping_is_off() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    data = parse_payload(fixture_payload())
+
+    state = system_configuration_write_state_from_payload(data, identity)
+    assert state.igmp_enabled == 0
+    assert state.igmp_querier == 0
+
+    name_content, name_desired = encode_system_configuration_update(
+        data,
+        identity,
+        SystemConfigurationUpdate(name="Core Switch"),
+    )
+    assert b"igmp:0x00,igmq:0x00" in name_content
+    assert name_desired.igmp_querier == 0
+
+    enabled_content, enabled_desired = encode_system_configuration_update(
+        data,
+        identity,
+        SystemConfigurationUpdate(igmp_enabled=True),
+    )
+    assert b"igmp:0x01,igmq:0x00" in enabled_content
+    assert enabled_desired.igmp_querier == 0
+
+    querier_content, querier_desired = encode_system_configuration_update(
+        data,
+        identity,
+        SystemConfigurationUpdate(igmp_enabled=True, igmp_querier=True),
+    )
+    assert b"igmp:0x01,igmq:0x01" in querier_content
+    assert querier_desired.igmp_querier == 1
+
+    disabled_content, disabled_desired = encode_system_configuration_update(
+        data,
+        identity,
+        SystemConfigurationUpdate(igmp_enabled=False, igmp_querier=True),
+    )
+    assert b"igmp:0x00,igmq:0x00" in disabled_content
+    assert disabled_desired.igmp_querier == 0
+
+
+def test_system_configuration_encoder_rejects_port_6_mask_changes() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    data = parse_payload(fixture_payload())
+
+    with pytest.raises(InvalidOperationError, match="must include port 6"):
+        encode_system_configuration_update(
+            data,
+            identity,
+            SystemConfigurationUpdate(allowed_port_numbers=(1, 2)),
+        )
+    with pytest.raises(InvalidOperationError, match="cannot change port 6"):
+        encode_system_configuration_update(
+            data,
+            identity,
+            SystemConfigurationUpdate(igmp_fast_leave_port_numbers=(6,)),
+        )
+    with pytest.raises(InvalidOperationError, match="cannot change port 6"):
+        encode_system_configuration_update(
+            data,
+            identity,
+            SystemConfigurationUpdate(discovery_protocol_port_numbers=(1,)),
+        )
 
 
 @pytest.mark.parametrize(
@@ -444,10 +626,7 @@ def test_device_name_encoder_emits_exact_sparse_system_write() -> None:
 )
 def test_device_name_encoder_rejects_unvalidated_values(name: str, message: str) -> None:
     with pytest.raises(InvalidOperationError, match=message):
-        encode_device_name_update(
-            parse_payload(fixture_payload()),
-            DeviceNameUpdate(name=name),
-        )
+        validate_device_name(name)
 
 
 @pytest.mark.parametrize(
@@ -705,7 +884,7 @@ def test_adapter_rejects_port_name_read_back_mismatch() -> None:
         adapter.set_port_name(PortNameUpdate(number=1, name="Uplink"))
 
 
-def test_adapter_sets_device_name_with_one_sparse_post_and_verifies_it() -> None:
+def test_adapter_sets_device_name_with_one_complete_system_post_and_verifies_it() -> None:
     identity = identity_from_system(parse_payload(fixture_payload()))
     assert identity is not None
     transport = FakeTransport((fixture_payload(), b"", renamed_system_payload("Core Switch")))
@@ -720,13 +899,17 @@ def test_adapter_sets_device_name_with_one_sparse_post_and_verifies_it() -> None
 
     assert result.changed
     assert result.value.name == "Core Switch"
+    assert result.value.igmp is not None
+    assert not result.value.igmp.querier_configured
     assert transport.requests == [
         ("GET", "/sys.b"),
         ("POST", "/sys.b"),
         ("GET", "/sys.b"),
     ]
     assert transport.request_details[1][2:] == (
-        b"{id:'436f726520537769746368'}",
+        b"{iptp:0x00,sip:0x0158a8c0,amac:'000000000000',"
+        b"id:'436f726520537769746368',alla:0x00,allm:0x00,allp:0x3f,"
+        b"avln:0x00,ivl:0x00,igmp:0x00,igmq:0x00,igfl:0x00,igve:0x00,pdsc:0x3f}",
         {"Content-Type": "text/plain"},
     )
 
@@ -788,6 +971,196 @@ def test_adapter_validates_device_name_before_transport() -> None:
 
     with pytest.raises(InvalidOperationError, match="printable ASCII"):
         adapter.set_device_name(DeviceNameUpdate(name="Cöre"))
+    assert transport.requests == []
+
+
+def test_adapter_sets_system_configuration_with_baseline_and_full_readback() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    before = system_info_from_payload(parse_payload(fixture_payload()), identity)
+    transport = FakeTransport((fixture_payload(), b"", configured_system_payload()))
+    adapter = CSS106Plugin(transport_factory=lambda connection: transport).create(  # type: ignore[arg-type]
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+
+    result = adapter.set_system_configuration(
+        system_configuration_update(), expected_current=before
+    )
+
+    assert result.changed
+    assert result.value.name == "Core Switch"
+    assert result.value.static_ip == "192.0.2.10"
+    assert result.value.management is not None
+    assert result.value.management.admin_mac_address == "02:00:00:00:00:05"
+    assert result.value.management.allowed_port_numbers == (1, 2, 6)
+    assert result.value.igmp is not None
+    assert result.value.igmp.version.value == "v3"
+    assert result.value.discovery_protocol_port_numbers == (1, 6)
+    assert result.warnings[0].code == "management_lockout_risk"
+    assert "admin MAC unset -> 02:00:00:00:00:05" in result.warnings[0].message
+    assert "allow from any -> 198.51.100.0/24" in result.warnings[0].message
+    assert "allowed ports 1,2,3,4,5,6 -> 1,2,6" in result.warnings[0].message
+    assert "outcome uncertain" in result.warnings[0].message
+    assert transport.requests == [("GET", "/sys.b"), ("POST", "/sys.b"), ("GET", "/sys.b")]
+    assert transport.request_details[1][2:] == (
+        SYSTEM_WRITE_FIXTURE.read_bytes().strip(),
+        {"Content-Type": "text/plain"},
+    )
+
+
+def test_adapter_system_configuration_stale_noop_and_readback_guards() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    before = system_info_from_payload(parse_payload(fixture_payload()), identity)
+
+    no_op_transport = FakeTransport(fixture_payload())
+    no_op_adapter = CSS106Plugin(
+        transport_factory=lambda connection: no_op_transport  # type: ignore[arg-type]
+    ).create(
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+    no_op = no_op_adapter.set_system_configuration(
+        SystemConfigurationUpdate(name="Office Switch"), expected_current=before
+    )
+    assert not no_op.changed
+    assert no_op_transport.requests == [("GET", "/sys.b")]
+
+    stale_transport = FakeTransport(fixture_payload())
+    stale_adapter = CSS106Plugin(
+        transport_factory=lambda connection: stale_transport  # type: ignore[arg-type]
+    ).create(
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+    with pytest.raises(InvalidOperationError, match="changed since the expected baseline"):
+        stale_adapter.set_system_configuration(
+            SystemConfigurationUpdate(name="Core Switch"),
+            expected_current=before.model_copy(update={"name": "Stale"}),
+        )
+    assert stale_transport.requests == [("GET", "/sys.b")]
+
+    mismatch_transport = FakeTransport((fixture_payload(), b"", fixture_payload()))
+    mismatch_adapter = CSS106Plugin(
+        transport_factory=lambda connection: mismatch_transport  # type: ignore[arg-type]
+    ).create(
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+    with pytest.raises(ProtocolError, match="complete-object read-back"):
+        mismatch_adapter.set_system_configuration(
+            SystemConfigurationUpdate(name="Core Switch"), expected_current=before
+        )
+
+
+def test_adapter_rejects_unsafe_system_management_changes_without_transport() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    current = system_info_from_payload(parse_payload(fixture_payload()), identity)
+    transport = FakeTransport(fixture_payload())
+    adapter = CSS106Plugin(transport_factory=lambda connection: transport).create(  # type: ignore[arg-type]
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+
+    with pytest.raises(InvalidOperationError, match="must include port 6"):
+        adapter.validate_system_configuration(
+            SystemConfigurationUpdate(allowed_port_numbers=(1, 2)), current=current
+        )
+    assert current.management is not None
+    unsafe_current = current.model_copy(
+        update={
+            "management": current.management.model_copy(update={"allowed_port_numbers": (1, 2)})
+        }
+    )
+    with pytest.raises(InvalidOperationError, match="must include port 6"):
+        adapter.validate_system_configuration(
+            SystemConfigurationUpdate(name="Core Switch"), current=unsafe_current
+        )
+    with pytest.raises(InvalidOperationError, match="cannot change port 6"):
+        adapter.validate_system_configuration(
+            SystemConfigurationUpdate(igmp_fast_leave_port_numbers=(6,)), current=current
+        )
+    with pytest.raises(InvalidOperationError, match="management VLAN changes are disabled"):
+        adapter.validate_system_configuration(
+            SystemConfigurationUpdate(allowed_vlan_id=10), current=current
+        )
+    with pytest.raises(InvalidOperationError, match="address-mode changes"):
+        adapter.validate_system_configuration(
+            SystemConfigurationUpdate(address_mode="static"), current=current
+        )
+
+    adapter.validate_system_configuration(
+        SystemConfigurationUpdate(allowed_vlan_id="unset"), current=current
+    )
+    adapter.validate_system_configuration(
+        SystemConfigurationUpdate(static_ip="192.0.2.10"), current=current
+    )
+    assert transport.requests == []
+
+
+def test_adapter_rejects_active_static_ip_change_until_reconnect_is_supported() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    current = system_info_from_payload(parse_payload(fixture_payload()), identity)
+    assert current.management is not None
+    current = current.model_copy(
+        update={
+            "management": current.management.model_copy(update={"address_mode": AddressMode.STATIC})
+        }
+    )
+    transport = FakeTransport(fixture_payload())
+    adapter = CSS106Plugin(transport_factory=lambda connection: transport).create(  # type: ignore[arg-type]
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+
+    with pytest.raises(InvalidOperationError, match="active static-IP changes"):
+        adapter.set_system_configuration(
+            SystemConfigurationUpdate(static_ip="192.0.2.10"), expected_current=current
+        )
+
+    assert transport.requests == []
+
+
+def test_adapter_rejects_static_ip_staging_in_dhcp_only_mode() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    current = system_info_from_payload(parse_payload(fixture_payload()), identity)
+    assert current.management is not None
+    current = current.model_copy(
+        update={
+            "management": current.management.model_copy(
+                update={"address_mode": AddressMode.DHCP_ONLY}
+            )
+        }
+    )
+    transport = FakeTransport(fixture_payload())
+    adapter = CSS106Plugin(transport_factory=lambda connection: transport).create(  # type: ignore[arg-type]
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+
+    with pytest.raises(InvalidOperationError, match="only in DHCP-with-fallback mode"):
+        adapter.set_system_configuration(
+            SystemConfigurationUpdate(static_ip="192.0.2.10"), expected_current=current
+        )
+
     assert transport.requests == []
 
 

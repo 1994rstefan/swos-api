@@ -30,6 +30,7 @@ from swos_core.models import (
     SfpInfo,
     SnmpInfo,
     SnmpMetadataUpdate,
+    SystemConfigurationUpdate,
     SystemInfo,
     VlanInfo,
 )
@@ -143,6 +144,26 @@ class DeviceAdapter(Protocol):
 
     def validate_device_name(self, update: DeviceNameUpdate) -> None:
         """Validate a device-name update without writing to the device."""
+
+        ...
+
+    def set_system_configuration(
+        self,
+        update: SystemConfigurationUpdate,
+        *,
+        expected_current: SystemInfo,
+    ) -> OperationResult[SystemInfo]:
+        """Set system configuration if fresh state matches the expected baseline."""
+
+        ...
+
+    def validate_system_configuration(
+        self,
+        update: SystemConfigurationUpdate,
+        *,
+        current: SystemInfo,
+    ) -> None:
+        """Validate system configuration against freshly read state."""
 
         ...
 
@@ -467,7 +488,7 @@ class SwOSDevice:
         return OperationResult[SystemInfo](
             changed=result.changed,
             value=result.value,
-            warnings=warnings,
+            warnings=warnings + result.warnings,
         )
 
     def validate_device_name(self, update: DeviceNameUpdate) -> tuple[SafetyWarning, ...]:
@@ -475,6 +496,37 @@ class SwOSDevice:
 
         warnings = self._authorize_write("device_name_write")
         self._adapter.validate_device_name(update)
+        return warnings
+
+    def set_system_configuration(
+        self,
+        update: SystemConfigurationUpdate,
+        *,
+        expected_current: SystemInfo,
+    ) -> OperationResult[SystemInfo]:
+        """Set system configuration after write safety and capability checks."""
+
+        warnings = self._authorize_write("system_configuration_write")
+        result = self._adapter.set_system_configuration(
+            update,
+            expected_current=expected_current,
+        )
+        return OperationResult[SystemInfo](
+            changed=result.changed,
+            value=result.value,
+            warnings=warnings + result.warnings,
+        )
+
+    def validate_system_configuration(
+        self,
+        update: SystemConfigurationUpdate,
+        *,
+        current: SystemInfo,
+    ) -> tuple[SafetyWarning, ...]:
+        """Validate system configuration under write policy without changing it."""
+
+        warnings = self._authorize_write("system_configuration_write")
+        self._adapter.validate_system_configuration(update, current=current)
         return warnings
 
     def set_snmp_metadata(self, update: SnmpMetadataUpdate) -> OperationResult[SnmpInfo]:

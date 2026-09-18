@@ -17,6 +17,9 @@ Guarded write commands are:
 
 ```bash
 swosctl system rename "Office Switch" --device office
+swosctl system configure --static-ip 192.0.2.10 --device office
+swosctl system configure --igmp-snooping on --igmp-version v3 --device office
+swosctl system configure --allow-port 1 --allow-port 6 --device office
 swosctl port rename 1 Uplink --device office
 swosctl port configure 5 --state enabled --flow-control on --device office
 swosctl port configure 5 --negotiation auto --device office
@@ -38,6 +41,27 @@ swosctl -o json port rename 1 Uplink --device office
 Omitted SNMP metadata options preserve their current values. Passing an empty
 string explicitly clears the selected field. Write commands do not prompt for
 confirmation; firmware write authorization is enforced by `swos-core`.
+
+`system configure` accepts explicit options for address mode/static IP, admin
+MAC, identity, management source/prefix/ports/VLAN, independent VLAN lookup,
+IGMP snooping/querier/fast-leave/version, and discovery-protocol ports. Repeated
+port options describe the complete desired mask. Use `--unset-static-ip`,
+`--unset-admin-mac`, `--unset-allow-from`, or `--unset-allow-vlan` for wire-zero
+values, and the `--clear-*-ports` flags for empty non-management masks. The
+command reads and passes a complete `SystemInfo` baseline before writing.
+
+CSS106 currently rejects address-mode changes, active static-IP changes,
+DHCP-only static-IP staging, and management VLAN changes. A static IP may be
+staged only while DHCP with fallback remains active. Every management
+allowed-port mask must include port 6, and no system mask may change port 6's
+existing bit.
+
+Admin MAC, allow-from network, and allowed-port changes are explicitly
+authorized lockout-capable operations. Their successful result contains a
+`management_lockout_risk` warning with before/after values. The client attempts
+same-URL readback, but cannot prove caller reachability and does not treat the
+device's operational IP as the caller source. If connectivity is lost, the
+write outcome is uncertain and recovery may require a manual factory reset.
 
 RSTP and forwarding configuration commands are direct, non-interactive
 read/plan/write operations. They pass the initial read as a precondition, so an

@@ -36,9 +36,35 @@ restricted to ports 1-5 and never modify the port-6 SFP management path. Active
 ports cannot be disabled or have negotiation changed. Auto negotiation preserves
 the dormant forced speed/duplex fields; forced mode supports 10/100 Mbps and
 full/half duplex. The complete `/link.b` body contains only `en`, `nm`, `an`,
-`spdc`, `dpxc`, and `fct`, preserving every unrelated value. The sparse
-device-name body contains only `id`. The complete SNMP body is ordered `en`,
-`com`, `ci`, `loc` and preserves the raw enabled and community fields.
+`spdc`, `dpxc`, and `fct`, preserving every unrelated value. Device-name writes
+use the complete system object described below. The complete SNMP body is
+ordered `en`, `com`, `ci`, `loc` and preserves the raw enabled and community
+fields.
+
+Guarded complete `/sys.b` configuration writes post exactly `iptp`, `sip`,
+`amac`, `id`, `alla`, `allm`, `allp`, `avln`, `ivl`, `igmp`, `igmq`, `igfl`,
+`igve`, and `pdsc` in UI order. Read-only and unrelated fields are excluded.
+The adapter requires a complete normalized `SystemInfo` baseline, rejects stale
+state, preserves every omitted field, skips no-ops, and attempts complete-object
+verification through same-URL readback. All three port masks preserve bit 5;
+management allowed ports must include port 6.
+
+Management VLAN changes fail closed until continuity is provable from VLAN and
+port-policy state. Address-mode and active static-IP changes fail closed until a
+reconnect workflow exists; a static address can be staged only in DHCP with
+fallback, never in DHCP-only mode. Administrative MAC wire values are twelve
+lowercase hex digits, text is hex encoded, IPv4 is little-endian, booleans are
+`0`/`1`, and IGMP v2/v3 map to `0`/`1`. Numeric serialization matches the UI:
+lowercase hexadecimal with the minimum even number of digits, including `0x00`
+for zero. As in the UI's `Kb` transition, the complete desired wire state forces
+the IGMP querier off whenever snooping is off.
+
+Admin MAC, allow-from, and management allowed-port changes remain available as
+explicitly authorized lockout writes. Successful operation results include a
+`management_lockout_risk` warning with before/after values. Same-URL readback is
+attempted but broader continuity cannot be proven: the device IP is not the
+client source address, and connectivity loss leaves the write outcome uncertain
+and may require a manual factory reset.
 
 The profile also advertises guarded per-port RSTP enable and forwarding lock,
 lock-on-first, and egress-rate writes for ports 1-5. CLI plans carry an expected

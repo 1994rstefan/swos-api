@@ -23,6 +23,7 @@ from swos_core.models import (
     ForwardingPortPolicyUpdate,
     HostEntry,
     IgmpGroup,
+    IgmpInfo,
     OperationResult,
     PacketSizeStatistics,
     PortConfigurationUpdate,
@@ -39,10 +40,13 @@ from swos_core.models import (
     RstpInfo,
     RstpPortEnableUpdate,
     RstpPortInfo,
+    SafetyWarning,
     SfpInfo,
     SnmpInfo,
     SnmpMetadataUpdate,
+    SystemConfigurationUpdate,
     SystemInfo,
+    SystemManagementInfo,
     VlanInfo,
     VlanPortMembership,
 )
@@ -114,6 +118,7 @@ class FakeAdapter:
                     "snmp_metadata_write",
                     "static_hosts_write",
                     "system",
+                    "system_configuration_write",
                     "vlan",
                     "vlan_port_policy_write",
                     "vlan_table_write",
@@ -122,7 +127,27 @@ class FakeAdapter:
         )
 
     def get_system_info(self) -> SystemInfo:
-        return SystemInfo(identity=self.identity, name="test", uptime_seconds=1)
+        return SystemInfo(
+            identity=self.identity,
+            name="test",
+            uptime_seconds=1,
+            static_ip="192.0.2.1",
+            management=SystemManagementInfo(
+                address_mode="dhcp_with_fallback",
+                allow_prefix_length=0,
+                allowed_port_numbers=(1, 6),
+                watchdog_enabled=True,
+            ),
+            independent_vlan_lookup=False,
+            igmp=IgmpInfo(
+                enabled=False,
+                querier_configured=False,
+                querier_effective=False,
+                fast_leave_port_numbers=(),
+                version="v2",
+            ),
+            discovery_protocol_port_numbers=(1, 6),
+        )
 
     def get_ports(self) -> tuple[PortInfo, ...]:
         return (
@@ -290,6 +315,35 @@ class FakeAdapter:
 
     def validate_device_name(self, update: DeviceNameUpdate) -> None:
         del update
+
+    def set_system_configuration(
+        self,
+        update: SystemConfigurationUpdate,
+        *,
+        expected_current: SystemInfo,
+    ) -> OperationResult[SystemInfo]:
+        assert expected_current == self.get_system_info()
+        changes = {} if update.name is None else {"name": update.name}
+        value = expected_current.model_copy(update=changes)
+        warnings = (
+            SafetyWarning(code="adapter_warning", message="Adapter warning")
+            if update.admin_mac_address is not None
+            else None
+        )
+        return OperationResult[SystemInfo](
+            changed=value != expected_current,
+            value=value,
+            warnings=() if warnings is None else (warnings,),
+        )
+
+    def validate_system_configuration(
+        self,
+        update: SystemConfigurationUpdate,
+        *,
+        current: SystemInfo,
+    ) -> None:
+        del update
+        assert current == self.get_system_info()
 
     def set_snmp_metadata(self, update: SnmpMetadataUpdate) -> OperationResult[SnmpInfo]:
         before = self.get_snmp()
@@ -615,6 +669,15 @@ def test_policy_bound_device_rejects_unsupported_feature() -> None:
         device.set_device_name(DeviceNameUpdate(name="Core Switch"))
     with pytest.raises(UnsupportedFeatureError, match="device name write"):
         device.validate_device_name(DeviceNameUpdate(name="Core Switch"))
+    system = FakeAdapter(identity()).get_system_info()
+    with pytest.raises(UnsupportedFeatureError, match="system configuration write"):
+        device.set_system_configuration(
+            SystemConfigurationUpdate(name="Core Switch"), expected_current=system
+        )
+    with pytest.raises(UnsupportedFeatureError, match="system configuration write"):
+        device.validate_system_configuration(
+            SystemConfigurationUpdate(name="Core Switch"), current=system
+        )
     with pytest.raises(UnsupportedFeatureError, match="snmp metadata write"):
         device.set_snmp_metadata(SnmpMetadataUpdate(contact="Ops"))
     with pytest.raises(UnsupportedFeatureError, match="static hosts write"):
@@ -691,16 +754,33 @@ def test_policy_bound_device_authorizes_and_returns_write_result() -> None:
     assert configured.warnings == ()
 
     device_name = device.set_device_name(DeviceNameUpdate(name="Core Switch"))
+    system_before = device.get_system_info()
+    system = device.set_system_configuration(
+        SystemConfigurationUpdate(name="Core Switch"), expected_current=system_before
+    )
     metadata = device.set_snmp_metadata(SnmpMetadataUpdate(contact="NOC", location="Rack 1"))
 
     assert device_name.value.name == "Core Switch"
     assert device_name.warnings == ()
+    assert system.value.name == "Core Switch"
+    assert system.warnings == ()
+    warning_result = device.set_system_configuration(
+        SystemConfigurationUpdate(admin_mac_address="02:00:00:00:00:05"),
+        expected_current=device.get_system_info(),
+    )
+    assert warning_result.warnings[0].code == "adapter_warning"
     assert metadata.value.contact == "NOC"
     assert metadata.value.location == "Rack 1"
     assert metadata.value.community == "public"
     assert metadata.warnings == ()
 
     assert device.validate_device_name(DeviceNameUpdate(name="Core Switch")) == ()
+    assert (
+        device.validate_system_configuration(
+            SystemConfigurationUpdate(name="Core Switch"), current=device.get_system_info()
+        )
+        == ()
+    )
     assert device.validate_port_name(PortNameUpdate(number=1, name="Uplink")) == ()
     assert (
         device.validate_port_configuration(
@@ -768,6 +848,14 @@ def test_policy_bound_device_requires_explicit_untested_write_permission() -> No
         writable.set_device_name(DeviceNameUpdate(name="Core Switch")).warnings[0].code
         == "untested_firmware_write"
     )
+    system_result = writable.set_system_configuration(
+        SystemConfigurationUpdate(admin_mac_address="02:00:00:00:00:05"),
+        expected_current=writable.get_system_info(),
+    )
+    assert [warning.code for warning in system_result.warnings] == [
+        "untested_firmware_write",
+        "adapter_warning",
+    ]
     assert (
         writable.set_snmp_metadata(SnmpMetadataUpdate(location="Rack 1")).warnings[0].code
         == "untested_firmware_write"

@@ -17,7 +17,6 @@ from swos_core.models import (
     AclVlanTagMode,
     AddressMode,
     DeviceIdentity,
-    DeviceNameUpdate,
     ForwardingInfo,
     ForwardingMatrixUpdate,
     ForwardingMirroringUpdate,
@@ -52,6 +51,7 @@ from swos_core.models import (
     SfpInfo,
     SnmpInfo,
     SnmpMetadataUpdate,
+    SystemConfigurationUpdate,
     SystemHealth,
     SystemInfo,
     SystemManagementInfo,
@@ -102,10 +102,23 @@ class LinkWriteState:
 
 
 @dataclass(frozen=True, slots=True)
-class SystemNameWriteState:
-    """Validated writable subset of a sparse CSS106 system-name payload."""
+class SystemConfigurationWriteState:
+    """Validated complete writable CSS106 system object in UI field order."""
 
+    address_mode: int
+    static_ip: int
+    admin_mac: str
     raw_name: str
+    allow_from: int
+    allow_prefix_length: int
+    allowed_ports_mask: int
+    allowed_vlan_id: int
+    independent_vlan_lookup: int
+    igmp_enabled: int
+    igmp_querier: int
+    igmp_fast_leave_mask: int
+    igmp_version: int
+    discovery_protocol_mask: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -269,23 +282,119 @@ def system_info_from_payload(data: dict[str, SwOSValue], identity: DeviceIdentit
         raise ProtocolError("CSS106 system response contains invalid values") from exc
 
 
-def system_name_write_state_from_payload(data: dict[str, SwOSValue]) -> SystemNameWriteState:
-    """Extract and validate the writable CSS106 device-name field."""
+def system_configuration_write_state_from_payload(
+    data: dict[str, SwOSValue], identity: DeviceIdentity
+) -> SystemConfigurationWriteState:
+    """Extract and validate the complete writable CSS106 system object."""
 
+    port_count = _port_count(identity)
+    for field in ("allp", "igfl", "pdsc"):
+        _bit_values(data, field, port_count)
+    admin_mac = _wire_optional_mac(_mac_address(data, "amac"))
     raw_name = _string(data, "id")
     _decode_hex_text(raw_name, "id")
-    return SystemNameWriteState(raw_name=raw_name)
+    igmp_enabled = int(_boolean(data, "igmp"))
+    igmp_querier = int(_boolean(data, "igmq"))
+    return SystemConfigurationWriteState(
+        address_mode=_bounded_integer(data, "iptp", minimum=0, maximum=2),
+        static_ip=_unsigned_32(data, "sip"),
+        admin_mac=admin_mac,
+        raw_name=raw_name.lower(),
+        allow_from=_unsigned_32(data, "alla"),
+        allow_prefix_length=_bounded_integer(data, "allm", minimum=0, maximum=32),
+        allowed_ports_mask=_integer(data, "allp"),
+        allowed_vlan_id=_bounded_integer(data, "avln", minimum=0, maximum=4095),
+        independent_vlan_lookup=int(_boolean(data, "ivl")),
+        igmp_enabled=igmp_enabled,
+        igmp_querier=igmp_querier if igmp_enabled else 0,
+        igmp_fast_leave_mask=_integer(data, "igfl"),
+        igmp_version=_bounded_integer(data, "igve", minimum=0, maximum=1),
+        discovery_protocol_mask=_integer(data, "pdsc"),
+    )
 
 
-def encode_device_name_update(
-    data: dict[str, SwOSValue], update: DeviceNameUpdate
-) -> tuple[bytes, SystemNameWriteState]:
-    """Encode the sparse CSS106 system write for a device-name change."""
+def encode_system_configuration_update(
+    data: dict[str, SwOSValue],
+    identity: DeviceIdentity,
+    update: SystemConfigurationUpdate,
+) -> tuple[bytes, SystemConfigurationWriteState]:
+    """Apply a sparse desired update to one complete preserved system object."""
 
-    system_name_write_state_from_payload(data)
-    raw_name = validate_device_name(update.name).hex()
-    desired = SystemNameWriteState(raw_name=raw_name)
-    return f"{{id:'{raw_name}'}}".encode("ascii"), desired
+    state = system_configuration_write_state_from_payload(data, identity)
+    desired = state
+    if update.address_mode is not None:
+        desired = replace(desired, address_mode=tuple(AddressMode).index(update.address_mode))
+    if update.static_ip is not None:
+        desired = replace(
+            desired,
+            static_ip=_wire_ip(None if update.static_ip == "unset" else update.static_ip),
+        )
+    if update.admin_mac_address is not None:
+        desired = replace(
+            desired,
+            admin_mac=_wire_optional_mac(
+                None if update.admin_mac_address == "unset" else update.admin_mac_address
+            ),
+        )
+    if update.name is not None:
+        desired = replace(desired, raw_name=validate_device_name(update.name).hex())
+    if update.allow_from is not None:
+        desired = replace(
+            desired,
+            allow_from=_wire_ip(None if update.allow_from == "unset" else update.allow_from),
+        )
+    if update.allow_prefix_length is not None:
+        desired = replace(desired, allow_prefix_length=update.allow_prefix_length)
+    if update.allowed_port_numbers is not None:
+        _validate_system_mask_ports(update.allowed_port_numbers, identity, "management allowed")
+        if 6 not in update.allowed_port_numbers:
+            raise InvalidOperationError("CSS106 management allowed ports must include port 6")
+        desired = replace(desired, allowed_ports_mask=_port_mask(update.allowed_port_numbers))
+    if update.allowed_vlan_id is not None:
+        desired = replace(
+            desired,
+            allowed_vlan_id=0 if update.allowed_vlan_id == "unset" else update.allowed_vlan_id,
+        )
+    if update.independent_vlan_lookup is not None:
+        desired = replace(desired, independent_vlan_lookup=int(update.independent_vlan_lookup))
+    if update.igmp_enabled is not None:
+        desired = replace(desired, igmp_enabled=int(update.igmp_enabled))
+    if update.igmp_querier is not None:
+        desired = replace(desired, igmp_querier=int(update.igmp_querier))
+    if not desired.igmp_enabled:
+        desired = replace(desired, igmp_querier=0)
+    if update.igmp_fast_leave_port_numbers is not None:
+        _validate_system_mask_ports(
+            update.igmp_fast_leave_port_numbers, identity, "IGMP fast-leave"
+        )
+        desired = replace(
+            desired,
+            igmp_fast_leave_mask=_port_mask(update.igmp_fast_leave_port_numbers),
+        )
+    if update.igmp_version is not None:
+        desired = replace(desired, igmp_version=tuple(IgmpVersion).index(update.igmp_version))
+    if update.discovery_protocol_port_numbers is not None:
+        _validate_system_mask_ports(
+            update.discovery_protocol_port_numbers, identity, "discovery protocol"
+        )
+        desired = replace(
+            desired,
+            discovery_protocol_mask=_port_mask(update.discovery_protocol_port_numbers),
+        )
+
+    management_bit = 1 << 5
+    if not desired.allowed_ports_mask & management_bit:
+        raise InvalidOperationError("CSS106 management allowed ports must include port 6")
+    if any(
+        (before ^ after) & management_bit
+        for before, after in (
+            (state.allowed_ports_mask, desired.allowed_ports_mask),
+            (state.igmp_fast_leave_mask, desired.igmp_fast_leave_mask),
+            (state.discovery_protocol_mask, desired.discovery_protocol_mask),
+        )
+    ):
+        raise InvalidOperationError("CSS106 system writes cannot change port 6 mask state")
+    return _serialize_system_configuration_write_state(desired), desired
 
 
 def validate_device_name(name: str) -> bytes:
@@ -1402,6 +1511,16 @@ def _validate_writable_port(number: int, identity: DeviceIdentity) -> None:
         raise InvalidOperationError(f"Port {number} does not exist on {identity.product_code}")
 
 
+def _validate_system_mask_ports(
+    port_numbers: tuple[int, ...], identity: DeviceIdentity, label: str
+) -> None:
+    port_count = _port_count(identity)
+    if any(number > port_count for number in port_numbers):
+        raise InvalidOperationError(f"CSS106 {label} ports must be between 1 and {port_count}")
+    if port_numbers != tuple(sorted(port_numbers)):
+        raise InvalidOperationError(f"CSS106 {label} ports must be in ascending order")
+
+
 def _validate_table_ports(port_numbers: tuple[int, ...], maximum: int, label: str) -> None:
     if any(number < 1 or number > maximum for number in port_numbers):
         raise InvalidOperationError(f"{label} ports must be between 1 and {maximum}")
@@ -1433,6 +1552,23 @@ def _serialize_link_write_state(state: LinkWriteState) -> bytes:
         f"fct:0x{state.flow_control_mask:02x}}}"
     )
     return payload.encode("ascii")
+
+
+def _serialize_system_configuration_write_state(state: SystemConfigurationWriteState) -> bytes:
+    return (
+        f"{{iptp:{_ui_hex(state.address_mode)},sip:{_ui_hex(state.static_ip)},"
+        f"amac:'{state.admin_mac}',id:'{state.raw_name}',"
+        f"alla:{_ui_hex(state.allow_from)},allm:{_ui_hex(state.allow_prefix_length)},"
+        f"allp:{_ui_hex(state.allowed_ports_mask)},avln:{_ui_hex(state.allowed_vlan_id)},"
+        f"ivl:{_ui_hex(state.independent_vlan_lookup)},igmp:{_ui_hex(state.igmp_enabled)},"
+        f"igmq:{_ui_hex(state.igmp_querier)},igfl:{_ui_hex(state.igmp_fast_leave_mask)},"
+        f"igve:{_ui_hex(state.igmp_version)},pdsc:{_ui_hex(state.discovery_protocol_mask)}}}"
+    ).encode("ascii")
+
+
+def _ui_hex(value: int) -> str:
+    encoded = f"{value:x}"
+    return "0x" + ("0" if len(encoded) % 2 else "") + encoded
 
 
 def _serialize_snmp_write_state(state: SnmpWriteState) -> bytes:

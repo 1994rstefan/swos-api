@@ -31,6 +31,7 @@ from swos_core.models import (
     SfpInfo,
     SnmpInfo,
     SnmpMetadataUpdate,
+    SystemConfigurationUpdate,
     SystemHealth,
     SystemInfo,
     SystemManagementInfo,
@@ -351,6 +352,83 @@ class FakeDevice:
     def set_device_name(self, update: DeviceNameUpdate) -> OperationResult[SystemInfo]:
         info = self.get_system_info().model_copy(update={"name": update.name})
         return OperationResult[SystemInfo](changed=update.name != "Office Switch", value=info)
+
+    def set_system_configuration(
+        self,
+        update: SystemConfigurationUpdate,
+        *,
+        expected_current: SystemInfo,
+    ) -> OperationResult[SystemInfo]:
+        assert expected_current == self.get_system_info()
+        before = expected_current
+        management = before.management
+        igmp = before.igmp
+        assert management is not None and igmp is not None
+        management_changes: dict[str, object] = {}
+        for source, target in (
+            (update.address_mode, "address_mode"),
+            (update.admin_mac_address, "admin_mac_address"),
+            (update.allow_from, "allow_from"),
+            (update.allow_prefix_length, "allow_prefix_length"),
+            (update.allowed_port_numbers, "allowed_port_numbers"),
+            (update.allowed_vlan_id, "allowed_vlan_id"),
+        ):
+            if source is not None:
+                management_changes[target] = None if source == "unset" else source
+        igmp_changes: dict[str, object] = {}
+        for source, target in (
+            (update.igmp_enabled, "enabled"),
+            (update.igmp_querier, "querier_configured"),
+            (update.igmp_fast_leave_port_numbers, "fast_leave_port_numbers"),
+            (update.igmp_version, "version"),
+        ):
+            if source is not None:
+                igmp_changes[target] = source
+        configured_igmp = igmp.model_copy(update=igmp_changes)
+        configured_igmp = configured_igmp.model_copy(
+            update={
+                "querier_effective": (
+                    configured_igmp.enabled and configured_igmp.querier_configured
+                )
+            }
+        )
+        changes: dict[str, object] = {
+            "management": management.model_copy(update=management_changes),
+            "igmp": configured_igmp,
+        }
+        if update.name is not None:
+            changes["name"] = update.name
+        if update.static_ip is not None:
+            changes["static_ip"] = None if update.static_ip == "unset" else update.static_ip
+        if update.independent_vlan_lookup is not None:
+            changes["independent_vlan_lookup"] = update.independent_vlan_lookup
+        if update.discovery_protocol_port_numbers is not None:
+            changes["discovery_protocol_port_numbers"] = update.discovery_protocol_port_numbers
+        value = before.model_copy(update=changes)
+        management_changed = any(
+            item is not None
+            for item in (
+                update.admin_mac_address,
+                update.allow_from,
+                update.allow_prefix_length,
+                update.allowed_port_numbers,
+            )
+        )
+        warnings = (
+            (
+                SafetyWarning(
+                    code="management_lockout_risk",
+                    message="Management access changed; old -> new; outcome uncertain.",
+                ),
+            )
+            if management_changed
+            else ()
+        )
+        return OperationResult[SystemInfo](
+            changed=value != before,
+            value=value,
+            warnings=warnings,
+        )
 
     def set_snmp_metadata(self, update: SnmpMetadataUpdate) -> OperationResult[SnmpInfo]:
         before = self.get_snmp()
@@ -689,6 +767,82 @@ def test_system_rename_human_and_json_output_without_confirmation(monkeypatch) -
     data = json.loads(machine.stdout)["data"]
     assert data["changed"] is False
     assert data["system"]["name"] == "Office Switch"
+
+
+def test_system_configure_uses_explicit_options_and_full_baseline(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    mock_registry(monkeypatch)
+
+    result = runner.invoke(
+        app,
+        [
+            "system",
+            "configure",
+            "--static-ip",
+            "192.0.2.10",
+            "--admin-mac",
+            "02:00:00:00:00:05",
+            "--name",
+            "Core Switch",
+            "--allow-from",
+            "198.51.100.0",
+            "--allow-prefix-length",
+            "24",
+            "--allow-port",
+            "1",
+            "--allow-port",
+            "6",
+            "--allow-vlan",
+            "10",
+            "--independent-vlan-lookup",
+            "off",
+            "--igmp-snooping",
+            "off",
+            "--igmp-querier",
+            "off",
+            "--igmp-fast-leave-port",
+            "2",
+            "--igmp-version",
+            "v2",
+            "--discovery-port",
+            "1",
+            "--discovery-port",
+            "2",
+            "--url",
+            "http://192.0.2.1",
+            "-ojson",
+        ],
+    )
+
+    assert result.exit_code == 0
+    data = json.loads(result.stdout)["data"]
+    assert data["changed"] is True
+    assert data["system"]["name"] == "Core Switch"
+    assert data["system"]["static_ip"] == "192.0.2.10"
+    assert data["system"]["management"]["admin_mac_address"] == "02:00:00:00:00:05"
+    assert data["system"]["management"]["allowed_port_numbers"] == [1, 6]
+    assert data["system"]["igmp"]["version"] == "v2"
+    assert data["warnings"][0]["code"] == "management_lockout_risk"
+
+
+@pytest.mark.parametrize(
+    "arguments, message",
+    [
+        ([], "At least one system configuration option"),
+        (["--allow-port", "1"], "must include management port 6"),
+        (
+            ["--static-ip", "192.0.2.10", "--unset-static-ip"],
+            "cannot be used together",
+        ),
+        (["--admin-mac", "not-a-mac"], "hexadecimal octets"),
+    ],
+)
+def test_system_configure_rejects_invalid_option_combinations(
+    arguments: list[str], message: str
+) -> None:
+    result = runner.invoke(app, ["system", "configure", *arguments])
+
+    assert result.exit_code == 2
+    assert message in result.stderr
 
 
 def test_system_show_requires_url() -> None:

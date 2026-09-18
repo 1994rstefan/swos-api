@@ -24,6 +24,7 @@ from swos_core.models import (
     RstpPortEnableUpdate,
     SafetyWarning,
     SnmpMetadataUpdate,
+    SystemConfigurationUpdate,
     SystemManagementInfo,
     VlanInfo,
     VlanPortMembership,
@@ -142,6 +143,32 @@ def test_device_name_and_snmp_metadata_updates_are_typed_and_immutable() -> None
     assert metadata.model_dump(mode="json") == {"contact": "", "location": None}
     with pytest.raises(ValidationError):
         metadata.contact = "Ops"  # type: ignore[misc]
+
+
+def test_system_configuration_update_is_typed_normalized_and_non_empty() -> None:
+    update = SystemConfigurationUpdate(
+        address_mode="dhcp_only",
+        static_ip="192.0.2.10",
+        admin_mac_address="AA:BB:CC:DD:EE:FF",
+        allow_from="unset",
+        allowed_vlan_id="unset",
+        allowed_port_numbers=(1, 6),
+        igmp_version="v3",
+    )
+
+    assert update.static_ip == "192.0.2.10"
+    assert update.admin_mac_address == "aa:bb:cc:dd:ee:ff"
+    assert update.allow_from == "unset"
+    assert update.allowed_vlan_id == "unset"
+    assert update.model_dump(mode="json")["address_mode"] == "dhcp_only"
+    with pytest.raises(ValidationError, match="at least one"):
+        SystemConfigurationUpdate()
+    with pytest.raises(ValidationError):
+        SystemConfigurationUpdate(static_ip="not-an-address")
+    with pytest.raises(ValidationError, match="hexadecimal octets"):
+        SystemConfigurationUpdate(admin_mac_address="not-a-mac")
+    with pytest.raises(ValidationError, match="unique"):
+        SystemConfigurationUpdate(discovery_protocol_port_numbers=(1, 1))
 
 
 def test_port_statistics_reject_negative_counters() -> None:

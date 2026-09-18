@@ -156,6 +156,54 @@ class DeviceNameUpdate(BaseModel):
     name: str
 
 
+class SystemConfigurationUpdate(BaseModel):
+    """Desired system changes, preserving fields omitted as ``None``."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    address_mode: AddressMode | None = None
+    static_ip: str | Literal["unset"] | None = None
+    admin_mac_address: str | Literal["unset"] | None = None
+    name: str | None = None
+    allow_from: str | Literal["unset"] | None = None
+    allow_prefix_length: int | None = Field(default=None, ge=0, le=32)
+    allowed_port_numbers: _PortNumbers | None = None
+    allowed_vlan_id: Annotated[int, Field(ge=1, le=4095)] | Literal["unset"] | None = None
+    independent_vlan_lookup: bool | None = None
+    igmp_enabled: bool | None = None
+    igmp_querier: bool | None = None
+    igmp_fast_leave_port_numbers: _PortNumbers | None = None
+    igmp_version: IgmpVersion | None = None
+    discovery_protocol_port_numbers: _PortNumbers | None = None
+
+    @field_validator("static_ip", "allow_from")
+    @classmethod
+    def normalize_optional_ip(cls, value: str | None) -> str | None:
+        if value is None or value == "unset":
+            return value
+        return str(IPv4Address(value))
+
+    @field_validator("admin_mac_address")
+    @classmethod
+    def normalize_optional_mac(cls, value: str | None) -> str | None:
+        if value is None or value == "unset":
+            return value
+        normalized = value.lower()
+        parts = normalized.split(":")
+        if len(parts) != 6 or any(
+            len(part) != 2 or any(character not in "0123456789abcdef" for character in part)
+            for part in parts
+        ):
+            raise ValueError("admin MAC address must contain six hexadecimal octets")
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_non_empty_update(self) -> Self:
+        if all(value is None for value in self.__dict__.values()):
+            raise ValueError("at least one system configuration change is required")
+        return self
+
+
 class PoeMode(StrEnum):
     OFF = "off"
     AUTO = "auto"

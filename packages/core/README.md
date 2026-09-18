@@ -17,10 +17,10 @@ Matching `validate_*` methods enforce the same firmware policy, capability, and
 adapter-specific preconditions without performing a write. Consumers use these
 after fresh reads to implement device-validating dry runs and check mode.
 
-Desired state covers device names, port names, per-port RSTP enable, bridge
-settings, forwarding matrix/mirroring/port policy, per-port VLAN policy, SNMP
-contact/location metadata, complete VLAN/static-host tables, and complete
-ordered ACL tables.
+Desired state covers complete system configuration, device names, port names,
+per-port RSTP enable, bridge settings, forwarding matrix/mirroring/port policy,
+per-port VLAN policy, SNMP contact/location metadata, complete VLAN/static-host
+tables, and complete ordered ACL tables.
 Static-host writes reuse `HostEntry` but reject dynamic entries. `None` preserves
 an omitted field where supported; explicit `"unlimited"` clears an egress rate.
 
@@ -28,6 +28,12 @@ Whole-table replacement plus RSTP and forwarding mutation requires an
 `expected_current` baseline. The adapter compares that baseline with its fresh
 read and aborts stale mutations before a POST. Device plugins advertise safe
 per-port and higher-risk global write capabilities independently.
+
+`SystemConfigurationUpdate` is sparse, but its adapter operation requires a
+full `SystemInfo` baseline and writes a complete preserved device object.
+Clearable address/MAC/VLAN values use the explicit `"unset"` value; `None`
+always means preserve. Adapter operation warnings are retained alongside any
+firmware-policy warning in the public `OperationResult`.
 
 Network link speeds and rates use bits per second in public models and JSON
 representations.

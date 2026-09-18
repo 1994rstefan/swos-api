@@ -17,6 +17,7 @@ from pydantic import ValidationError
 from swos_core import (
     AclRule,
     AclVlanTagMode,
+    AddressMode,
     DeviceConnection,
     DeviceNameUpdate,
     ForcedPortNegotiation,
@@ -24,6 +25,7 @@ from swos_core import (
     ForwardingPortPolicyUpdate,
     HostEntry,
     HostEntryType,
+    IgmpVersion,
     OperationResult,
     PacketSizeStatistics,
     PluginRegistry,
@@ -37,6 +39,7 @@ from swos_core import (
     SnmpInfo,
     SnmpMetadataUpdate,
     SwOSDevice,
+    SystemConfigurationUpdate,
     SystemInfo,
     VlanEgressMode,
     VlanInfo,
@@ -421,6 +424,162 @@ def system_rename(
         f"Device name changed to {result.value.name!r}."
         if result.changed
         else f"Device name is already {result.value.name!r}; no change required."
+    )
+    if result.warnings:
+        human += "\n" + "\n".join(f"Warning: {warning.message}" for warning in result.warnings)
+    renderer.success(data, human=human)
+
+
+@system_app.command("configure")
+def system_configure(
+    ctx: typer.Context,
+    address_mode: Annotated[AddressMode | None, typer.Option("--address-mode")] = None,
+    static_ip: Annotated[str | None, typer.Option("--static-ip")] = None,
+    unset_static_ip: Annotated[bool, typer.Option("--unset-static-ip")] = False,
+    admin_mac: Annotated[str | None, typer.Option("--admin-mac")] = None,
+    unset_admin_mac: Annotated[bool, typer.Option("--unset-admin-mac")] = False,
+    name: Annotated[str | None, typer.Option("--name")] = None,
+    allow_from: Annotated[str | None, typer.Option("--allow-from")] = None,
+    unset_allow_from: Annotated[bool, typer.Option("--unset-allow-from")] = False,
+    allow_prefix_length: Annotated[
+        int | None, typer.Option("--allow-prefix-length", min=0, max=32)
+    ] = None,
+    allow_port: Annotated[
+        list[int] | None,
+        typer.Option("--allow-port", min=1, max=6, help="Repeat for the full allowed mask."),
+    ] = None,
+    allow_vlan: Annotated[int | None, typer.Option("--allow-vlan", min=1, max=4095)] = None,
+    unset_allow_vlan: Annotated[bool, typer.Option("--unset-allow-vlan")] = False,
+    independent_vlan_lookup: Annotated[
+        ToggleOption | None, typer.Option("--independent-vlan-lookup")
+    ] = None,
+    igmp_snooping: Annotated[ToggleOption | None, typer.Option("--igmp-snooping")] = None,
+    igmp_querier: Annotated[ToggleOption | None, typer.Option("--igmp-querier")] = None,
+    igmp_fast_leave_port: Annotated[
+        list[int] | None,
+        typer.Option(
+            "--igmp-fast-leave-port",
+            min=1,
+            max=6,
+            help="Repeat for the full fast-leave mask.",
+        ),
+    ] = None,
+    clear_igmp_fast_leave_ports: Annotated[
+        bool, typer.Option("--clear-igmp-fast-leave-ports")
+    ] = False,
+    igmp_version: Annotated[IgmpVersion | None, typer.Option("--igmp-version")] = None,
+    discovery_port: Annotated[
+        list[int] | None,
+        typer.Option(
+            "--discovery-port",
+            min=1,
+            max=6,
+            help="Repeat for the full discovery mask.",
+        ),
+    ] = None,
+    clear_discovery_ports: Annotated[bool, typer.Option("--clear-discovery-ports")] = False,
+) -> None:
+    """Set and verify system configuration without prompting."""
+
+    conflicting = (
+        (static_ip is not None and unset_static_ip, "--static-ip and --unset-static-ip"),
+        (admin_mac is not None and unset_admin_mac, "--admin-mac and --unset-admin-mac"),
+        (allow_from is not None and unset_allow_from, "--allow-from and --unset-allow-from"),
+        (allow_vlan is not None and unset_allow_vlan, "--allow-vlan and --unset-allow-vlan"),
+        (
+            igmp_fast_leave_port is not None and clear_igmp_fast_leave_ports,
+            "--igmp-fast-leave-port and --clear-igmp-fast-leave-ports",
+        ),
+        (
+            discovery_port is not None and clear_discovery_ports,
+            "--discovery-port and --clear-discovery-ports",
+        ),
+    )
+    for is_conflicting, options in conflicting:
+        if is_conflicting:
+            raise typer.BadParameter(f"{options} cannot be used together")
+    if not any(
+        value is not None
+        for value in (
+            address_mode,
+            static_ip,
+            admin_mac,
+            name,
+            allow_from,
+            allow_prefix_length,
+            allow_port,
+            allow_vlan,
+            independent_vlan_lookup,
+            igmp_snooping,
+            igmp_querier,
+            igmp_fast_leave_port,
+            igmp_version,
+            discovery_port,
+        )
+    ) and not any(
+        (
+            unset_static_ip,
+            unset_admin_mac,
+            unset_allow_from,
+            unset_allow_vlan,
+            clear_igmp_fast_leave_ports,
+            clear_discovery_ports,
+        )
+    ):
+        raise typer.BadParameter("At least one system configuration option is required")
+
+    allowed_ports = _system_ports(allow_port, "--allow-port")
+    if allowed_ports is not None and 6 not in allowed_ports:
+        raise typer.BadParameter("--allow-port must include management port 6")
+    fast_leave_ports = _system_ports(igmp_fast_leave_port, "--igmp-fast-leave-port")
+    discovery_ports = _system_ports(discovery_port, "--discovery-port")
+    try:
+        update = SystemConfigurationUpdate(
+            address_mode=address_mode,
+            static_ip="unset" if unset_static_ip else static_ip,
+            admin_mac_address="unset" if unset_admin_mac else admin_mac,
+            name=name,
+            allow_from="unset" if unset_allow_from else allow_from,
+            allow_prefix_length=allow_prefix_length,
+            allowed_port_numbers=allowed_ports,
+            allowed_vlan_id="unset" if unset_allow_vlan else allow_vlan,
+            independent_vlan_lookup=(
+                None
+                if independent_vlan_lookup is None
+                else independent_vlan_lookup is ToggleOption.ON
+            ),
+            igmp_enabled=None if igmp_snooping is None else igmp_snooping is ToggleOption.ON,
+            igmp_querier=None if igmp_querier is None else igmp_querier is ToggleOption.ON,
+            igmp_fast_leave_port_numbers=(() if clear_igmp_fast_leave_ports else fast_leave_ports),
+            igmp_version=igmp_version,
+            discovery_protocol_port_numbers=(() if clear_discovery_ports else discovery_ports),
+        )
+    except ValidationError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+    cli_context: CliContext = ctx.ensure_object(CliContext)
+    renderer = OutputRenderer(cli_context.configuration.settings.output)
+    try:
+        connected_device = _connect_device(cli_context)
+        current = connected_device.get_system_info()
+        result = connected_device.set_system_configuration(update, expected_current=current)
+    except ConfigurationError as exc:
+        renderer.error("configuration_error", str(exc))
+        raise typer.Exit(code=2) from exc
+    except SwOSError as exc:
+        renderer.error(_error_code(exc), str(exc))
+        raise typer.Exit(code=1) from exc
+
+    data: dict[str, Any] = {
+        "changed": result.changed,
+        "system": result.value.model_dump(mode="json"),
+    }
+    if result.warnings:
+        data["warnings"] = [warning.model_dump(mode="json") for warning in result.warnings]
+    human = (
+        "System configuration changed."
+        if result.changed
+        else "System configuration already matches; no change required."
     )
     if result.warnings:
         human += "\n" + "\n".join(f"Warning: {warning.message}" for warning in result.warnings)
@@ -1622,6 +1781,14 @@ def _yes_no(value: bool) -> str:
 
 def _ports(port_numbers: tuple[int, ...]) -> str:
     return ",".join(str(number) for number in port_numbers) or "-"
+
+
+def _system_ports(values: list[int] | None, option: str) -> tuple[int, ...] | None:
+    if values is None:
+        return None
+    if len(values) != len(set(values)):
+        raise typer.BadParameter(f"{option} cannot repeat a port")
+    return tuple(sorted(values))
 
 
 def _render_host_write(

@@ -73,6 +73,8 @@ swosctl -o json-pretty --version
 swosctl --device office system show
 swosctl system show --device office
 swosctl system rename "Office Switch" --device office
+swosctl system configure --static-ip 192.0.2.10 --device office
+swosctl system configure --igmp-snooping on --igmp-version v3 --device office
 swosctl port list --device office
 swosctl port rename 1 Uplink --device office
 swosctl port configure 5 --flow-control on --device office
@@ -149,7 +151,7 @@ Currently supported:
 
 | Device | Product code | Firmware | Build | Operations |
 | --- | --- | --- | --- | --- |
-| RB260GS | `CSS106-5G-1S` | `2.19` | `0x6a181cd5` | Complete local reads; guarded port, per-port VLAN, RSTP enable, forwarding policy, name, SNMP metadata, and static-host writes |
+| RB260GS | `CSS106-5G-1S` | `2.19` | `0x6a181cd5` | Complete local reads; guarded system, port, per-port VLAN, RSTP enable, forwarding policy, name, SNMP metadata, and static-host writes |
 
 The supported read surface includes system, management, health, port
 configuration/state, complete statistics, SFP diagnostics, forwarding, port

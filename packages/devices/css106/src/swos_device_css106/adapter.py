@@ -7,6 +7,7 @@ from collections.abc import Callable
 from swos_core.errors import InvalidOperationError, ProtocolError
 from swos_core.models import (
     AclRule,
+    AddressMode,
     DeviceCapabilities,
     DeviceConnection,
     DeviceIdentity,
@@ -28,9 +29,11 @@ from swos_core.models import (
     RstpBridgeUpdate,
     RstpInfo,
     RstpPortEnableUpdate,
+    SafetyWarning,
     SfpInfo,
     SnmpInfo,
     SnmpMetadataUpdate,
+    SystemConfigurationUpdate,
     SystemInfo,
     VlanInfo,
 )
@@ -43,7 +46,6 @@ from swos_device_css106.protocol import (
     acl_rules_from_payload,
     dynamic_hosts_from_payload,
     encode_acl_rules,
-    encode_device_name_update,
     encode_forwarding_matrix_update,
     encode_forwarding_mirroring_update,
     encode_forwarding_port_policy_update,
@@ -54,6 +56,7 @@ from swos_device_css106.protocol import (
     encode_rstp_port_enable_update,
     encode_snmp_metadata_update,
     encode_static_hosts,
+    encode_system_configuration_update,
     encode_vlans,
     forwarding_from_payload,
     forwarding_write_state_from_payload,
@@ -73,8 +76,8 @@ from swos_device_css106.protocol import (
     snmp_from_payload,
     snmp_write_state_from_payload,
     static_hosts_from_payload,
+    system_configuration_write_state_from_payload,
     system_info_from_payload,
-    system_name_write_state_from_payload,
     validate_device_name,
     validate_port_name,
     validate_snmp_metadata,
@@ -126,6 +129,7 @@ class CSS106Adapter:
                     "rstp_port_enable_write",
                     "snmp_metadata_write",
                     "static_hosts_write",
+                    "system_configuration_write",
                 }
             )
         return DeviceCapabilities(features=frozenset(features))
@@ -365,7 +369,7 @@ class CSS106Adapter:
             )
 
     def set_device_name(self, update: DeviceNameUpdate) -> OperationResult[SystemInfo]:
-        """Set the device name with a fresh identity check and sparse write."""
+        """Set the device name with a fresh identity check and complete system write."""
 
         validate_device_name(update.name)
         with self._transport_factory(self._connection) as transport:
@@ -377,7 +381,11 @@ class CSS106Adapter:
             if reported_identity != self._identity:
                 raise ProtocolError("CSS106 identity changed after device probing")
             before_info = system_info_from_payload(before_data, reported_identity)
-            content, expected_state = encode_device_name_update(before_data, update)
+            content, expected_state = encode_system_configuration_update(
+                before_data,
+                self._identity,
+                SystemConfigurationUpdate(name=update.name),
+            )
             if before_info.name == update.name:
                 return OperationResult[SystemInfo](changed=False, value=before_info)
 
@@ -394,20 +402,157 @@ class CSS106Adapter:
         reported_identity = identity_from_system(after_data)
         if reported_identity != self._identity:
             raise ProtocolError("CSS106 identity changed after device-name write")
-        if system_name_write_state_from_payload(after_data) != expected_state:
+        if (
+            system_configuration_write_state_from_payload(after_data, self._identity)
+            != expected_state
+        ):
             raise ProtocolError("CSS106 device-name write failed read-back verification")
-        after_info = system_info_from_payload(after_data, reported_identity)
-        if _system_configuration(after_info) != _system_configuration(before_info):
-            raise ProtocolError("CSS106 device-name write changed unrelated system configuration")
         return OperationResult[SystemInfo](
             changed=True,
-            value=after_info,
+            value=system_info_from_payload(after_data, reported_identity),
         )
 
     def validate_device_name(self, update: DeviceNameUpdate) -> None:
         """Validate a device-name update without opening a transport."""
 
         validate_device_name(update.name)
+
+    def set_system_configuration(
+        self,
+        update: SystemConfigurationUpdate,
+        *,
+        expected_current: SystemInfo,
+    ) -> OperationResult[SystemInfo]:
+        """Set the complete system object with baseline and address guards."""
+
+        self.validate_system_configuration(update, current=expected_current)
+        with self._transport_factory(self._connection) as transport:
+            before_data = parse_payload(
+                transport.request("GET", "/sys.b", max_response_bytes=MAX_PAYLOAD_BYTES)
+            )
+            reported_identity = identity_from_system(before_data)
+            if reported_identity != self._identity:
+                raise ProtocolError("CSS106 identity changed after device probing")
+            before = system_info_from_payload(before_data, reported_identity)
+            self.validate_system_configuration(update, current=before)
+            if _system_writable_configuration(before) != _system_writable_configuration(
+                expected_current
+            ):
+                raise InvalidOperationError(
+                    "CSS106 system configuration changed since the expected baseline"
+                )
+            before_state = system_configuration_write_state_from_payload(
+                before_data, self._identity
+            )
+            content, desired = encode_system_configuration_update(
+                before_data, self._identity, update
+            )
+            if desired == before_state:
+                return OperationResult[SystemInfo](changed=False, value=before)
+            operation_warnings = _management_lockout_warnings(update, before)
+
+            transport.request(
+                "POST",
+                "/sys.b",
+                content=content,
+                headers={"Content-Type": "text/plain"},
+                max_response_bytes=MAX_PAYLOAD_BYTES,
+            )
+            after_data = parse_payload(
+                transport.request("GET", "/sys.b", max_response_bytes=MAX_PAYLOAD_BYTES)
+            )
+
+        reported_identity = identity_from_system(after_data)
+        if reported_identity != self._identity:
+            raise ProtocolError("CSS106 identity changed after system-configuration write")
+        if system_configuration_write_state_from_payload(after_data, self._identity) != desired:
+            raise ProtocolError(
+                "CSS106 system-configuration write failed complete-object read-back verification"
+            )
+        return OperationResult[SystemInfo](
+            changed=True,
+            value=system_info_from_payload(after_data, reported_identity),
+            warnings=operation_warnings,
+        )
+
+    def validate_system_configuration(
+        self,
+        update: SystemConfigurationUpdate,
+        *,
+        current: SystemInfo,
+    ) -> None:
+        """Validate system changes against normalized state without transport access."""
+
+        if current.identity != self._identity:
+            raise InvalidOperationError(
+                "Current system identity does not match the connected device"
+            )
+        management = current.management
+        igmp = current.igmp
+        if management is None or igmp is None or current.independent_vlan_lookup is None:
+            raise InvalidOperationError("Current system configuration is incomplete")
+        if update.name is not None:
+            validate_device_name(update.name)
+        for ports, label in (
+            (update.allowed_port_numbers, "management allowed"),
+            (update.igmp_fast_leave_port_numbers, "IGMP fast-leave"),
+            (update.discovery_protocol_port_numbers, "discovery protocol"),
+        ):
+            if ports is not None:
+                self._validate_system_mask_ports(ports, label)
+
+        desired_allowed_ports = (
+            management.allowed_port_numbers
+            if update.allowed_port_numbers is None
+            else update.allowed_port_numbers
+        )
+        if 6 not in desired_allowed_ports:
+            raise InvalidOperationError("CSS106 management allowed ports must include port 6")
+        if update.allowed_port_numbers is not None:
+            if (6 in update.allowed_port_numbers) != (6 in management.allowed_port_numbers):
+                raise InvalidOperationError("CSS106 system writes cannot change port 6 mask state")
+        for ports, existing in (
+            (update.igmp_fast_leave_port_numbers, igmp.fast_leave_port_numbers),
+            (update.discovery_protocol_port_numbers, current.discovery_protocol_port_numbers),
+        ):
+            if ports is not None and (6 in ports) != (6 in existing):
+                raise InvalidOperationError("CSS106 system writes cannot change port 6 mask state")
+
+        desired_vlan = (
+            management.allowed_vlan_id
+            if update.allowed_vlan_id is None
+            else None
+            if update.allowed_vlan_id == "unset"
+            else update.allowed_vlan_id
+        )
+        if desired_vlan != management.allowed_vlan_id:
+            raise InvalidOperationError(
+                "CSS106 management VLAN changes are disabled until port 6 continuity can be proven"
+            )
+        desired_mode = update.address_mode or management.address_mode
+        if desired_mode != management.address_mode:
+            raise InvalidOperationError(
+                "CSS106 address-mode changes require reconnect support and are currently disabled"
+            )
+        desired_static_ip = (
+            current.static_ip
+            if update.static_ip is None
+            else None
+            if update.static_ip == "unset"
+            else update.static_ip
+        )
+        if management.address_mode is AddressMode.STATIC and desired_static_ip != current.static_ip:
+            raise InvalidOperationError(
+                "CSS106 active static-IP changes require reconnect support and are currently "
+                "disabled"
+            )
+        if (
+            management.address_mode is AddressMode.DHCP_ONLY
+            and desired_static_ip != current.static_ip
+        ):
+            raise InvalidOperationError(
+                "CSS106 static-IP staging is allowed only in DHCP-with-fallback mode"
+            )
 
     def set_snmp_metadata(self, update: SnmpMetadataUpdate) -> OperationResult[SnmpInfo]:
         """Set SNMP metadata with preserved service settings and full read-back."""
@@ -785,6 +930,13 @@ class CSS106Adapter:
             )
 
     @staticmethod
+    def _validate_system_mask_ports(port_numbers: tuple[int, ...], label: str) -> None:
+        if any(number > 6 for number in port_numbers):
+            raise InvalidOperationError(f"CSS106 {label} ports must be between 1 and 6")
+        if port_numbers != tuple(sorted(port_numbers)):
+            raise InvalidOperationError(f"CSS106 {label} ports must be in ascending order")
+
+    @staticmethod
     def _require_numbered(items: tuple[object, ...], number: int, label: str) -> None:
         if not any(getattr(item, "number", None) == number for item in items):
             raise InvalidOperationError(f"{label} {number} was not returned by the device")
@@ -847,16 +999,89 @@ class CSS106Adapter:
         )
 
 
-def _system_configuration(info: SystemInfo) -> tuple[object, ...]:
+def _system_writable_configuration(info: SystemInfo) -> tuple[object, ...]:
+    management = info.management
+    igmp = info.igmp
     return (
+        info.name,
         info.static_ip,
-        info.mac_address,
-        info.serial_number,
-        info.management,
+        None if management is None else management.address_mode,
+        None if management is None else management.admin_mac_address,
+        None if management is None else management.allow_from,
+        None if management is None else management.allow_prefix_length,
+        None if management is None else management.allowed_port_numbers,
+        None if management is None else management.allowed_vlan_id,
         info.independent_vlan_lookup,
-        info.igmp,
+        None if igmp is None else igmp.enabled,
+        None if igmp is None else igmp.querier_configured,
+        None if igmp is None else igmp.fast_leave_port_numbers,
+        None if igmp is None else igmp.version,
         info.discovery_protocol_port_numbers,
     )
+
+
+def _management_lockout_warnings(
+    update: SystemConfigurationUpdate, before: SystemInfo
+) -> tuple[SafetyWarning, ...]:
+    management = before.management
+    if management is None:
+        return ()
+    changes: list[str] = []
+    desired_admin_mac = (
+        management.admin_mac_address
+        if update.admin_mac_address is None
+        else None
+        if update.admin_mac_address == "unset"
+        else update.admin_mac_address
+    )
+    if desired_admin_mac != management.admin_mac_address:
+        changes.append(
+            f"admin MAC {management.admin_mac_address or 'unset'} -> {desired_admin_mac or 'unset'}"
+        )
+
+    desired_allow_from = (
+        management.allow_from
+        if update.allow_from is None
+        else None
+        if update.allow_from == "unset"
+        else update.allow_from
+    )
+    desired_prefix = (
+        management.allow_prefix_length
+        if update.allow_prefix_length is None
+        else update.allow_prefix_length
+    )
+    before_source = _management_source(management.allow_from, management.allow_prefix_length)
+    desired_source = _management_source(desired_allow_from, desired_prefix)
+    if desired_source != before_source:
+        changes.append(f"allow from {before_source} -> {desired_source}")
+
+    desired_ports = (
+        management.allowed_port_numbers
+        if update.allowed_port_numbers is None
+        else update.allowed_port_numbers
+    )
+    if desired_ports != management.allowed_port_numbers:
+        before_ports = ",".join(str(number) for number in management.allowed_port_numbers)
+        after_ports = ",".join(str(number) for number in desired_ports)
+        changes.append(f"allowed ports {before_ports} -> {after_ports}")
+
+    if not changes:
+        return ()
+    return (
+        SafetyWarning(
+            code="management_lockout_risk",
+            message=(
+                f"Management access changed ({'; '.join(changes)}). This explicitly authorized "
+                "write can lock out the caller. Same-URL readback is attempted, but connectivity "
+                "loss leaves the outcome uncertain and may require a manual factory reset."
+            ),
+        ),
+    )
+
+
+def _management_source(address: str | None, prefix_length: int) -> str:
+    return "any" if address is None else f"{address}/{prefix_length}"
 
 
 def _rstp_configuration(info: RstpInfo) -> tuple[object, ...]:

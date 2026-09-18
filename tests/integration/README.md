@@ -21,12 +21,18 @@ pytest --run-integration --run-destructive -m destructive
 ```
 
 The CSS106 write tests change and restore the device name, SNMP metadata, port
-name, flow-control state, RSTP enable, lock, lock-on-first, and egress rate in
-`finally`. The per-port VLAN test changes only port 5's egress-header policy and
-precomputes its exact temporary state before POST. Cleanup fresh-reads the full
-policy: it restores only from that temporary state, does nothing if already at
-the original state, and refuses to overwrite any third state. Port tests run
-only after confirming that their target is link-down.
+name, flow-control state, RSTP enable, lock, lock-on-first, egress rate, and
+selected system masks in `finally`. The system-mask tests toggle only port 5 in
+the discovery, IGMP fast-leave, or management allowed-port mask, one mask per
+test. They preserve port 6's exact mask state; management allowed-port tests
+also require and retain port 6 and assert the lockout-risk operation warning.
+The fast-leave test runs only while global IGMP snooping is enabled. The
+per-port VLAN test changes only port 5's egress-header policy. Both kinds of
+test precompute their exact temporary configuration before POST. Cleanup
+fresh-reads the full writable configuration: it restores only from that
+temporary state, does nothing if already at the original state, and refuses to
+overwrite any third state. Port tests run only after confirming that their
+target is link-down.
 Each test changes one setting at a time. The name test uses Ethernet port 5 by default;
 select another Ethernet port (1-5 only) with `SWOS_INTEGRATION_WRITE_PORT`.
 The configuration, RSTP, and forwarding tests always target down port 5. Port 6
@@ -34,9 +40,10 @@ is the SFP management path and is always rejected. The hardware tests never
 disable an Ethernet port, change negotiation, alter forwarding destinations, or
 configure mirroring.
 The VLAN table is never changed by hardware tests, and every VLAN policy test
-asserts that the SFP port-6 policy remains identical.
+asserts that the SFP port-6 policy remains identical. System tests do not change
+address mode, static IP, management VLAN, allow-from policy, or admin MAC.
 
-Static-host, RSTP, and forwarding cleanup passes the verified post-mutation
-state as the restore precondition. A concurrent configuration change therefore
-aborts the `finally` cleanup rather than being accepted as a new baseline and
-overwritten.
+Static-host, RSTP, forwarding, VLAN-policy, and system-mask cleanup passes the
+verified post-mutation state as the restore precondition. A concurrent
+configuration change therefore aborts the `finally` cleanup rather than being
+accepted as a new baseline and overwritten.
