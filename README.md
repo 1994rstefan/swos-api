@@ -12,14 +12,43 @@ This monorepo contains independently versioned Python distributions:
 
 - `swos-core`: public API, transport, plugin contracts, and firmware safeguards
 - `swos-cli`: command-line client built exclusively on `swos-core`
+- `swos-ansible`: installable `swos.api` collection built exclusively on `swos-core`
 - `swos-device-css106`: CSS106 device support
-- a future `swos-ansible` package will use the same core API
 
-The CLI and future Ansible integration never contain device-specific HTTP
-logic. Device packages are discovered through Python entry points and declare
-the exact model and firmware combinations they support.
+The CLI and Ansible integration never contain device-specific HTTP logic.
+Device packages are discovered through Python entry points and declare the exact
+model and firmware combinations they support.
 
 See [the architecture documentation](docs/architecture.md) for details.
+
+## Ansible
+
+`swos-ansible` 0.1.0 installs the `swos.api` collection into Python's
+`ansible_collections` namespace. It provides normalized facts and idempotent,
+check-mode-safe modules for every currently hardware-enabled write operation.
+
+```yaml
+- name: Gather switch facts
+  swos.api.facts:
+    url: http://192.0.2.10
+    password: "{{ vault_swos_password }}"
+  delegate_to: localhost
+
+- name: Configure port 5 VLAN policy
+  swos.api.vlan_port_policy:
+    url: http://192.0.2.10
+    password: "{{ vault_swos_password }}"
+    port: 5
+    mode: strict
+    receive: untagged_only
+    default_vlan_id: 10
+    force_vlan_id: true
+    egress: strip
+  delegate_to: localhost
+```
+
+See [the Ansible integration documentation](docs/ansible.md) for installation,
+module inventory, safety flags, and result behavior.
 
 ## Development setup
 

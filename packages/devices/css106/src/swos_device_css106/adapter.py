@@ -11,6 +11,7 @@ from swos_core.models import (
     DeviceConnection,
     DeviceIdentity,
     DeviceNameUpdate,
+    ForcedPortNegotiation,
     ForwardingInfo,
     ForwardingMatrixUpdate,
     ForwardingMirroringUpdate,
@@ -284,6 +285,12 @@ class CSS106Adapter:
             value=after_ports[update.number - 1],
         )
 
+    def validate_port_name(self, update: PortNameUpdate) -> None:
+        """Validate a port-name update without opening a transport."""
+
+        validate_port_name(update.name)
+        self._validate_writable_port(update.number)
+
     def set_port_configuration(self, update: PortConfigurationUpdate) -> OperationResult[PortInfo]:
         """Configure one Ethernet port with identity and complete-state guards."""
 
@@ -334,6 +341,29 @@ class CSS106Adapter:
             value=after_ports[update.number - 1],
         )
 
+    def validate_port_configuration(
+        self,
+        update: PortConfigurationUpdate,
+        *,
+        current: PortInfo,
+    ) -> None:
+        """Validate port configuration against a fresh normalized read."""
+
+        self._validate_writable_port(update.number)
+        if current.number != update.number:
+            raise InvalidOperationError(
+                f"Expected current port {update.number}, received port {current.number}"
+            )
+        if isinstance(update.negotiation, ForcedPortNegotiation) and (
+            update.negotiation.speed_bps not in (10_000_000, 100_000_000)
+        ):
+            raise InvalidOperationError("CSS106 forced speed must be 10000000 or 100000000 bps")
+        if current.link_up and _changes_active_port_connectivity(update, current):
+            raise InvalidOperationError(
+                f"Port {update.number} is link-up; active ports cannot be disabled or "
+                "have negotiation changed"
+            )
+
     def set_device_name(self, update: DeviceNameUpdate) -> OperationResult[SystemInfo]:
         """Set the device name with a fresh identity check and sparse write."""
 
@@ -373,6 +403,11 @@ class CSS106Adapter:
             changed=True,
             value=after_info,
         )
+
+    def validate_device_name(self, update: DeviceNameUpdate) -> None:
+        """Validate a device-name update without opening a transport."""
+
+        validate_device_name(update.name)
 
     def set_snmp_metadata(self, update: SnmpMetadataUpdate) -> OperationResult[SnmpInfo]:
         """Set SNMP metadata with preserved service settings and full read-back."""
@@ -423,6 +458,14 @@ class CSS106Adapter:
                 raise ProtocolError("CSS106 SNMP metadata write failed read-back verification")
         return OperationResult[SnmpInfo](changed=True, value=snmp_from_payload(after_data))
 
+    def validate_snmp_metadata(self, update: SnmpMetadataUpdate) -> None:
+        """Validate SNMP metadata without opening a transport."""
+
+        if update.contact is not None:
+            validate_snmp_metadata(update.contact, "contact")
+        if update.location is not None:
+            validate_snmp_metadata(update.location, "location")
+
     def set_rstp_port_enabled(
         self,
         update: RstpPortEnableUpdate,
@@ -456,6 +499,17 @@ class CSS106Adapter:
         if rstp_enable_write_state_from_payload(after_rstp_data, self._identity) != desired:
             raise ProtocolError("CSS106 RSTP enable write failed read-back verification")
         return OperationResult[RstpInfo](changed=True, value=after)
+
+    def validate_rstp_port_enabled(
+        self,
+        update: RstpPortEnableUpdate,
+        *,
+        current: RstpInfo,
+    ) -> None:
+        """Validate an RSTP update against a fresh normalized read."""
+
+        self._validate_writable_port(update.number)
+        self._require_numbered(current.ports, update.number, "RSTP port")
 
     def set_rstp_bridge(
         self,
@@ -501,6 +555,24 @@ class CSS106Adapter:
             expected_current,
             lambda data: encode_forwarding_port_policy_update(data, self._identity, update),
         )
+
+    def validate_forwarding_port_policy(
+        self,
+        update: ForwardingPortPolicyUpdate,
+        *,
+        current: ForwardingInfo,
+    ) -> None:
+        """Validate forwarding policy against a fresh normalized read."""
+
+        self._validate_writable_port(update.number)
+        self._require_numbered(current.ports, update.number, "forwarding port")
+        management = next((port for port in current.ports if port.number == 6), None)
+        if (
+            management is not None and (management.mirror_ingress or management.mirror_egress)
+        ) or current.mirror_target_port == 6:
+            raise InvalidOperationError(
+                "CSS106 forwarding writes require management port 6 to be absent from mirroring"
+            )
 
     def set_forwarding_matrix(
         self,
@@ -565,6 +637,11 @@ class CSS106Adapter:
         if after != hosts:
             raise ProtocolError("CSS106 static-host write failed full-table read-back verification")
         return OperationResult[tuple[HostEntry, ...]](changed=True, value=after)
+
+    def validate_static_hosts(self, hosts: tuple[HostEntry, ...]) -> None:
+        """Validate a complete static-host table without opening a transport."""
+
+        encode_static_hosts(hosts, self._identity)
 
     def replace_acl_rules(
         self,
@@ -643,6 +720,17 @@ class CSS106Adapter:
             value=port_vlans_from_forwarding_payload(after_data, self._identity),
         )
 
+    def validate_port_vlan_policy(
+        self,
+        update: PortVlanPolicyUpdate,
+        *,
+        current: tuple[PortVlanInfo, ...],
+    ) -> None:
+        """Validate port VLAN policy against a fresh normalized read."""
+
+        self._validate_writable_port(update.number)
+        self._require_numbered(current, update.number, "VLAN port")
+
     def replace_vlans(
         self,
         vlans: tuple[VlanInfo, ...],
@@ -687,6 +775,19 @@ class CSS106Adapter:
         system_payload = transport.request("GET", "/sys.b", max_response_bytes=MAX_PAYLOAD_BYTES)
         if identity_from_system(parse_payload(system_payload)) != self._identity:
             raise ProtocolError("CSS106 identity changed after device probing")
+
+    def _validate_writable_port(self, number: int) -> None:
+        if number == 6:
+            raise InvalidOperationError("Port 6 is the SFP management port and cannot be modified")
+        if number < 1 or number > 5:
+            raise InvalidOperationError(
+                f"Port {number} does not exist on {self._identity.product_code}"
+            )
+
+    @staticmethod
+    def _require_numbered(items: tuple[object, ...], number: int, label: str) -> None:
+        if not any(getattr(item, "number", None) == number for item in items):
+            raise InvalidOperationError(f"{label} {number} was not returned by the device")
 
     def _read_rstp(
         self, transport: HttpTransport

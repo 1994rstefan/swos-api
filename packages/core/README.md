@@ -13,6 +13,9 @@ Guarded writes use typed desired-state models and return an `OperationResult`
 containing the verified state, whether a change was required, and any
 operation-specific firmware warning. `SwOSDevice` enforces write authorization
 and a distinct write capability before dispatching to a plugin.
+Matching `validate_*` methods enforce the same firmware policy, capability, and
+adapter-specific preconditions without performing a write. Consumers use these
+after fresh reads to implement device-validating dry runs and check mode.
 
 Desired state covers device names, port names, per-port RSTP enable, bridge
 settings, forwarding matrix/mirroring/port policy, per-port VLAN policy, SNMP

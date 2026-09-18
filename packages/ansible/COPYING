@@ -1,0 +1,8 @@
+The Ansible collection under src/ansible_collections/swos/api is distributed
+under the GNU General Public License, version 3 or any later version.
+
+The full license text is available at:
+https://www.gnu.org/licenses/gpl-3.0.txt
+
+The swos_ansible Python execution package and other distribution files are
+distributed under the MIT License in LICENSE.

@@ -5,11 +5,10 @@ protocols.
 
 ```text
 swos-cli -----------------> swos-core
+swos-ansible -------------> swos-core
                                ^
                                |
 swos-device-css106 ------------+
-
-swos-ansible --------------> swos-core       (planned)
 ```
 
 ## Package boundaries
@@ -25,6 +24,14 @@ capability in this facade rather than relying on CLI checks.
 
 `swos-cli` owns argument parsing, layered user configuration, output rendering,
 and process exit behavior. It performs no direct HTTP requests.
+
+`swos-ansible` owns Ansible argument schemas and result adaptation. Its
+`swos_ansible` execution layer is independent of `ansible-core`, operates only
+on the public `SwOSDevice` facade, and centralizes idempotence and check-mode
+projection. The wheel also installs the `swos.api` collection under the
+`ansible_collections` namespace. It performs no direct HTTP requests and imports
+no device package. Check mode uses public facade validation methods after fresh
+reads, so plugin-specific constraints are enforced without dispatching a write.
 
 Device support distributions own product aliases, exact support declarations,
 capabilities, firmware profiles, protocol encoding, and protocol fixtures.
@@ -56,6 +63,7 @@ testing RB260GS does not implicitly support RB260GSP.
 
 ## Release boundaries
 
-Core and CLI follow independent semantic versions. Device plugin versions
-follow the newest supported firmware family release, with PEP 440 post releases
-for plugin-only corrections. The explicit support matrix remains authoritative.
+Core, CLI, and Ansible integration follow independent semantic versions. Device
+plugin versions follow the newest supported firmware family release, with PEP
+440 post releases for plugin-only corrections. The explicit support matrix
+remains authoritative.

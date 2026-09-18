@@ -3,17 +3,17 @@ requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
-name = "swos-core"
-version = "0.8.1"
-description = "Device-agnostic Python API for managing MikroTik SwOS devices"
+name = "swos-ansible"
+version = "0.1.0"
+description = "Ansible collection for the swos-core API"
 readme = "README.md"
 requires-python = ">=3.11"
-license = "MIT"
-license-files = ["LICENSE"]
+license = "MIT AND GPL-3.0-or-later"
+license-files = ["LICENSE", "COPYING"]
 authors = [{ name = "1994rstefan" }]
 classifiers = [
   "Development Status :: 2 - Pre-Alpha",
-  "License :: OSI Approved :: MIT License",
+  "Framework :: Ansible",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
@@ -21,10 +21,7 @@ classifiers = [
   "Programming Language :: Python :: 3.14",
   "Typing :: Typed",
 ]
-dependencies = [
-  "httpx>=0.28,<1",
-  "pydantic>=2.11,<3",
-]
+dependencies = ["swos-core>=0.8.1,<0.9.0"]
 
 [project.urls]
 Homepage = "https://github.com/1994rstefan/swos-api"
@@ -32,4 +29,4 @@ Repository = "https://github.com/1994rstefan/swos-api"
 Issues = "https://github.com/1994rstefan/swos-api/issues"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/swos_core"]
+packages = ["src/swos_ansible", "src/ansible_collections"]

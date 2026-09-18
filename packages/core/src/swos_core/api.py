@@ -116,8 +116,23 @@ class DeviceAdapter(Protocol):
 
         ...
 
+    def validate_port_name(self, update: PortNameUpdate) -> None:
+        """Validate a port-name update without writing to the device."""
+
+        ...
+
     def set_port_configuration(self, update: PortConfigurationUpdate) -> OperationResult[PortInfo]:
         """Set and verify the configuration of one Ethernet port."""
+
+        ...
+
+    def validate_port_configuration(
+        self,
+        update: PortConfigurationUpdate,
+        *,
+        current: PortInfo,
+    ) -> None:
+        """Validate a port update against freshly read state without writing."""
 
         ...
 
@@ -126,8 +141,18 @@ class DeviceAdapter(Protocol):
 
         ...
 
+    def validate_device_name(self, update: DeviceNameUpdate) -> None:
+        """Validate a device-name update without writing to the device."""
+
+        ...
+
     def set_snmp_metadata(self, update: SnmpMetadataUpdate) -> OperationResult[SnmpInfo]:
         """Set and verify SNMP contact and location metadata."""
+
+        ...
+
+    def validate_snmp_metadata(self, update: SnmpMetadataUpdate) -> None:
+        """Validate an SNMP metadata update without writing to the device."""
 
         ...
 
@@ -138,6 +163,16 @@ class DeviceAdapter(Protocol):
         expected_current: RstpInfo,
     ) -> OperationResult[RstpInfo]:
         """Set one port's RSTP state if fresh configuration matches the baseline."""
+
+        ...
+
+    def validate_rstp_port_enabled(
+        self,
+        update: RstpPortEnableUpdate,
+        *,
+        current: RstpInfo,
+    ) -> None:
+        """Validate an RSTP port update against freshly read state."""
 
         ...
 
@@ -158,6 +193,16 @@ class DeviceAdapter(Protocol):
         expected_current: ForwardingInfo,
     ) -> OperationResult[ForwardingInfo]:
         """Set safe per-port forwarding policy against an expected baseline."""
+
+        ...
+
+    def validate_forwarding_port_policy(
+        self,
+        update: ForwardingPortPolicyUpdate,
+        *,
+        current: ForwardingInfo,
+    ) -> None:
+        """Validate forwarding policy against freshly read state."""
 
         ...
 
@@ -191,6 +236,11 @@ class DeviceAdapter(Protocol):
 
         ...
 
+    def validate_static_hosts(self, hosts: tuple[HostEntry, ...]) -> None:
+        """Validate a complete static-host table without writing it."""
+
+        ...
+
     def replace_acl_rules(
         self,
         rules: tuple[AclRule, ...],
@@ -208,6 +258,16 @@ class DeviceAdapter(Protocol):
         expected_current: tuple[PortVlanInfo, ...],
     ) -> OperationResult[tuple[PortVlanInfo, ...]]:
         """Set one port's VLAN policy if fresh state matches the baseline."""
+
+        ...
+
+    def validate_port_vlan_policy(
+        self,
+        update: PortVlanPolicyUpdate,
+        *,
+        current: tuple[PortVlanInfo, ...],
+    ) -> None:
+        """Validate port VLAN policy against freshly read state."""
 
         ...
 
@@ -365,6 +425,13 @@ class SwOSDevice:
             warnings=warnings,
         )
 
+    def validate_port_name(self, update: PortNameUpdate) -> tuple[SafetyWarning, ...]:
+        """Validate a port name under write policy without changing the device."""
+
+        warnings = self._authorize_write("port_name_write")
+        self._adapter.validate_port_name(update)
+        return warnings
+
     def set_port_configuration(self, update: PortConfigurationUpdate) -> OperationResult[PortInfo]:
         """Configure one port after enforcing write safety and capability checks."""
 
@@ -377,6 +444,18 @@ class SwOSDevice:
             value=result.value,
             warnings=warnings,
         )
+
+    def validate_port_configuration(
+        self,
+        update: PortConfigurationUpdate,
+        *,
+        current: PortInfo,
+    ) -> tuple[SafetyWarning, ...]:
+        """Validate port configuration under write policy without changing it."""
+
+        warnings = self._authorize_write("port_configuration_write")
+        self._adapter.validate_port_configuration(update, current=current)
+        return warnings
 
     def set_device_name(self, update: DeviceNameUpdate) -> OperationResult[SystemInfo]:
         """Set the device name after enforcing write safety and capability checks."""
@@ -391,6 +470,13 @@ class SwOSDevice:
             warnings=warnings,
         )
 
+    def validate_device_name(self, update: DeviceNameUpdate) -> tuple[SafetyWarning, ...]:
+        """Validate a device name under write policy without changing it."""
+
+        warnings = self._authorize_write("device_name_write")
+        self._adapter.validate_device_name(update)
+        return warnings
+
     def set_snmp_metadata(self, update: SnmpMetadataUpdate) -> OperationResult[SnmpInfo]:
         """Set SNMP metadata after enforcing write safety and capability checks."""
 
@@ -403,6 +489,13 @@ class SwOSDevice:
             value=result.value,
             warnings=warnings,
         )
+
+    def validate_snmp_metadata(self, update: SnmpMetadataUpdate) -> tuple[SafetyWarning, ...]:
+        """Validate SNMP metadata under write policy without changing it."""
+
+        warnings = self._authorize_write("snmp_metadata_write")
+        self._adapter.validate_snmp_metadata(update)
+        return warnings
 
     def set_rstp_port_enabled(
         self,
@@ -421,6 +514,18 @@ class SwOSDevice:
             value=result.value,
             warnings=warnings,
         )
+
+    def validate_rstp_port_enabled(
+        self,
+        update: RstpPortEnableUpdate,
+        *,
+        current: RstpInfo,
+    ) -> tuple[SafetyWarning, ...]:
+        """Validate an RSTP port update under write policy without changing it."""
+
+        warnings = self._authorize_write("rstp_port_enable_write")
+        self._adapter.validate_rstp_port_enabled(update, current=current)
+        return warnings
 
     def set_rstp_bridge(
         self,
@@ -457,6 +562,18 @@ class SwOSDevice:
             value=result.value,
             warnings=warnings,
         )
+
+    def validate_forwarding_port_policy(
+        self,
+        update: ForwardingPortPolicyUpdate,
+        *,
+        current: ForwardingInfo,
+    ) -> tuple[SafetyWarning, ...]:
+        """Validate forwarding policy under write policy without changing it."""
+
+        warnings = self._authorize_write("forwarding_port_policy_write")
+        self._adapter.validate_forwarding_port_policy(update, current=current)
+        return warnings
 
     def set_forwarding_matrix(
         self,
@@ -512,6 +629,16 @@ class SwOSDevice:
             warnings=warnings,
         )
 
+    def validate_static_hosts(
+        self,
+        hosts: tuple[HostEntry, ...],
+    ) -> tuple[SafetyWarning, ...]:
+        """Validate static hosts under write policy without changing the table."""
+
+        warnings = self._authorize_write("static_hosts_write")
+        self._adapter.validate_static_hosts(hosts)
+        return warnings
+
     def replace_acl_rules(
         self,
         rules: tuple[AclRule, ...],
@@ -548,6 +675,18 @@ class SwOSDevice:
             warnings=warnings,
         )
 
+    def validate_port_vlan_policy(
+        self,
+        update: PortVlanPolicyUpdate,
+        *,
+        current: tuple[PortVlanInfo, ...],
+    ) -> tuple[SafetyWarning, ...]:
+        """Validate port VLAN policy under write policy without changing it."""
+
+        warnings = self._authorize_write("vlan_port_policy_write")
+        self._adapter.validate_port_vlan_policy(update, current=current)
+        return warnings
+
     def replace_vlans(
         self,
         vlans: tuple[VlanInfo, ...],
@@ -573,3 +712,9 @@ class SwOSDevice:
             supported=self._supported,
             write=write,
         )
+
+    def _authorize_write(self, capability: str) -> tuple[SafetyWarning, ...]:
+        warnings = self._authorize(write=True)
+        if not self.capabilities.supports(capability):
+            raise UnsupportedFeatureError(capability)
+        return warnings

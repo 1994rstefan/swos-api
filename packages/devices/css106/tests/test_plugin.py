@@ -1970,6 +1970,74 @@ def test_adapter_validates_all_snmp_metadata_before_transport() -> None:
     assert transport.requests == []
 
 
+def test_adapter_dry_run_validation_uses_normalized_state_without_transport() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    transport = FakeTransport(b"")
+    adapter = CSS106Plugin(transport_factory=lambda connection: transport).create(  # type: ignore[arg-type]
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+    ports = ports_from_link_payload(parse_payload(link_fixture_payload()), identity)
+    rstp = rstp_from_payloads(
+        parse_payload(rstp_fixture_payload()),
+        parse_payload(rstp_system_fixture_payload()),
+        identity,
+    )
+    forwarding = forwarding_from_payload(parse_payload(forwarding_fixture_payload()), identity)
+    port_vlans = port_vlans_from_forwarding_payload(
+        parse_payload(forwarding_fixture_payload()), identity
+    )
+    hosts = static_hosts_from_payload(parse_table_payload(static_host_fixture_payload()), identity)
+
+    adapter.validate_device_name(DeviceNameUpdate(name="Core Switch"))
+    adapter.validate_port_name(PortNameUpdate(number=1, name="Uplink"))
+    adapter.validate_port_configuration(
+        PortConfigurationUpdate(number=1, flow_control=False), current=ports[0]
+    )
+    adapter.validate_snmp_metadata(SnmpMetadataUpdate(contact="Ops", location="Rack 1"))
+    adapter.validate_rstp_port_enabled(RstpPortEnableUpdate(number=1, enabled=False), current=rstp)
+    adapter.validate_forwarding_port_policy(
+        ForwardingPortPolicyUpdate(number=1, lock=True), current=forwarding
+    )
+    adapter.validate_static_hosts(hosts)
+    adapter.validate_port_vlan_policy(
+        PortVlanPolicyUpdate(number=1, force_vlan_id=False), current=port_vlans
+    )
+
+    assert transport.requests == []
+
+
+def test_adapter_dry_run_rejects_active_port_change_and_static_host_overflow() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    transport = FakeTransport(b"")
+    adapter = CSS106Plugin(transport_factory=lambda connection: transport).create(  # type: ignore[arg-type]
+        identity=identity,
+        connection=DeviceConnection(url="http://192.0.2.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+    port = ports_from_link_payload(parse_payload(link_fixture_payload()), identity)[0]
+    active = port.model_copy(
+        update={"link_up": True, "speed_bps": 100_000_000, "full_duplex": True}
+    )
+    host = static_hosts_from_payload(parse_table_payload(static_host_fixture_payload()), identity)[
+        0
+    ]
+
+    with pytest.raises(InvalidOperationError, match="link-up"):
+        adapter.validate_port_configuration(
+            PortConfigurationUpdate(number=1, enabled=False), current=active
+        )
+    with pytest.raises(InvalidOperationError, match=f"cannot exceed {MAX_STATIC_HOSTS}"):
+        adapter.validate_static_hosts(tuple(host for _ in range(MAX_STATIC_HOSTS + 1)))
+
+    assert transport.requests == []
+
+
 def test_adapter_normalizes_port_vlan_policy() -> None:
     identity = identity_from_system(parse_payload(fixture_payload()))
     assert identity is not None

@@ -30,7 +30,9 @@ Commands that use an override include a machine-readable warning in JSON output
 and a `Warning:` line in human output.
 
 The write override must be explicit for an invocation. It is enforced in
-`swos-core`, so CLI and future Ansible consumers have identical safeguards.
+`swos-core`, so CLI and Ansible consumers have identical safeguards. Ansible
+configuration modules resolve write policy before their initial read, including
+in check mode.
 
 ## Testing requirements
 

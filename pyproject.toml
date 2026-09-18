@@ -3,6 +3,7 @@ addopts = "--strict-config --strict-markers"
 testpaths = [
   "packages/core/tests",
   "packages/cli/tests",
+  "packages/ansible/tests",
   "packages/devices/css106/tests",
   "tests",
 ]
@@ -13,7 +14,7 @@ markers = [
 
 [tool.coverage.run]
 branch = true
-source = ["swos_core", "swos_cli", "swos_device_css106"]
+source = ["swos_core", "swos_cli", "swos_ansible", "swos_device_css106"]
 
 [tool.coverage.report]
 show_missing = true
@@ -28,14 +29,16 @@ select = ["B", "E", "F", "I", "RUF", "UP"]
 
 [tool.ruff.lint.per-file-ignores]
 "**/tests/**" = ["S101"]
+"packages/ansible/src/ansible_collections/**/plugins/modules/*.py" = ["E402"]
 
 [tool.mypy]
 python_version = "3.11"
 strict = true
-packages = ["swos_core", "swos_cli", "swos_device_css106"]
+packages = ["swos_core", "swos_cli", "swos_ansible", "swos_device_css106"]
 mypy_path = [
   "packages/core/src",
   "packages/cli/src",
+  "packages/ansible/src",
   "packages/devices/css106/src",
 ]
 

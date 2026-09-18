@@ -1,0 +1,18 @@
+namespace: swos
+name: api
+version: 0.1.0
+readme: README.md
+authors:
+  - 1994rstefan
+description: Manage SwOS devices through the public swos-core API.
+license:
+  - GPL-3.0-or-later
+tags:
+  - networking
+  - switch
+  - mikrotik
+  - swos
+repository: https://github.com/1994rstefan/swos-api
+issues: https://github.com/1994rstefan/swos-api/issues
+build_ignore:
+  - tests

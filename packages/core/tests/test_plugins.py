@@ -254,6 +254,9 @@ class FakeAdapter:
         port = self.get_ports()[0].model_copy(update={"number": update.number, "name": update.name})
         return OperationResult[PortInfo](changed=True, value=port)
 
+    def validate_port_name(self, update: PortNameUpdate) -> None:
+        del update
+
     def set_port_configuration(self, update: PortConfigurationUpdate) -> OperationResult[PortInfo]:
         port = self.get_ports()[0]
         changes: dict[str, object] = {}
@@ -271,11 +274,22 @@ class FakeAdapter:
             )
         return OperationResult[PortInfo](changed=True, value=port.model_copy(update=changes))
 
+    def validate_port_configuration(
+        self,
+        update: PortConfigurationUpdate,
+        *,
+        current: PortInfo,
+    ) -> None:
+        del update, current
+
     def set_device_name(self, update: DeviceNameUpdate) -> OperationResult[SystemInfo]:
         return OperationResult[SystemInfo](
             changed=True,
             value=self.get_system_info().model_copy(update={"name": update.name}),
         )
+
+    def validate_device_name(self, update: DeviceNameUpdate) -> None:
+        del update
 
     def set_snmp_metadata(self, update: SnmpMetadataUpdate) -> OperationResult[SnmpInfo]:
         before = self.get_snmp()
@@ -288,6 +302,9 @@ class FakeAdapter:
                 }
             ),
         )
+
+    def validate_snmp_metadata(self, update: SnmpMetadataUpdate) -> None:
+        del update
 
     def set_rstp_port_enabled(
         self,
@@ -307,6 +324,14 @@ class FakeAdapter:
             changed=ports != before.ports,
             value=before.model_copy(update={"ports": ports}),
         )
+
+    def validate_rstp_port_enabled(
+        self,
+        update: RstpPortEnableUpdate,
+        *,
+        current: RstpInfo,
+    ) -> None:
+        del update, current
 
     def set_rstp_bridge(
         self,
@@ -337,6 +362,14 @@ class FakeAdapter:
         )
         value = before.model_copy(update={"ports": ports})
         return OperationResult[ForwardingInfo](changed=value != before, value=value)
+
+    def validate_forwarding_port_policy(
+        self,
+        update: ForwardingPortPolicyUpdate,
+        *,
+        current: ForwardingInfo,
+    ) -> None:
+        del update, current
 
     def set_forwarding_matrix(
         self,
@@ -374,6 +407,9 @@ class FakeAdapter:
         del expected_current
         return OperationResult[tuple[HostEntry, ...]](changed=True, value=hosts)
 
+    def validate_static_hosts(self, hosts: tuple[HostEntry, ...]) -> None:
+        del hosts
+
     def replace_acl_rules(
         self,
         rules: tuple[AclRule, ...],
@@ -397,6 +433,14 @@ class FakeAdapter:
             for port in before
         )
         return OperationResult[tuple[PortVlanInfo, ...]](changed=value != before, value=value)
+
+    def validate_port_vlan_policy(
+        self,
+        update: PortVlanPolicyUpdate,
+        *,
+        current: tuple[PortVlanInfo, ...],
+    ) -> None:
+        del update, current
 
     def replace_vlans(
         self,
@@ -569,6 +613,8 @@ def test_policy_bound_device_rejects_unsupported_feature() -> None:
         device.set_port_configuration(PortConfigurationUpdate(number=1, flow_control=False))
     with pytest.raises(UnsupportedFeatureError, match="device name write"):
         device.set_device_name(DeviceNameUpdate(name="Core Switch"))
+    with pytest.raises(UnsupportedFeatureError, match="device name write"):
+        device.validate_device_name(DeviceNameUpdate(name="Core Switch"))
     with pytest.raises(UnsupportedFeatureError, match="snmp metadata write"):
         device.set_snmp_metadata(SnmpMetadataUpdate(contact="Ops"))
     with pytest.raises(UnsupportedFeatureError, match="static hosts write"):
@@ -654,6 +700,39 @@ def test_policy_bound_device_authorizes_and_returns_write_result() -> None:
     assert metadata.value.community == "public"
     assert metadata.warnings == ()
 
+    assert device.validate_device_name(DeviceNameUpdate(name="Core Switch")) == ()
+    assert device.validate_port_name(PortNameUpdate(number=1, name="Uplink")) == ()
+    assert (
+        device.validate_port_configuration(
+            PortConfigurationUpdate(number=1, flow_control=False),
+            current=device.get_ports()[0],
+        )
+        == ()
+    )
+    assert device.validate_snmp_metadata(SnmpMetadataUpdate(contact="NOC")) == ()
+    assert device.validate_static_hosts(()) == ()
+    assert (
+        device.validate_rstp_port_enabled(
+            RstpPortEnableUpdate(number=1, enabled=False),
+            current=device.get_rstp(),
+        )
+        == ()
+    )
+    assert (
+        device.validate_forwarding_port_policy(
+            ForwardingPortPolicyUpdate(number=1, lock=True),
+            current=device.get_forwarding(),
+        )
+        == ()
+    )
+    assert (
+        device.validate_port_vlan_policy(
+            PortVlanPolicyUpdate(number=1, force_vlan_id=False),
+            current=device.get_port_vlans(),
+        )
+        == ()
+    )
+
 
 def test_policy_bound_device_requires_explicit_untested_write_permission() -> None:
     registry = PluginRegistry([FakePlugin()])
@@ -675,6 +754,10 @@ def test_policy_bound_device_requires_explicit_untested_write_permission() -> No
     result = writable.set_port_name(PortNameUpdate(number=1, name="Uplink"))
 
     assert result.warnings[0].code == "untested_firmware_write"
+    assert (
+        writable.validate_port_name(PortNameUpdate(number=1, name="Uplink"))[0].code
+        == "untested_firmware_write"
+    )
     assert (
         writable.set_port_configuration(PortConfigurationUpdate(number=1, flow_control=False))
         .warnings[0]
