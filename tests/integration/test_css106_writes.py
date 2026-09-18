@@ -1,6 +1,7 @@
 import os
+import socket
 import sys
-from ipaddress import IPv4Address
+from ipaddress import IPv4Address, IPv4Network
 from socket import create_connection
 from typing import Literal
 from urllib.parse import urlsplit, urlunsplit
@@ -500,6 +501,103 @@ def test_rb260gs_219_port_5_management_allowed_write_and_restore() -> None:
 @pytest.mark.integration
 @pytest.mark.destructive
 @pytest.mark.management_reconnect
+def test_rb260gs_219_admin_mac_physical_value_and_restore() -> None:
+    connection = _integration_connection()
+    registry = PluginRegistry.discover()
+    identity = registry.probe(connection)
+    device = registry.connect(identity, connection, FirmwareSafetyPolicy())
+    original = device.get_system_info()
+    assert original.management is not None
+    if original.management.admin_mac_address is not None:
+        pytest.skip("admin MAC override is already set; refusing destructive test")
+    if original.mac_address is None:
+        pytest.skip("physical system MAC is unavailable")
+    expected_temporary = original.model_copy(
+        update={
+            "management": original.management.model_copy(
+                update={"admin_mac_address": original.mac_address}
+            )
+        }
+    )
+
+    try:
+        changed = device.set_system_configuration(
+            SystemConfigurationUpdate(admin_mac_address=original.mac_address),
+            expected_current=original,
+        )
+        assert changed.changed
+        assert _system_configuration(changed.value) == _system_configuration(expected_temporary)
+        assert changed.value.mac_address == original.mac_address
+        assert any(warning.code == "management_lockout_risk" for warning in changed.warnings)
+    finally:
+        _restore_management_reconnect(
+            registry,
+            identity=identity,
+            original_connection=connection,
+            temporary_url=str(connection.url),
+            original=original,
+            expected_temporary=expected_temporary,
+            update=SystemConfigurationUpdate(admin_mac_address="unset"),
+        )
+
+
+@pytest.mark.integration
+@pytest.mark.destructive
+@pytest.mark.management_reconnect
+def test_rb260gs_219_allow_from_connected_subnet_and_restore() -> None:
+    connection = _integration_connection()
+    registry = PluginRegistry.discover()
+    identity = registry.probe(connection)
+    device = registry.connect(identity, connection, FirmwareSafetyPolicy())
+    original = device.get_system_info()
+    assert original.management is not None
+    if original.management.allow_from is not None:
+        pytest.skip("allow-from override is already set; refusing destructive test")
+    if original.management.allow_prefix_length != 0:
+        pytest.skip("allow-from prefix is not unset/0; refusing destructive test")
+    if 6 not in original.management.allowed_port_numbers:
+        pytest.skip("port 6 is not a management allowed port; refusing destructive test")
+    allow_from = _directly_connected_allow_from(original.current_ip)
+    if allow_from is None:
+        pytest.skip("device and selected local route are not both in the current 192.168.88.0/24")
+    expected_temporary = original.model_copy(
+        update={
+            "management": original.management.model_copy(
+                update={"allow_from": allow_from, "allow_prefix_length": 24}
+            )
+        }
+    )
+
+    try:
+        changed = device.set_system_configuration(
+            SystemConfigurationUpdate(allow_from=allow_from, allow_prefix_length=24),
+            expected_current=original,
+        )
+        assert changed.changed
+        assert _system_configuration(changed.value) == _system_configuration(expected_temporary)
+        assert changed.value.management is not None
+        assert changed.value.management.allow_prefix_length == 24
+        assert (
+            changed.value.management.allowed_port_numbers
+            == original.management.allowed_port_numbers
+        )
+        assert 6 in changed.value.management.allowed_port_numbers
+        assert any(warning.code == "management_lockout_risk" for warning in changed.warnings)
+    finally:
+        _restore_management_reconnect(
+            registry,
+            identity=identity,
+            original_connection=connection,
+            temporary_url=str(connection.url),
+            original=original,
+            expected_temporary=expected_temporary,
+            update=SystemConfigurationUpdate(allow_from="unset", allow_prefix_length=0),
+        )
+
+
+@pytest.mark.integration
+@pytest.mark.destructive
+@pytest.mark.management_reconnect
 def test_rb260gs_219_management_vlan_one_reconnect_and_restore() -> None:
     if os.environ.get("SWOS_INTEGRATION_MANAGEMENT_PORT") != "6":
         pytest.skip("SWOS_INTEGRATION_MANAGEMENT_PORT=6 is required")
@@ -511,10 +609,18 @@ def test_rb260gs_219_management_vlan_one_reconnect_and_restore() -> None:
     assert original.management is not None
     if original.management.allowed_vlan_id is not None:
         pytest.skip("management VLAN is not unset; refusing management reconnect test")
+    if 6 not in original.management.allowed_port_numbers:
+        pytest.skip("port 6 is not a management allowed port; refusing destructive test")
     port6 = next(port for port in device.get_port_vlans() if port.number == 6)
     vlans = device.get_vlans()
-    if not _port6_has_untagged_vlan_one_path(port6, vlans):
-        pytest.skip("port 6 does not have a proven untagged VLAN 1 ingress and egress path")
+    risk_acknowledged = _management_vlan_risk_acknowledged()
+    if not _management_vlan_gate_allows(port6, vlans, risk_acknowledged=risk_acknowledged):
+        if not _port6_accepts_untagged_vlan_one(port6):
+            pytest.skip("port 6 does not accept untagged ingress with PVID 1")
+        pytest.skip(
+            "port 6 egress is not conservatively proven safe; set "
+            "SWOS_INTEGRATION_MANAGEMENT_VLAN_RISK_ACKNOWLEDGED=1 to accept factory-reset risk"
+        )
     expected_temporary = original.model_copy(
         update={"management": original.management.model_copy(update={"allowed_vlan_id": 1})}
     )
@@ -525,6 +631,12 @@ def test_rb260gs_219_management_vlan_one_reconnect_and_restore() -> None:
         )
         assert changed.changed
         assert _system_configuration(changed.value) == _system_configuration(expected_temporary)
+        assert changed.value.management is not None
+        assert (
+            changed.value.management.allowed_port_numbers
+            == original.management.allowed_port_numbers
+        )
+        assert 6 in changed.value.management.allowed_port_numbers
         assert any(warning.code == "management_lockout_risk" for warning in changed.warnings)
     finally:
         _restore_management_reconnect(
@@ -644,16 +756,40 @@ def _integration_connection() -> DeviceConnection:
     )
 
 
-def _port6_has_untagged_vlan_one_path(
+def _directly_connected_allow_from(current_ip: str | None) -> str | None:
+    try:
+        device_address = IPv4Address(current_ip) if current_ip is not None else None
+    except ValueError:
+        return None
+    required_network = IPv4Network("192.168.88.0/24")
+    if device_address is None or device_address not in required_network:
+        return None
+
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as route_socket:
+            route_socket.connect((str(device_address), 9))
+            source_address = IPv4Address(route_socket.getsockname()[0])
+    except (OSError, ValueError):
+        return None
+    source_network = IPv4Network(f"{source_address}/24", strict=False)
+    if source_address not in required_network or device_address not in source_network:
+        return None
+    return str(source_network.network_address)
+
+
+def _port6_accepts_untagged_vlan_one(port6: PortVlanInfo) -> bool:
+    return (
+        port6.number == 6
+        and port6.default_vlan_id == 1
+        and port6.receive is not VlanReceiveMode.TAGGED_ONLY
+    )
+
+
+def _port6_has_proven_untagged_vlan_one_egress(
     port6: PortVlanInfo,
     vlans: tuple[VlanInfo, ...],
 ) -> bool:
-    if (
-        port6.number != 6
-        or port6.default_vlan_id != 1
-        or port6.receive is VlanReceiveMode.TAGGED_ONLY
-        or port6.egress is not VlanEgressMode.STRIP
-    ):
+    if port6.egress is not VlanEgressMode.STRIP:
         return False
     vlan1 = next((vlan for vlan in vlans if vlan.vlan_id == 1), None)
     if vlan1 is None:
@@ -662,7 +798,89 @@ def _port6_has_untagged_vlan_one_path(
     return membership is not None and membership.mode is VlanMembershipMode.STRIP
 
 
-def test_management_vlan_gate_requires_definite_untagged_port6_path() -> None:
+def _management_vlan_gate_allows(
+    port6: PortVlanInfo,
+    vlans: tuple[VlanInfo, ...],
+    *,
+    risk_acknowledged: bool,
+) -> bool:
+    return _port6_accepts_untagged_vlan_one(port6) and (
+        risk_acknowledged or _port6_has_proven_untagged_vlan_one_egress(port6, vlans)
+    )
+
+
+def _management_vlan_risk_acknowledged() -> bool:
+    return os.environ.get("SWOS_INTEGRATION_MANAGEMENT_VLAN_RISK_ACKNOWLEDGED") == "1"
+
+
+def test_allow_from_route_uses_connected_udp_socket(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    calls: list[tuple[object, ...]] = []
+
+    class RouteSocket:
+        connected = False
+
+        def __enter__(self) -> "RouteSocket":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            pass
+
+        def connect(self, address: tuple[str, int]) -> None:
+            calls.append(("connect", address))
+            self.connected = True
+
+        def getsockname(self) -> tuple[str, int]:
+            assert self.connected
+            calls.append(("getsockname",))
+            return ("192.168.88.42", 49152)
+
+    def open_socket(family: int, kind: int) -> RouteSocket:
+        calls.append(("socket", family, kind))
+        return RouteSocket()
+
+    monkeypatch.setattr(socket, "socket", open_socket)
+
+    assert _directly_connected_allow_from("192.168.88.1") == "192.168.88.0"
+    assert calls == [
+        ("socket", socket.AF_INET, socket.SOCK_DGRAM),
+        ("connect", ("192.168.88.1", 9)),
+        ("getsockname",),
+    ]
+
+
+def test_allow_from_route_rejects_other_device_or_source_subnets(
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    calls = 0
+
+    class RouteSocket:
+        def __enter__(self) -> "RouteSocket":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            pass
+
+        def connect(self, address: tuple[str, int]) -> None:
+            del address
+
+        def getsockname(self) -> tuple[str, int]:
+            return ("192.168.89.42", 49152)
+
+    def open_socket(family: int, kind: int) -> RouteSocket:
+        nonlocal calls
+        del family, kind
+        calls += 1
+        return RouteSocket()
+
+    monkeypatch.setattr(socket, "socket", open_socket)
+
+    assert _directly_connected_allow_from("192.168.89.1") is None
+    assert calls == 0
+    assert _directly_connected_allow_from("192.168.88.1") is None
+    assert calls == 1
+
+
+def test_management_vlan_gate_requires_ingress_and_gates_uncertain_egress() -> None:
     port6 = PortVlanInfo(
         number=6,
         mode=VlanMode.OPTIONAL,
@@ -678,12 +896,23 @@ def test_management_vlan_gate_requires_definite_untagged_port6_path() -> None:
         ports=(VlanPortMembership(port_number=6, mode=VlanMembershipMode.STRIP),),
     )
 
-    assert _port6_has_untagged_vlan_one_path(port6, (vlan1,))
-    assert not _port6_has_untagged_vlan_one_path(
-        port6.model_copy(update={"egress": VlanEgressMode.PRESERVE}), (vlan1,)
+    assert _management_vlan_gate_allows(port6, (vlan1,), risk_acknowledged=False)
+    uncertain_egress = port6.model_copy(update={"egress": VlanEgressMode.PRESERVE})
+    assert not _management_vlan_gate_allows(uncertain_egress, (vlan1,), risk_acknowledged=False)
+    assert _management_vlan_gate_allows(uncertain_egress, (vlan1,), risk_acknowledged=True)
+    assert not _management_vlan_gate_allows(port6, (), risk_acknowledged=False)
+    assert _management_vlan_gate_allows(port6, (), risk_acknowledged=True)
+    assert not _management_vlan_gate_allows(
+        port6.model_copy(update={"receive": VlanReceiveMode.TAGGED_ONLY}),
+        (vlan1,),
+        risk_acknowledged=True,
     )
-    assert not _port6_has_untagged_vlan_one_path(port6, ())
-    assert not _port6_has_untagged_vlan_one_path(
+    assert not _management_vlan_gate_allows(
+        port6.model_copy(update={"default_vlan_id": 2}),
+        (vlan1,),
+        risk_acknowledged=True,
+    )
+    assert not _management_vlan_gate_allows(
         port6,
         (
             vlan1.model_copy(
@@ -692,10 +921,18 @@ def test_management_vlan_gate_requires_definite_untagged_port6_path() -> None:
                 }
             ),
         ),
+        risk_acknowledged=False,
     )
-    assert not _port6_has_untagged_vlan_one_path(
-        port6.model_copy(update={"receive": VlanReceiveMode.TAGGED_ONLY}), (vlan1,)
-    )
+
+
+def test_management_vlan_risk_acknowledgement_requires_exact_one(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    variable = "SWOS_INTEGRATION_MANAGEMENT_VLAN_RISK_ACKNOWLEDGED"
+    monkeypatch.delenv(variable, raising=False)
+    assert not _management_vlan_risk_acknowledged()
+    monkeypatch.setenv(variable, "true")
+    assert not _management_vlan_risk_acknowledged()
+    monkeypatch.setenv(variable, "1")
+    assert _management_vlan_risk_acknowledged()
 
 
 def _connection_at(connection: DeviceConnection, url: str) -> DeviceConnection:
@@ -815,10 +1052,13 @@ def _restore_management_reconnect(
             "Neither the original nor temporary management URL reaches the exact expected device; "
             "no cleanup write was attempted and a manual reset is required."
         )
-    if "unknown" in observed_states or "conflict" in observed_states:
-        raise AssertionError(
-            "A management URL returned an unknown device or configuration; refusing cleanup"
+    if "unknown" in observed_states:
+        raise ManagementStateUncertainError(
+            "A management URL returned an unknown device or configuration; no cleanup write was "
+            "attempted and a manual reset is required."
         )
+    if "conflict" in observed_states:
+        raise AssertionError("A management URL returned a conflicting device; refusing cleanup")
     if observed_states == {"original"}:
         return
     if observed_states != {"temporary"}:
@@ -836,6 +1076,8 @@ def _restore_management_reconnect(
         readback_url=str(original_connection.url),
     )
     assert _system_configuration(restored.value) == _system_configuration(original)
+    assert restored.value.serial_number == original.serial_number
+    assert restored.value.mac_address == original.mac_address
 
 
 def _toggle_port(ports: tuple[int, ...], port_number: int) -> tuple[int, ...]:
@@ -1247,14 +1489,14 @@ def test_management_reconnect_cleanup_restores_only_exact_temporary_state() -> N
     assert device.writes == [(update, temporary, "http://192.0.2.1/")]
 
 
-def test_management_reconnect_cleanup_refuses_unknown_state_without_write() -> None:
+def test_management_reconnect_cleanup_requires_reset_for_unknown_state_without_write() -> None:
     original, temporary = _system_cleanup_states()
     unknown = temporary.model_copy(update={"name": "unexpected"})
     connection = DeviceConnection(url="http://192.0.2.1")
     device = _ReconnectCleanupDevice(unknown, original)
     registry = _ReconnectCleanupRegistry(original.identity, {str(connection.url): device})
 
-    with pytest.raises(AssertionError, match="refusing cleanup"):
+    with pytest.raises(ManagementStateUncertainError, match="manual reset is required"):
         _restore_management_reconnect(  # type: ignore[arg-type]
             registry,
             identity=original.identity,

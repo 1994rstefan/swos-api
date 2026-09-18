@@ -1707,6 +1707,82 @@ def test_adapter_management_vlan_reconnect_warns_and_reads_current_url() -> None
     assert urls == ["http://192.168.88.1/", "http://192.168.88.1/"]
 
 
+def test_adapter_sets_admin_mac_through_same_url_reconnect() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    current = system_info_from_payload(parse_payload(fixture_payload()), identity)
+    configured_payload = system_payload_with((b"amac:'000000000000'", b"amac:'020000000001'"))
+    transports = iter((FakeTransport((fixture_payload(), b"")), FakeTransport(configured_payload)))
+    connections: list[DeviceConnection] = []
+
+    def factory(connection: DeviceConnection) -> FakeTransport:
+        connections.append(connection)
+        return next(transports)
+
+    adapter = CSS106Plugin(transport_factory=factory).create(  # type: ignore[arg-type]
+        identity=identity,
+        connection=DeviceConnection(url="http://192.168.88.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+
+    result = adapter.set_system_configuration(
+        SystemConfigurationUpdate(admin_mac_address="02:00:00:00:00:01"),
+        expected_current=current,
+    )
+
+    assert result.value.management is not None
+    assert result.value.management.admin_mac_address == "02:00:00:00:00:01"
+    assert [str(connection.url) for connection in connections] == [
+        "http://192.168.88.1/",
+        "http://192.168.88.1/",
+    ]
+
+
+def test_adapter_clears_admin_mac_through_same_url_after_post_connection_reset() -> None:
+    identity = identity_from_system(parse_payload(fixture_payload()))
+    assert identity is not None
+    configured_payload = system_payload_with((b"amac:'000000000000'", b"amac:'020000000001'"))
+    current = system_info_from_payload(parse_payload(configured_payload), identity)
+    update = SystemConfigurationUpdate(admin_mac_address="unset")
+    _, desired = encode_system_configuration_update(
+        parse_payload(configured_payload), identity, update
+    )
+    assert desired == system_configuration_write_state_from_payload(
+        parse_payload(fixture_payload()), identity
+    )
+    post_transport = PostFailingTransport(
+        configured_payload, TransportError("connection reset by reboot")
+    )
+    transports = iter((post_transport, FakeTransport(fixture_payload())))
+    connections: list[DeviceConnection] = []
+
+    def factory(connection: DeviceConnection) -> FakeTransport:
+        connections.append(connection)
+        return next(transports)
+
+    adapter = CSS106Plugin(transport_factory=factory).create(  # type: ignore[arg-type]
+        identity=identity,
+        connection=DeviceConnection(url="http://192.168.88.1"),
+        policy=FirmwareSafetyPolicy(),
+        support=plugin.support_records()[0],
+    )
+
+    result = adapter.set_system_configuration(update, expected_current=current)
+
+    assert result.changed
+    assert result.value.identity == current.identity
+    assert result.value.serial_number == current.serial_number
+    assert result.value.mac_address == current.mac_address
+    assert result.value.management is not None
+    assert result.value.management.admin_mac_address is None
+    assert [str(connection.url) for connection in connections] == [
+        "http://192.168.88.1/",
+        "http://192.168.88.1/",
+    ]
+    assert post_transport.requests == [("GET", "/sys.b"), ("POST", "/sys.b")]
+
+
 def test_adapter_management_readback_retries_without_another_write(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     identity = identity_from_system(parse_payload(fixture_payload()))
     assert identity is not None

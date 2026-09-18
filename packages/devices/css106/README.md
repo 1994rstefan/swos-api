@@ -64,19 +64,20 @@ state, preserves every omitted field, skips no-ops, and attempts complete-object
 verification through selected-URL readback. All three port masks preserve bit 5;
 management allowed ports must include port 6.
 
-Management VLAN, address-mode, and active static-IP changes use a guarded
-reconnect workflow. Static target URLs are derived by replacing only the current
-URL host with the desired static IP. DHCP targets require an explicit readback
-URL unless an existing active DHCP lease is provably the current URL. Explicit
-URLs must be bare HTTP(S), contain no userinfo/query/fragment, and retain the
-configured scheme and effective port; backslashes and non-canonical spellings
-are rejected. Explicit URLs cannot override deterministic static targets. A
-DHCP-fallback static IP is active when it equals the operational address, so
-changing it derives a reconnect target and emits the lockout warning rather than
-staging it. A static address can be staged only when DHCP fallback has an active
-lease, never in DHCP-only mode. Administrative MAC wire values are twelve
-lowercase hex digits, text is hex encoded, IPv4 is little-endian, booleans are
-`0`/`1`, and IGMP v2/v3 map to `0`/`1`. Numeric serialization matches the UI:
+Admin-MAC override, management VLAN, address-mode, and active static-IP changes
+use a guarded reconnect workflow. Static target URLs are derived by replacing
+only the current URL host with the desired static IP. DHCP targets require an
+explicit readback URL unless an existing active DHCP lease is provably the
+current URL. Explicit URLs must be bare HTTP(S), contain no
+userinfo/query/fragment, and retain the configured scheme and effective port;
+backslashes and non-canonical spellings are rejected. Explicit URLs cannot
+override deterministic static targets. A DHCP-fallback static IP is active when
+it equals the operational address, so changing it derives a reconnect target
+and emits the lockout warning rather than staging it. A static address can be
+staged only when DHCP fallback has an active lease, never in DHCP-only mode.
+Administrative MAC wire values are twelve lowercase hex digits, text is hex
+encoded, IPv4 is little-endian, booleans are `0`/`1`, and IGMP v2/v3 map to
+`0`/`1`. Numeric serialization matches the UI:
 lowercase hexadecimal with the minimum even number of digits, including `0x00`
 for zero. As in the UI's `Kb` transition, the complete desired wire state forces
 the IGMP querier off whenever snooping is off.
@@ -86,13 +87,15 @@ IPv4 link-local unicast addresses remain supported.
 
 Admin MAC, allow-from, management allowed-port, management VLAN, and active
 address changes are explicitly authorized lockout writes. Successful operation results include a
-`management_lockout_risk` warning with before/after values. Same-URL readback is
-used for unaffected management paths; reconnecting writes close the old
-transport after one POST and poll the selected URL for exact identity and the
-complete target state. Only a successful verification atomically replaces the
-adapter connection. Reconnect identity includes the original serial number and
-physical MAC in addition to firmware identity. Definitive authentication, HTTP,
-or protocol POST failures propagate immediately; only ambiguous request loss
+`management_lockout_risk` warning with before/after values. Changing the admin
+MAC override in either direction reboots the device, so it always uses same-URL
+reconnect readback. Other unaffected management paths use same-transport
+readback. Reconnecting writes close the old transport after one POST and poll
+the selected URL for about one minute for exact identity and the complete target
+state. Only a successful verification atomically replaces the adapter
+connection. Reconnect identity includes the original serial number and physical
+MAC in addition to firmware identity. Definitive authentication, HTTP, or
+protocol POST failures propagate immediately; only ambiguous request loss
 enters polling. Failed polling issues no second write and raises an
 uncertain-state error that may require a manual factory reset.
 

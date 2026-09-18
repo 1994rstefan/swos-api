@@ -38,19 +38,36 @@ cleanup attempt restoration; if neither credential works, the test stops
 writing and reports that a manual reset is required without printing either
 credential.
 
-Management address and VLAN reconnect tests have their own third gate:
+Management lockout and reconnect tests have their own third gate:
 
 ```bash
 pytest --run-integration --run-destructive --run-management-reconnect -m management_reconnect
 ```
 
-The VLAN test additionally requires `SWOS_INTEGRATION_MANAGEMENT_PORT=6`. It sets
-management VLAN from unset to 1 only when port 6 has PVID 1, accepts untagged
-frames, has port-policy egress set to strip tags, and has an explicit VLAN 1
-table membership whose effective egress also strips tags. Empty tables and
-preserve egress therefore skip safely. The test only reads port 6 and never
-changes its policy or membership. The address-mode test changes
+The admin-MAC test runs only when the override is unset, sets it to the exact
+physical system MAC, verifies the reboot through same-URL reconnect and exact
+full-state readback, and clears the override through the same guarded reconnect.
+The allow-from test runs only when allow-from and its prefix are unset (`0`). It
+atomically sets `192.168.88.0/24`, then restores both fields to unset/`0`. It uses
+a connected UDP socket without sending credentials or application data to
+discover the actual local IPv4 source for the current device address, and only
+selects `192.168.88.0/24` when both ends are in that subnet. It preserves the
+management allowed-port mask including port 6.
+
+The VLAN test additionally requires `SWOS_INTEGRATION_MANAGEMENT_PORT=6`. It
+sets management VLAN from unset to 1 and back to unset, while requiring port 6
+to remain management-allowed, have PVID 1, and accept untagged ingress. By
+default it also requires port-policy egress to strip tags and explicit VLAN 1
+table membership whose effective egress strips tags. Empty tables and preserve
+egress skip safely. Setting
+`SWOS_INTEGRATION_MANAGEMENT_VLAN_RISK_ACKNOWLEDGED=1` bypasses only that
+conservative egress proof; it explicitly accepts management lockout and manual
+factory-reset risk. It does not bypass the management-port, PVID, or untagged
+ingress requirements. The test only reads port 6 and never changes its policy,
+membership, or management-port state. The address-mode test changes
 DHCP-with-fallback to static at the same address and restores it.
+On RB260GS SwOS 2.19 hardware, management VLAN unset -> 1 -> unset completed
+successfully with the explicit risk acknowledgement enabled.
 
 The optional actual address move requires `SWOS_INTEGRATION_TEMPORARY_IP` and an
 acknowledgement whose value is that same address, for example
@@ -59,8 +76,9 @@ either is absent or when an unauthenticated TCP connection shows that the target
 address is occupied. No HTTP credentials are sent during the vacancy check.
 Cleanup probes both original and temporary URLs, gathers every observation, and
 restores only when every reachable observation is the exact expected temporary
-device state. Any unknown/conflicting observation refuses all writes. If neither
-URL is reachable, cleanup raises the reset-required domain error and performs no
+device state. Any unknown observation raises the reset-required domain error;
+any conflicting observation refuses cleanup. Both cases perform no write. If
+neither URL is reachable, cleanup also raises reset-required and performs no
 further write.
 
 The CSS106 write tests change and restore the device name, SNMP metadata, port

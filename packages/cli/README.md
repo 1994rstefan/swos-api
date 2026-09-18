@@ -62,15 +62,17 @@ values, and the `--clear-*-ports` flags for empty non-management masks. The
 command reads and passes a complete `SystemInfo` baseline before writing.
 
 `--readback-url` is an operation parameter for address-mode and management VLAN
-changes, not desired state. It accepts only a bare HTTP(S) device base URL with
-the configured scheme and effective port. CSS106 automatically derives a static
-target by replacing the current URL host with the desired static IP. DHCP target
-changes require an explicit URL unless an active DHCP lease is provably already
+changes, not desired state. Admin-MAC override changes automatically reconnect
+to the current URL because CSS106 reboots in both directions. The option accepts
+only a bare HTTP(S) device base URL with the configured scheme and effective port.
+CSS106 automatically derives a static target by replacing the current URL host
+with the desired static IP. DHCP target changes require an explicit URL unless
+an active DHCP lease is provably already
 the current URL; the client never guesses a lease. When DHCP fallback is active
 at its configured static address, changing that static IP also derives and
 reconnects to the new address. An explicit URL cannot override a deterministic
-static target. DHCP-only static-IP staging
-remains rejected. Every management allowed-port mask must include port 6, and no
+static target. DHCP-only static-IP staging remains rejected. Every management
+allowed-port mask must include port 6, and no
 system mask may change port 6's existing bit.
 Unspecified, loopback, multicast, reserved, and limited-broadcast static IPv4
 targets are rejected before connecting; private and link-local unicast targets

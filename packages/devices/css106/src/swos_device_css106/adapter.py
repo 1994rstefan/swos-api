@@ -102,7 +102,7 @@ from swos_device_css106.protocol import (
     vlans_from_payload,
 )
 
-MANAGEMENT_READBACK_ATTEMPTS = 12
+MANAGEMENT_READBACK_ATTEMPTS = 60
 MANAGEMENT_READBACK_DELAY_SECONDS = 1.0
 _HTTP_URL_ADAPTER = TypeAdapter(AnyHttpUrl)
 
@@ -1239,6 +1239,11 @@ def _management_readback_url(
     if management is None:
         raise InvalidOperationError("Current system management configuration is incomplete")
     desired_mode, desired_static_ip, desired_vlan = _desired_management_state(update, current)
+    desired_admin_mac = management.admin_mac_address
+    if update.admin_mac_address is not None:
+        desired_admin_mac = (
+            None if update.admin_mac_address == "unset" else update.admin_mac_address
+        )
     mode_changed = desired_mode is not management.address_mode
     static_ip_changed = desired_static_ip != current.static_ip
     current_uses_static_ip = management.address_mode is AddressMode.STATIC or (
@@ -1248,7 +1253,9 @@ def _management_readback_url(
     )
     active_static_ip_changed = static_ip_changed and current_uses_static_ip
     vlan_changed = desired_vlan != management.allowed_vlan_id
-    if not (mode_changed or active_static_ip_changed or vlan_changed):
+    admin_mac_changed = desired_admin_mac != management.admin_mac_address
+    management_path_changed = mode_changed or active_static_ip_changed or vlan_changed
+    if not (management_path_changed or admin_mac_changed):
         return None
     deterministic_static_target = desired_mode is AddressMode.STATIC or (
         active_static_ip_changed and desired_static_ip is not None
@@ -1264,7 +1271,7 @@ def _management_readback_url(
                 "readback_url must equal the deterministic URL derived from the desired static IP"
             )
         return derived_url
-    if explicit_url is not None:
+    if explicit_url is not None and management_path_changed:
         return explicit_url
     if active_static_ip_changed:
         raise InvalidOperationError(

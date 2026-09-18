@@ -28,7 +28,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         "--run-management-reconnect",
         action="store_true",
         default=False,
-        help="Allow destructive management address and VLAN reconnect tests.",
+        help="Allow destructive management lockout and reconnect tests.",
     )
 
 
